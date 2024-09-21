@@ -1,0 +1,293 @@
+openapi: 3.0.0
+info:
+  title: Sample API
+  version: '1.0'
+paths:
+  /users:
+    get:
+      summary: Get a list of users
+      responses:
+        '200':
+          description: A JSON array of user objects
+    post:
+      summary: Create a new user
+      responses:
+        '201':
+          description: User created successfully
+  /users/{id}:
+    get:
+      summary: Get a specific user by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: User ID
+      responses:
+        '200':
+          description: A user object
+    put:
+      summary: Update a specific user
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: User ID
+      responses:
+        '200':
+          description: User updated successfully
+    delete:
+      summary: Delete a specific user
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: User ID
+      responses:
+        '204':
+          description: User deleted successfully
+  /products:
+    get:
+      summary: Get a list of products
+      responses:
+        '200':
+          description: A JSON array of product objects
+    post:
+      summary: Create a new product
+      responses:
+        '201':
+          description: Product created successfully
+  /products/{id}:
+    get:
+      summary: Get a specific product by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Product ID
+      responses:
+        '200':
+          description: A product object
+    put:
+      summary: Update a specific product
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Product ID
+      responses:
+        '200':
+          description: Product updated successfully
+    delete:
+      summary: Delete a specific product
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Product ID
+      responses:
+        '204':
+          description: Product deleted successfully
+  /orders:
+    get:
+      summary: Get a list of orders
+      responses:
+        '200':
+          description: A JSON array of order objects
+    post:
+      summary: Create a new order
+      responses:
+        '201':
+          description: Order created successfully
+  /orders/{id}:
+    get:
+      summary: Get a specific order by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Order ID
+      responses:
+        '200':
+          description: An order object
+    put:
+      summary: Update a specific order
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Order ID
+      responses:
+        '200':
+          description: Order updated successfully
+    delete:
+      summary: Delete a specific order
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Order ID
+      responses:
+        '204':
+          description: Order deleted successfully
+  /categories:
+    get:
+      summary: Get a list of categories
+      responses:
+        '200':
+          description: A JSON array of category objects
+    post:
+      summary: Create a new category
+      responses:
+        '201':
+          description: Category created successfully
+  /categories/{id}:
+    get:
+      summary: Get a specific category by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Category ID
+      responses:
+        '200':
+          description: A category object
+    put:
+      summary: Update a specific category
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Category ID
+      responses:
+        '200':
+          description: Category updated successfully
+    delete:
+      summary: Delete a specific category
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Category ID
+      responses:
+        '204':
+          description: Category deleted successfully
+  /reviews:
+    get:
+      summary: Get a list of reviews
+      responses:
+        '200':
+          description: A JSON array of review objects
+    post:
+      summary: Create a new review
+      responses:
+        '201':
+          description: Review created successfully
+  /reviews/{id}:
+    get:
+      summary: Get a specific review by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Review ID
+      responses:
+        '200':
+          description: A review object
+    put:
+      summary: Update a specific review
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Review ID
+      responses:
+        '200':
+          description: Review updated successfully
+    delete:
+      summary: Delete a specific review
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Review ID
+      responses:
+        '204':
+          description: Review deleted successfully
+  /customers:
+    get:
+      summary: Get a list of customers
+      responses:
+        '200':
+          description: A JSON array of customer objects
+    post:
+      summary: Create a new customer
+      responses:
+        '201':
+          description: Customer created successfully
+  /customers/{id}:
+    get:
+      summary: Get a specific customer by ID
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Customer ID
+      responses:
+        '200':
+          description: A customer object
+    put:
+      summary: Update a specific customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Customer ID
+      responses:
+        '200':
+          description: Customer updated successfully
+    delete:
+      summary: Delete a specific customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Customer ID
+      responses:
+        '204':
+          description: Customer deleted successfully

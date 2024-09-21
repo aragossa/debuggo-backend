@@ -1,0 +1,142 @@
+[
+    {
+        "id": 1,
+        "name": "API TESTS",
+        "type": "root",
+        "children": [
+            {
+                "id": 2,
+                "name": "User API Tests",
+                "type": "group",
+                "children": [
+                    {
+                        "id": 3,
+                        "name": "GET /users - Retrieve all users",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/users",
+                        "expected_result": "Response code: 200; Response body: Array of User objects"
+                    },
+                    {
+                        "id": 4,
+                        "name": "POST /users - Create a new user",
+                        "type": "test",
+                        "curl": "curl -X POST https://api.sample.com/v1/users -H 'Content-Type: application/json' -d '{\"name\": \"John Doe\", \"email\": \"john@example.com\"}'",
+                        "expected_result": "Response code: 201; Response body: Newly created User object"
+                    },
+                    {
+                        "id": 5,
+                        "name": "GET /users/{userId} - Retrieve user by ID",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/users/{userId}",
+                        "expected_result": "Response code: 200; Response body: User object"
+                    },
+                    {
+                        "id": 6,
+                        "name": "GET /users/{userId} - User not found",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/users/invalidId",
+                        "expected_result": "Response code: 404; Response body: Error message"
+                    },
+                    {
+                        "id": 7,
+                        "name": "PUT /users/{userId} - Update user details",
+                        "type": "test",
+                        "curl": "curl -X PUT https://api.sample.com/v1/users/{userId} -H 'Content-Type: application/json' -d '{\"name\": \"Jane Doe\", \"email\": \"jane@example.com\"}'",
+                        "expected_result": "Response code: 200; Response body: Updated User object"
+                    },
+                    {
+                        "id": 8,
+                        "name": "DELETE /users/{userId} - Delete user",
+                        "type": "test",
+                        "curl": "curl -X DELETE https://api.sample.com/v1/users/{userId}",
+                        "expected_result": "Response code: 204; Response body: No content"
+                    }
+                ]
+            },
+            {
+                "id": 9,
+                "name": "Product API Tests",
+                "type": "group",
+                "children": [
+                    {
+                        "id": 10,
+                        "name": "GET /products - Retrieve all products",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/products",
+                        "expected_result": "Response code: 200; Response body: Array of Product objects"
+                    },
+                    {
+                        "id": 11,
+                        "name": "POST /products - Create a new product",
+                        "type": "test",
+                        "curl": "curl -X POST https://api.sample.com/v1/products -H 'Content-Type: application/json' -d '{\"name\": \"Sample Product\", \"price\": 29.99}'",
+                        "expected_result": "Response code: 201; Response body: Newly created Product object"
+                    },
+                    {
+                        "id": 12,
+                        "name": "GET /products/{productId} - Retrieve product by ID",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/products/{productId}",
+                        "expected_result": "Response code: 200; Response body: Product object"
+                    },
+                    {
+                        "id": 13,
+                        "name": "PUT /products/{productId} - Update product details",
+                        "type": "test",
+                        "curl": "curl -X PUT https://api.sample.com/v1/products/{productId} -H 'Content-Type: application/json' -d '{\"name\": \"Updated Product\", \"price\": 39.99}'",
+                        "expected_result": "Response code: 200; Response body: Updated Product object"
+                    },
+                    {
+                        "id": 14,
+                        "name": "DELETE /products/{productId} - Delete product",
+                        "type": "test",
+                        "curl": "curl -X DELETE https://api.sample.com/v1/products/{productId}",
+                        "expected_result": "Response code: 204; Response body: No content"
+                    }
+                ]
+            },
+            {
+                "id": 15,
+                "name": "Order API Tests",
+                "type": "group",
+                "children": [
+                    {
+                        "id": 16,
+                        "name": "GET /orders - Retrieve all orders",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/orders",
+                        "expected_result": "Response code: 200; Response body: Array of Order objects"
+                    },
+                    {
+                        "id": 17,
+                        "name": "POST /orders - Create a new order",
+                        "type": "test",
+                        "curl": "curl -X POST https://api.sample.com/v1/orders -H 'Content-Type: application/json' -d '{\"productId\": \"product123\", \"quantity\": 2, \"status\": \"pending\"}'",
+                        "expected_result": "Response code: 201; Response body: Newly created Order object"
+                    },
+                    {
+                        "id": 18,
+                        "name": "GET /orders/{orderId} - Retrieve order by ID",
+                        "type": "test",
+                        "curl": "curl -X GET https://api.sample.com/v1/orders/{orderId}",
+                        "expected_result": "Response code: 200; Response body: Order object"
+                    },
+                    {
+                        "id": 19,
+                        "name": "PUT /orders/{orderId} - Update order details",
+                        "type": "test",
+                        "curl": "curl -X PUT https://api.sample.com/v1/orders/{orderId} -H 'Content-Type: application/json' -d '{\"productId\": \"product123\", \"quantity\": 3, \"status\": \"shipped\"}'",
+                        "expected_result": "Response code: 200; Response body: Updated Order object"
+                    },
+                    {
+                        "id": 20,
+                        "name": "DELETE /orders/{orderId} - Delete order",
+                        "type": "test",
+                        "curl": "curl -X DELETE https://api.sample.com/v1/orders/{orderId}",
+                        "expected_result": "Response code: 204; Response body: No content"
+                    }
+                ]
+            }
+        ]
+    }
+]

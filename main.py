@@ -48,6 +48,8 @@ async def generate_test_cases(file: UploadFile = File(...)):
     print(file.filename)
     if 'json' in file.filename:
         result = get_test_cases_from_json(file_content)
+    elif 'yaml' in file.filename:
+        result = get_test_cases_from_json(file_content)
     elif 'png' in file.filename:
         result = get_test_cases_from_image(file_content, file)
 
