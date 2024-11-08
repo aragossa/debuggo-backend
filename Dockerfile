@@ -13,6 +13,7 @@ WORKDIR /app
 # Example: If you need build tools or other system packages, add them here
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 5. Upgrade pip
@@ -25,7 +26,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 8. Copy the rest of the application code
-COPY . .
+COPY database.sql .
+COPY fetch_test_steps.py .
+COPY geminiAPI.py .
+COPY image_testcases.py .
+COPY image_validator.py .
+COPY json_testcases.py .
+COPY main.py .
+COPY script_executor.py .
+COPY test_case_builder.py .
+COPY test_generate_code.py .
+COPY test_selenium.py .
+COPY clear_data.py .
 
 # 9. Expose the port the app runs on
 EXPOSE 8000

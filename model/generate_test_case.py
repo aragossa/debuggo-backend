@@ -13,7 +13,7 @@ def generate_test_cases(openapi_schema, max_length=512):
 
 import json
 
-with open('json/example1.json.json') as f:
+with open('json/example1.jsonjson') as f:
     new_schema = json.load(f)
 
 test_cases_json = generate_test_cases(new_schema)

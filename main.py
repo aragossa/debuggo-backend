@@ -1,15 +1,13 @@
-from http.client import responses
+
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 
-from starlette.responses import JSONResponse
-
+from clear_data import clear_all_data
 from fetch_test_steps import get_test_data_from_db
 from image_testcases import get_test_cases_from_image
-from image_validator import is_relevant_content
 from json_testcases import get_test_cases_from_json
 from script_executor import execute_test_case
 from test_case_builder import get_tests_tree
@@ -20,6 +18,9 @@ app = FastAPI()
 origins = [
     "http://localhost",  # Adjust this to match your frontend's origin
     "http://localhost:3000", # If you're using a different port
+    "http://18.194.44.160:3000", # If you're using a different port
+    "http://localhost:8080", # If you're using a different port
+    "http://18.184.65.241", # If you're using a different port
     # Add more origins as needed
 ]
 
@@ -83,6 +84,14 @@ async def run_test_case(id: int) -> JSONResponse:
     """
     result = execute_test_case(id)
     return JSONResponse(content=result)
+
+@app.get("/clear_all", response_model=Dict)
+async def clear_all() -> JSONResponse:
+    """
+    Endpoint to clear all test cases, test steps, test runs
+    """
+    clear_all_data()
+    return {"message": "All data cleared successfully"}
 
 
 if __name__ == "__main__":
