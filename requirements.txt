@@ -6,3 +6,5 @@ pillow==10.4.0
 google==3.0.0
 networkx==3.2.1
 python-multipart==0.0.10
+psycopg2-binary==2.9.7
+python-dotenv==1.0.0

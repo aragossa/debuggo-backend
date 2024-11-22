@@ -1,16 +1,19 @@
-import sqlite3
 import google.generativeai as genai
 from PIL import Image
 import google
 import json
 from io import BytesIO
 
+from Utils.DbConnector import DbConnector
+
+
 def check_test_case_exists(name, description):
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id FROM test_cases
-        WHERE name = ? AND description = ?
+        WHERE name = %s AND description = %s
     ''', (name, description))
     result = cursor.fetchone()
     conn.close()
@@ -18,14 +21,15 @@ def check_test_case_exists(name, description):
 
 # Function to get the maximum test_case_id from the database
 def get_max_test_case_id():
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT MAX(test_case_id) FROM test_cases
     ''')
     result = cursor.fetchone()[0]
     conn.close()
-    return result if result else 0  # Return 0 if no test_case_id exists
+    return result if result else 1  # Return 0 if no test_case_id exists
 
 def get_test_cases_from_image(file_content, file):
     GOOGLE_API_KEY = 'AIzaSyDnnYkKQyBGVM1kE2FitVNGav7aZVeMRDU'  # Replace with your actual API key
@@ -145,35 +149,45 @@ def get_test_cases_from_image(file_content, file):
         return False
 
 def insert_test_case(name, description, parent_id, type_, order_, test_case_id=None, python_script=None):
+    # Set parent_id to None if it is 0 (indicating no parent)
+    if parent_id == 0:
+        parent_id = None
+
+    # Check if the test case already exists
     if check_test_case_exists(name, description):
         print(f"Test case '{name}' already exists. Skipping insertion.")
         return None
 
-    # Connect to the SQLite3 database (create if doesn't exist)
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     print('inserting test case')
+    # Insert the test case and return the ID of the inserted row
     cursor.execute('''
         INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id, python_script)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
     ''', (name, description, parent_id, type_, order_, test_case_id, python_script))
 
+    # Fetch the ID of the inserted row
+    last_row_id = cursor.fetchone()[0]
+
     conn.commit()
-    last_row_id = cursor.lastrowid  # Get the ID of the inserted test case
     conn.close()
 
     return last_row_id
 
+
+
 def insert_test_step(test_case_id, step_order, description, expected_result):
-    # Connect to the SQLite3 database
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Insert the test step
     cursor.execute('''
         INSERT INTO test_steps (test_case_id, step_order, description, expected_result)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
     ''', (test_case_id, step_order, description, expected_result))
 
     conn.commit()

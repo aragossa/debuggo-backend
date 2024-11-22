@@ -1,12 +1,16 @@
-def save_test_run_result(test_case_id, result, exception="", duration=None, stdout="", stderr="", additional_info=""):
-    import sqlite3
+from Utils.DbConnector import DbConnector
 
-    conn = sqlite3.connect('database.sqlite')
+
+def save_test_run_result(test_case_id, result, exception="", duration=None, stdout="", stderr="", additional_info=""):
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
+
     cursor.execute('''
         INSERT INTO test_runs (test_case_id, result, exception, duration, stdout, stderr, additional_info)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
     ''', (test_case_id, result, exception, duration, stdout, stderr, additional_info))
+
     conn.commit()
     conn.close()
 
@@ -14,7 +18,6 @@ def save_test_run_result(test_case_id, result, exception="", duration=None, stdo
 
 
 def execute_test_case(test_case_id):
-    import sqlite3
     import subprocess
     import time
     import io
@@ -22,13 +25,13 @@ def execute_test_case(test_case_id):
 
     start_time = time.time()
 
-    # Connect to the SQLite database
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Retrieve the python_script and curl command from the test_cases table where id = test_case_id
     cursor.execute('''
-        SELECT python_script, curl FROM test_cases WHERE id = ?
+        SELECT python_script, curl FROM test_cases WHERE id = %s
     ''', (test_case_id,))
     result = cursor.fetchone()
 

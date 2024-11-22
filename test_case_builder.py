@@ -1,5 +1,7 @@
-import sqlite3
 import json
+
+from Utils.DbConnector import DbConnector
+
 
 # Function to recursively build tree structure from flat data
 def build_tree(nodes, parent_id=None):
@@ -17,7 +19,8 @@ def build_tree(nodes, parent_id=None):
 # Connect to the SQLite database
 def fetch_tree_data():
     # Establish connection to the SQLite database
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Execute the recursive query

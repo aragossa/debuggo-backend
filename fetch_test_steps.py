@@ -1,13 +1,16 @@
+from Utils.DbConnector import DbConnector
+
+
 def get_test_data_from_db(test_case_id: int):
-    import sqlite3
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Query to get the test steps for the given test_case_id
     cursor.execute('''
         SELECT id, step_order, description, expected_result
         FROM test_steps
-        WHERE test_case_id = ?
+        WHERE test_case_id = %s
         ORDER BY step_order ASC
     ''', (test_case_id,))
 
@@ -29,7 +32,7 @@ def get_test_data_from_db(test_case_id: int):
     cursor.execute('''
         SELECT id, run_date, result, exception, duration, stdout, stderr, additional_info
         FROM test_runs
-        WHERE test_case_id = ?
+        WHERE test_case_id = %s
         ORDER BY run_date DESC
     ''', (test_case_id,))
 

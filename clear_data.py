@@ -1,8 +1,10 @@
-import sqlite3
+from Utils.DbConnector import DbConnector
+
 
 def clear_all_data():
     # Establish connection to the SQLite database
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Execute the recursive query

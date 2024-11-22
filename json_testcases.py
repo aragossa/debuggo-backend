@@ -1,15 +1,18 @@
-import sqlite3
 import google.generativeai as genai
 import google
 import json
 
+from Utils.DbConnector import DbConnector
+
+
 # Function to check if a test case already exists
 def check_test_case_exists(name, description):
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT id FROM test_cases
-        WHERE name = ? AND description = ?
+        WHERE name = %s AND description = %s
     ''', (name, description))
     result = cursor.fetchone()
     conn.close()
@@ -17,7 +20,8 @@ def check_test_case_exists(name, description):
 
 # Function to get the maximum test_case_id from the database
 def get_max_test_case_id():
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT MAX(test_case_id) FROM test_cases
@@ -94,8 +98,8 @@ def insert_test_case(name, description, parent_id, type_, order_, curl=None, tes
         print(f"Test case '{name}' already exists. Skipping insertion.")
         return None
 
-    # Connect to the SQLite3 database (create if doesn't exist)
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     if test_case_id is None and type_ == 'test':
@@ -106,7 +110,7 @@ def insert_test_case(name, description, parent_id, type_, order_, curl=None, tes
     print('inserting test case')
     cursor.execute('''
         INSERT INTO test_cases (name, description, parent_id, type, "order", curl, test_case_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
     ''', (name, description, parent_id, type_, order_, curl, test_case_id))
 
     conn.commit()
@@ -116,14 +120,14 @@ def insert_test_case(name, description, parent_id, type_, order_, curl=None, tes
     return last_row_id
 
 def insert_test_step(test_case_id, step_order, description, expected_result):
-    # Connect to the SQLite3 database
-    conn = sqlite3.connect('database.sqlite')
+    db = DbConnector()
+    conn = db.get_connection()
     cursor = conn.cursor()
 
     # Insert the test step
     cursor.execute('''
         INSERT INTO test_steps (test_case_id, step_order, description, expected_result)
-        VALUES (?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s)
     ''', (test_case_id, step_order, description, expected_result))
 
     conn.commit()
