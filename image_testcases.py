@@ -128,7 +128,7 @@ def get_test_cases_from_image(file_content, file):
         f"{json_structure}"
     )
 
-    model = genai.GenerativeModel("gemini-1.5-flash-001")
+    model = genai.GenerativeModel("gemini-2.0-flash-exp")
     for i in range(5):
         try:
             response = model.generate_content([text_prompt, image])

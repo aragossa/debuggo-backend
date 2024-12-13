@@ -44,7 +44,7 @@ def get_test_data_from_db(test_case_id: int):
     for row in runs_rows:
         test_run = {
             "id": row[0],
-            "run_date": row[1],
+            "run_date": row[1].isoformat(),
             "result": row[2],
             "exception": row[3],
             "duration": row[4],

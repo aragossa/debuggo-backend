@@ -21,6 +21,7 @@ origins = [
     "http://18.194.44.160:3000", # If you're using a different port
     "http://localhost:8080", # If you're using a different port
     "http://18.184.65.241", # If you're using a different port
+    "http://auroqa.com", # If you're using a different port
     # Add more origins as needed
 ]
 
@@ -39,7 +40,7 @@ app.add_middleware(
 
 
 
-@app.post("/generate_test_cases_from_data")
+@app.post("/api/generate_test_cases_from_data")
 async def generate_test_cases(file: UploadFile = File(...)):
     # Process the uploaded file (e.g., save it, analyze it)
     file_content = await file.read()
@@ -56,7 +57,7 @@ async def generate_test_cases(file: UploadFile = File(...)):
 
     return JSONResponse(content=result)
 
-@app.get("/get_tree", response_model=Dict)
+@app.get("/api/get_tree", response_model=Dict)
 async def get_tree() -> JSONResponse:
     """
     Endpoint to get the test tree structure.
@@ -65,7 +66,7 @@ async def get_tree() -> JSONResponse:
     return JSONResponse(content=tree_data)
 
 
-@app.get("/get_test_cases/{id}", response_model=List[Dict])
+@app.get("/api/get_test_cases/{id}", response_model=List[Dict])
 async def get_test_cases(id: int) -> JSONResponse:
     """
     Endpoint to get the list of test cases.
@@ -77,7 +78,7 @@ async def get_test_cases(id: int) -> JSONResponse:
     return JSONResponse(content=test_steps)
 
 
-@app.post("/run_test_case/{id}", response_model=Dict)
+@app.post("/api/run_test_case/{id}", response_model=Dict)
 async def run_test_case(id: int) -> JSONResponse:
     """
     Endpoint to run test script.
@@ -85,7 +86,7 @@ async def run_test_case(id: int) -> JSONResponse:
     result = execute_test_case(id)
     return JSONResponse(content=result)
 
-@app.get("/clear_all", response_model=Dict)
+@app.get("/api/clear_all", response_model=Dict)
 async def clear_all() -> JSONResponse:
     """
     Endpoint to clear all test cases, test steps, test runs

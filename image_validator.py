@@ -8,7 +8,7 @@ def is_relevant_content():
 
     genai.configure(api_key=GOOGLE_API_KEY)
     # Load your image
-    image = Image.open('test_screenshot_1.png')
+    image = Image.open('model/data/login_page.png')
 
     text_prompt = ("""
                     Act as QA engineer. Visit website https://qa-lucy.thrivedx.io/admin/login and compare it with attached image
@@ -27,7 +27,7 @@ def is_relevant_content():
                     }
                     """)
 
-    model = genai.GenerativeModel("gemini-1.5-flash-001")
+    model = genai.GenerativeModel("gemini-2.0-flash-exp")
     for i in range(5):
         try:
             response = model.generate_content([text_prompt, image])

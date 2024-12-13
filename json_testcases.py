@@ -73,7 +73,7 @@ def get_test_cases_from_json(text_content):
         f"{json_structure}"
     )
 
-    model = genai.GenerativeModel("gemini-1.5-flash-001")
+    model = genai.GenerativeModel("gemini-2.0-flash-exp")
     for i in range(5):
         try:
             response = model.generate_content([text_prompt])
@@ -94,6 +94,10 @@ def get_test_cases_from_json(text_content):
         return False
 
 def insert_test_case(name, description, parent_id, type_, order_, curl=None, test_case_id=None):
+    # Skip inserting a case with parent_id of 0
+    if parent_id == 0:
+        parent_id = None
+
     if check_test_case_exists(name, description):
         print(f"Test case '{name}' already exists. Skipping insertion.")
         return None
@@ -111,10 +115,12 @@ def insert_test_case(name, description, parent_id, type_, order_, curl=None, tes
     cursor.execute('''
         INSERT INTO test_cases (name, description, parent_id, type, "order", curl, test_case_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id 
     ''', (name, description, parent_id, type_, order_, curl, test_case_id))
 
+    last_row_id = cursor.fetchone()[0]
+    print(last_row_id)
     conn.commit()
-    last_row_id = cursor.lastrowid  # Get the ID of the inserted test case
     conn.close()
 
     return last_row_id
@@ -136,7 +142,9 @@ def insert_test_step(test_case_id, step_order, description, expected_result):
 
 def save_test_cases(test_cases, parent_id=None, type_='root'):
     order_ = 1
+    print(test_cases)
     for case in test_cases:
+        print(case)
         # Extract fields from the case
         name = case.get('name', '')
         description = case.get('description', '')
@@ -146,17 +154,16 @@ def save_test_cases(test_cases, parent_id=None, type_='root'):
 
         # For 'test' type, assign test_case_id
         if elem_type == 'test':
-            # Increment the test_case_id
             max_test_case_id = get_max_test_case_id()
             test_case_id = max_test_case_id + 1
         else:
             test_case_id = None
 
-        print('saving test case')
+        # Insert the test case and get the inserted ID
         current_id = insert_test_case(
             name=name,
             description=description,
-            parent_id=parent_id,
+            parent_id=None if type_ == 'root' else parent_id,
             type_=elem_type,
             order_=order_,
             curl=curl,
@@ -164,7 +171,7 @@ def save_test_cases(test_cases, parent_id=None, type_='root'):
         )
 
         # If the type is 'test', save the test step
-        if elem_type == 'test':
+        if elem_type == 'test' and current_id:
             step_order = 1
             insert_test_step(
                 test_case_id=current_id,
@@ -176,6 +183,8 @@ def save_test_cases(test_cases, parent_id=None, type_='root'):
         order_ += 1
 
         # If there are children, recursively insert them
-        if 'children' in case:
+        if 'children' in case and current_id:
             next_type = 'child' if type_ == 'root' else ('grandchild' if type_ == 'child' else 'step')
             save_test_cases(case['children'], current_id, next_type)
+
+

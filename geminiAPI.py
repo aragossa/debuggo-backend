@@ -18,7 +18,7 @@ class GeminiAPI():
 
 
 
-        model = genai.GenerativeModel("gemini-1.5-flash-001")
+        model = genai.GenerativeModel("gemini-2.0-flash-exp")
 
         response = model.generate_content(text_prompt)
 
