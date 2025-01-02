@@ -1,0 +1,44 @@
+services:
+  auroqa:
+    image: localhost/auroqa
+    container_name: auroqa
+    environment:
+      - ENV_FILE_PATH=/app/.env
+    expose:
+      - 8000
+    networks:
+      - auroqa_network
+
+  auroqa-ui:
+    image: localhost/testing-platform-ui
+    container_name: auroqa-ui
+    expose:
+      - 80
+    networks:
+      - auroqa_network
+
+  nginx:
+    container_name: nginx
+    restart: unless-stopped
+    image: nginx
+    ports:
+        - 80:80
+        - 443:443
+    volumes:
+        - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+        - ./certbot/conf:/etc/letsencrypt
+        - ./certbot/www:/var/www/certbot
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    command: certonly --webroot -w /var/www/certbot --force-renewal --email ilya.ploskovitov@gmail.com -d auroqa.com --agree-tos
+    networks:
+      - auroqa_network
+
+networks:
+  auroqa_network:
+    driver: bridge
