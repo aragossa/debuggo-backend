@@ -99,7 +99,7 @@ def encode_image(image_path):
         raise Exception(f"Error encoding image: {str(e)}")
 
 
-def send_message_with_image(api_key, image_path, prompt, model="claude-3-opus-20240229"):
+def send_message_with_image_claude(api_key, image_path, prompt, model="claude-3-opus-20240229"):
     """
     Send a message with an image to Claude API with improved error handling.
     """
@@ -190,7 +190,7 @@ def main():
     )
 
     try:
-        response = send_message_with_image(api_key, image_path, prompt)
+        response = send_message_with_image_claude(api_key, image_path, prompt)
 
         if response:
             try:

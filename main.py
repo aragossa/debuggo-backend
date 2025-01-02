@@ -5,9 +5,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 
-from clear_data import clear_all_data
+from Utils.clear_data import clear_all_data
 from fetch_test_steps import get_test_data_from_db
-from image_testcases import get_test_cases_from_image
+from image_testcases_claude import get_test_cases_from_image
 from json_testcases import get_test_cases_from_json
 from script_executor import execute_test_case
 from test_case_builder import get_tests_tree

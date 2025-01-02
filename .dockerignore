@@ -32,7 +32,6 @@ docker-build.sh
 docker-postgres.sh
 docker-run.sh
 Dockerfile
-Login form.png
 swagger.json
 model/data/login_page.png
 model/data/dashboard_page.png
@@ -40,3 +39,4 @@ testing-platform.iml
 llm_env
 model
 tests
+/archive/
