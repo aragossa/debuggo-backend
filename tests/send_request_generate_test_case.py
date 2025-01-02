@@ -3,7 +3,7 @@ import requests
 url = "http://127.0.0.1:9000/api/generate_test_cases_from_data"
 
 # Replace 'your_file_path' with the actual path to the file you want to send.
-file_path = "../login_page.png" # Example: 'test_file.json', 'test_file.yaml', 'test_file.png'
+file_path = "../swagger.json" # Example: 'test_file.json', 'test_file.yaml', 'test_file.png'
 
 
 def send_request():

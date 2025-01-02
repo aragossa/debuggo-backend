@@ -1,9 +1,6 @@
-import google.generativeai as genai
-import google
+import requests
 import json
-
 from Utils.DbConnector import DbConnector
-
 
 # Function to check if a test case already exists
 def check_test_case_exists(name, description):
@@ -30,10 +27,63 @@ def get_max_test_case_id():
     conn.close()
     return result if result else 0  # Return 0 if no test_case_id exists
 
-def get_test_cases_from_json(text_content):
-    GOOGLE_API_KEY = 'AIzaSyDnnYkKQyBGVM1kE2FitVNGav7aZVeMRDU'
+def send_message_to_claude(api_key, prompt):
+    """Send a message to Claude API."""
+    if not api_key:
+        raise ValueError("API key is required")
 
-    genai.configure(api_key=GOOGLE_API_KEY)
+    if not api_key.startswith('sk-'):
+        raise ValueError(f"Invalid API key format. Key should start with 'sk-'")
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    payload = {
+        "model": "claude-3-opus-20240229",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=180
+        )
+
+        if response.status_code != 200:
+            error_msg = f"API Error (Status {response.status_code}): {response.text}"
+            print(error_msg)
+            return {"error": error_msg}
+
+        response_data = response.json()
+        print(response.json)
+        if "content" in response_data:
+            return response_data
+        else:
+            return {"error": "Unexpected response format from Claude API"}
+
+    except requests.Timeout:
+        error_msg = "Request timed out. Please try again."
+        print(error_msg)
+        return {"error": error_msg}
+    except Exception as e:
+        error_msg = f"Error making request: {str(e)}"
+        print(error_msg)
+        if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            print(f"Error details: {e.response.text}")
+        return {"error": error_msg}
+
+def get_test_cases_from_json(text_content):
     json_structure = """
     [
         {
@@ -67,31 +117,57 @@ def get_test_cases_from_json(text_content):
     """
 
     text_prompt = (
-        f"Act as QA engineer. Analyze attached swagger export file and generate as much as possible test cases for this API:\n"
-        f"{text_content}\n"
-        "I need response only in json format don't give me any other info:\n"
-        f"{json_structure}"
+        f"Act as QA engineer. Analyze attached swagger export file and generate as much as possible test cases for this API.\n"
+        f"The response must be a valid JSON array following this exact structure, with NO additional text or explanation:\n"
+        f"{json_structure}\n\n"
+        f"Here is the schema file to analyze:\n{text_content}"
     )
 
-    model = genai.GenerativeModel("gemini-2.0-flash-exp")
-    for i in range(5):
+    api_key = "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"
+    
+    for i in range(5):  # Retry up to 5 times
         try:
-            response = model.generate_content([text_prompt])
-            break
-        except google.api_core.exceptions.InternalServerError:
+            response = send_message_to_claude(api_key, text_prompt)
+            if "error" not in response:
+                # Extract the content from Claude's response
+                content = response["content"][0]["text"]
+                
+                # Try to find the JSON array by looking for the first '[' and last ']'
+                try:
+                    start_idx = content.find('[')
+                    end_idx = content.rfind(']')
+                    
+                    if start_idx != -1 and end_idx != -1:
+                        json_content = content[start_idx:end_idx + 1]
+                        response_json = json.loads(json_content)
+                        
+                        if isinstance(response_json, list):
+                            print('saving data')
+                            save_test_cases(response_json)
+                            return True
+                        else:
+                            print("Response is not a JSON array")
+                            continue
+                    else:
+                        print("Could not find JSON array markers in response")
+                        print(f"Content: {content}")
+                        continue
+                        
+                except json.JSONDecodeError as je:
+                    print(f"JSON parsing error: {je}")
+                    print(f"Content: {content}")
+                    continue
+            else:
+                print(f"API error: {response.get('error')}")
+                if i == 4:  # Last attempt
+                    return False
+                continue
+        except Exception as e:
+            print(f"Unexpected error: {str(e)}")
+            if i == 4:  # Last attempt
+                return False
             continue
-        except google.api_core.exceptions.DeadlineExceeded:
-            continue
-    try:
-        valid_json = response.text.replace("`", "").replace("json", "")
-        response_json = json.loads(valid_json)
-        # Save the test cases
-        print('saving data')
-        save_test_cases(response_json)
-    except ValueError as e:
-        print(response.text)
-        print(e)
-        return False
+    return False
 
 def insert_test_case(name, description, parent_id, type_, order_, curl=None, test_case_id=None):
     # Skip inserting a case with parent_id of 0
@@ -186,5 +262,3 @@ def save_test_cases(test_cases, parent_id=None, type_='root'):
         if 'children' in case and current_id:
             next_type = 'child' if type_ == 'root' else ('grandchild' if type_ == 'child' else 'step')
             save_test_cases(case['children'], current_id, next_type)
-
-
