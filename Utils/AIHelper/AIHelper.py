@@ -4,11 +4,13 @@ import json
 import logging
 from typing import Literal, Dict, Any
 
+import requests
+
 from Utils.System import System
 
 
 class AIHelper:
-    def __init__(self, provider: Literal["ChatGPT", "Gemini", "Claude"] = "ChatGPT", gemini_api_key: str = None):
+    def __init__(self, provider: Literal["chatgpt", "gemini", "claude"] = "gemini"):
         """
         Initialize the AIHelper with a specified AI provider and optional Gemini API key.
 
@@ -17,10 +19,12 @@ class AIHelper:
             gemini_api_key (str): The API key for Gemini (if applicable).
         """
         system = System()
-        self.provider = provider
+        self.provider = provider.lower()
         self.gemini_api_key = system.gemini_api_key
+        self.claude_api_key = system.claude_api_key
         self.logger = self._setup_logger()
         self.logger.info(f"Initialized AIHelper with provider: {self.provider}")
+
 
     def _setup_logger(self):
         """
@@ -40,99 +44,94 @@ class AIHelper:
 
         return logger
 
-    def switch_provider(self, provider: Literal["ChatGPT", "Gemini", "Claude"]):
+    def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude"]):
         """
         Switch the AI provider.
 
         Args:
             provider (str): The new AI provider to use ("ChatGPT", "Gemini", "Claude").
         """
-        self.provider = provider
+        self.provider = provider.lower()
         self.logger.info(f"Switched AI provider to: {self.provider}")
 
-    def html_analyzer(self, html_code: str, element_purpose: str) -> Dict[str, Any]:
-        """
-        Analyze HTML code and generate an element locator based on its purpose.
 
-        Args:
-            html_code (str): The HTML code to analyze.
-            element_purpose (str): The purpose of the element to locate (e.g., "Submit button", "Search bar").
-
-        Returns:
-            Dict[str, Any]: A dictionary containing the element locator and any relevant metadata.
-        """
-        self.logger.info("Sending request to AI provider for HTML analysis.")
-
-        # Placeholder logic to mimic AI provider interaction
-        if self.provider == "ChatGPT":
-            response = self._mock_response("ChatGPT", html_code, element_purpose)
-        elif self.provider == "Gemini":
-            response = self.send_request_to_gemini(html_code, element_purpose)
-        elif self.provider == "Claude":
-            response = self._mock_response("Claude", html_code, element_purpose)
-        else:
-            raise ValueError(f"Unsupported AI provider: {self.provider}")
-
-        self.logger.info(f"Received response from {self.provider}: {response}")
-        return response
-
-    def send_request_to_gemini(self, html_code: str, element_purpose: str) -> Dict[str, Any]:
-        """
-        Send a request to Gemini API for analyzing HTML code.
-
-        Args:
-            html_code (str): The HTML code to analyze.
-            element_purpose (str): The purpose of the element to locate (e.g., "Submit button").
-
-        Returns:
-            Dict[str, Any]: The response from Gemini API containing element locator details.
-        """
+    def send_request_to_gemini(self, promt: str) -> Dict[str, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
 
-        response_format = """
-        {
-          "element_locator": "xpath or css locator",
-          "by_strategy": "css or xpath",
-          "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key"
-        }
-        """
-
-        text_prompt = (
-            f"Act as an experienced QA engineer. Analyze the provided HTML code of a web page to identify an element responsible for: {element_purpose}.\n\n"
-            f"HTML Code:\n{html_code}\n\n"
-            "Provide your response **only** in JSON format without any additional explanation. Follow this format strictly:\n"
-            f"{response_format}"
-        )
 
         model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        genai.configure(api_key=self.gemini_api_key)
         for i in range(5):
             try:
-                response = model.generate_content([text_prompt])
+                response = model.generate_content([promt])
                 break
             except google.api_core.exceptions.InternalServerError:
                 continue
             except google.api_core.exceptions.DeadlineExceeded:
                 continue
+
+            finally:
+                raise UserWarning("Unable to connect to Gemini right now")
         try:
             valid_json = response.text.replace("`", "").replace("json", "")
             response_json = json.loads(valid_json)
-            print(response_json)
+            return response_json
 
         except ValueError as e:
             return False
 
-if __name__ == "__main__":
-    # Initialize AIHelper with the default provider
-    ai_helper = AIHelper(provider="ChatGPT")
+    def send_message_to_claude(self, prompt):
+        """Send a message to Claude API."""
+        if not self.claude_api_key:
+            raise ValueError("API key is required")
 
-    # Switch provider if needed
-    ai_helper.switch_provider("Claude")
+        if not self.claude_api_key.startswith('sk-'):
+            raise ValueError(f"Invalid API key format. Key should start with 'sk-'")
 
-    # Analyze HTML
-    html_code = "<button data-purpose='submit_button'>Submit</button>"
-    element_purpose = "Submit button"
-    response = ai_helper.html_analyzer(html_code, element_purpose)
+        headers = {
+            "x-api-key": self.claude_api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
 
-    # Output the result
-    print("AI Analysis Result:", response)
+        payload = {
+            "model": "claude-3-opus-20240229",
+            "max_tokens": 4096,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        }
+
+        try:
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+                timeout=180
+            )
+
+            if response.status_code != 200:
+                error_msg = f"API Error (Status {response.status_code}): {response.text}"
+                self.logger.error(error_msg)
+                return {"error": error_msg}
+
+            response_data = response.json()
+            if "content" in response_data:
+                return response_data
+            else:
+                return {"error": "Unexpected response format from Claude API"}
+
+        except requests.Timeout:
+            error_msg = "Request timed out. Please try again."
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+        except Exception as e:
+            error_msg = f"Error making request: {str(e)}"
+            self.logger.error(error_msg)
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                print(f"Error details: {e.response.text}")
+            return {"error": error_msg}

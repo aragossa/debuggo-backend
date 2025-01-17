@@ -27,7 +27,7 @@ class System:
         self.db_password = os.getenv('DB_PASSWORD', 'postgres')
         
         # AI model configuration
-        self.ai_model = os.getenv('AI_MODEL', 'gemini') 
+        self.ai_model = os.getenv('AI_MODEL', 'gemini').lower()
         self.gemini_api_key = os.getenv('GEMINI_API')
         self.claude_api_key = os.getenv('CLAUDE_API')
         
