@@ -10,20 +10,15 @@ from Utils.System import System
 
 
 class AIHelper:
-    def __init__(self, provider: Literal["chatgpt", "gemini", "claude"] = "gemini"):
-        """
-        Initialize the AIHelper with a specified AI provider and optional Gemini API key.
+    def __init__(self):
 
-        Args:
-            provider (str): The AI provider to use ("ChatGPT", "Gemini", "Claude").
-            gemini_api_key (str): The API key for Gemini (if applicable).
-        """
         system = System()
-        self.provider = provider.lower()
+        self.provider = system.ai_model.lower()
         self.gemini_api_key = system.gemini_api_key
         self.claude_api_key = system.claude_api_key
         self.logger = self._setup_logger()
         self.logger.info(f"Initialized AIHelper with provider: {self.provider}")
+        self.db_connection = System.get_db_connection()
 
 
     def _setup_logger(self):
@@ -43,6 +38,24 @@ class AIHelper:
         logger.addHandler(handler)
 
         return logger
+
+    def get_analyze_html_promt(self, html_code: str, element_purpose: str):
+        response_format = """
+        {
+          "element_locator": "xpath or css locator",
+          "by_strategy": "css or xpath",
+          "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key"
+        }
+        """
+
+        text_prompt = (
+            f"Act as an experienced QA engineer. Analyze the provided HTML code of a web page to identify an element responsible for: {element_purpose}.\n\n"
+            f"HTML Code:\n{html_code}\n\n"
+            "Provide your response **only** in JSON format without any additional explanation. Follow this format strictly:\n"
+            f"{response_format}"
+        )
+        return text_prompt
+
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude"]):
         """
@@ -65,14 +78,16 @@ class AIHelper:
         for i in range(5):
             try:
                 response = model.generate_content([promt])
+                self.logger.info(response)
                 break
-            except google.api_core.exceptions.InternalServerError:
+            except google.api_core.exceptions.InternalServerError as e:
+                self.logger.info(e)
                 continue
-            except google.api_core.exceptions.DeadlineExceeded:
+            except google.api_core.exceptions.DeadlineExceeded as e:
+                self.logger.info(e)
                 continue
 
-            finally:
-                raise UserWarning("Unable to connect to Gemini right now")
+
         try:
             valid_json = response.text.replace("`", "").replace("json", "")
             response_json = json.loads(valid_json)
