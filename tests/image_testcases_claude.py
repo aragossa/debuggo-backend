@@ -23,7 +23,6 @@ JSON_STRUCTURE = """
                         "description": "Test description",
                         "expected_result": "Test expected result",
                         "type": "test",
-                        "python_script": "python script with assertions",
                         "steps": [
                             {
                                 "description": "Test step 1 description",
@@ -41,7 +40,6 @@ JSON_STRUCTURE = """
                         "description": "Test description",
                         "expected_result": "Test expected result",
                         "type": "test",
-                        "python_script": "python script with assertions",
                         "steps": [
                             {
                                 "description": "Test step 1 description",
@@ -66,7 +64,6 @@ JSON_STRUCTURE = """
                         "description": "Test description",
                         "expected_result": "Test expected result",
                         "type": "test",
-                        "python_script": "python script with assertions",
                         "steps": [
                             {
                                 "description": "Test step 1 description",

@@ -3,10 +3,10 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 
+from Utils.AIHelper.ImageAnalyzer import ImageAnalyzer
+from Utils.AIHelper.TextAnalyzer import TextAnalyzer
 from Utils.clear_data import clear_all_data
 from fetch_test_steps import get_test_data_from_db
-from image_testcases import get_test_cases_from_image
-from json_testcases import get_test_cases_from_json
 from script_executor import execute_test_case
 from test_case_builder import get_tests_tree
 
@@ -42,16 +42,16 @@ app.add_middleware(
 async def generate_test_cases(file: UploadFile = File(...)):
     # Process the uploaded file
     file_content = await file.read()
-
-    # Replace this with your actual logic to generate test cases
     result = {"message": f"Received file: {file.filename}, Content: {file_content}"}
-    print(file.filename)
     if 'json' in file.filename:
-        result = get_test_cases_from_json(file_content)
+        text_analyzer = TextAnalyzer()
+        result = text_analyzer.analyze_txt(file_content)
     elif 'yaml' in file.filename:
-        result = get_test_cases_from_json(file_content)
+        text_analyzer = TextAnalyzer()
+        result = text_analyzer.analyze_txt(file_content)
     elif 'png' in file.filename:
-        result = get_test_cases_from_image(file_content, file)
+        image_analyzer = ImageAnalyzer()
+        result = image_analyzer.analyze_img(file_content, file)
 
     return JSONResponse(content=result)
 

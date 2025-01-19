@@ -89,8 +89,7 @@ def send_message_to_claude(prompt):
 
 def get_test_cases_from_json_claude(text_content):
     # Create a properly escaped example for the model
-    example_python_script = '''import requests\\nimport json\\n\\ntry:\\n    url = \\'https://petstore.swagger.io/v2/pet\\'\\n    headers = {\\n        \\'Content-Type\\': \\'application/json\\',\\n        \\'accept\\': \\'application/json\\'\\n    }\\n    data = {\\n        "id": 0,\\n        "category": {"id": 0, "name": "string"},\\n        "name": "doggie",\\n        "photoUrls": ["string"],\\n        "tags": [{"id": 0, "name": "string"}],\\n        "status": "available"\\n    }\\n    \\n    print(f"Making POST request to {url}")\\n    print(f"Headers: {json.dumps(headers, indent=2)}")\\n    print(f"Data: {json.dumps(data, indent=2)}")\\n    \\n    response = requests.post(url, headers=headers, json=data)\\n    \\n    print(f"Response status code: {response.status_code}")\\n    print(f"Response headers: {json.dumps(dict(response.headers), indent=2)}")\\n    print(f"Response body: {json.dumps(response.json(), indent=2) if response.text else \\'\\')\\n    \\n    if response.status_code == 200:\\n        print("Test passed!")\\n    else:\\n        raise Exception(f"Expected status code 200, got {response.status_code}")\\nexcept Exception as e:\\n    print(f"Error: {str(e)}")\\n    raise'''
-    
+
     json_structure = f"""{{
         "name": "API TESTS",
         "type": "root",
@@ -103,7 +102,6 @@ def get_test_cases_from_json_claude(text_content):
                         "name": "Test POST /pet",
                         "description": "Add a new pet to the store",
                         "type": "test",
-                        "python_script": "{example_python_script}",
                         "expected_result": "200 OK - Pet created successfully"
                     }}
                 ]
@@ -115,10 +113,6 @@ def get_test_cases_from_json_claude(text_content):
                  f"The response must be a valid JSON object following this exact structure, with NO additional text or explanation:\n" \
                  f"{json_structure}\n\n" \
                  f"Important guidelines for generating test cases:\n" \
-                 f"1. All Python scripts must be properly escaped in the JSON response\n" \
-                 f"2. Use double backslashes for newlines (\\\\n) in Python scripts\n" \
-                 f"3. Use single quotes with backslash escaping (\\')\n" \
-                 f"4. The response must be valid JSON that can be parsed by json.loads()\n" \
                  f"5. Follow the exact structure of the example\n\n" \
                  f"Here is the schema file to analyze:\n{text_content}"
 
@@ -264,7 +258,7 @@ def clean_json_response(response_text):
                     response_text, 0
                 )
 
-def insert_test_case(name, description, parent_id, type_, order_, python_script=None, test_case_id=None):
+def insert_test_case(name, description, parent_id, type_, order_, test_case_id=None):
     # Skip inserting a case with parent_id of 0
     if parent_id == 0:
         parent_id = None
@@ -275,7 +269,7 @@ def insert_test_case(name, description, parent_id, type_, order_, python_script=
 
     # Insert the test case
     cursor.execute('''
-        INSERT INTO test_cases (name, description, parent_id, type, "order", python_script, test_case_id)
+        INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     ''', (name, description, parent_id, type_, order_, python_script, test_case_id))

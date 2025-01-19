@@ -22,7 +22,8 @@ class HtmlAlanyzer(AIHelper):
             yield connection
         finally:
             if connection:
-                System.return_connection(connection)
+                System._pool.putconn(connection)
+
 
     def save_step(self, test_case_id: int, step_order: int, element_purpose: str, ai_response: Dict[str, Any]) -> int:
         try:
@@ -102,8 +103,6 @@ class HtmlAlanyzer(AIHelper):
         return {
             "step_id": step_id
         }
-
-
 
 if __name__ == "__main__":
     system = System()
