@@ -151,7 +151,7 @@ class AIHelper:
         json_structure = """
            [
                {
-                   "name": "UI TESTS/API TESTS",
+                   "name": "UI TESTS or API TESTS",
                    "type": "root",
                    "children": [
                        {
@@ -248,6 +248,7 @@ class AIHelper:
         text_prompt = (
             f"Act as QA engineer. Analyze attached schema export file and generate as much as possible test cases for this API.\n"
             f"For API tests try to find requests that can be used together and build a test case with chain of requests\n"
+            f"If you see here UI TESTS either API TESTS create 2 root UI TESTS and API TESTS\n"
             f"The response must be a valid JSON array following this exact structure, with NO additional text or explanation:\n"
             f"{json_structure}\n\n"
             f"Here is the schema file to analyze: {text_content}"
