@@ -85,6 +85,15 @@ class ImageAnalyzer(AIHelper):
                 connection.commit()  # Explicitly commit the transaction
                 return cursor.fetchone()[0]
 
+    def save_test_steps(self, test_steps, test_case_id):
+        for test_step in test_steps:
+            order_id = 0
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    pass
+            order_id += 1
+
+
     def save_test_cases(self, test_cases, parent_id=None, type_='root'):
         """Recursively save test cases and their children."""
         if not isinstance(test_cases, list):
@@ -113,6 +122,9 @@ class ImageAnalyzer(AIHelper):
                 # Recursively handle children only if new_id is valid
                 if new_id and 'children' in test_case and test_case['children']:
                     self.save_test_cases(test_case['children'], new_id, test_type)
+
+                if test_case['steps']:
+                    self.save_test_steps(test_case['steps'], new_id)
 
             except Exception as e:
                 self.logger.error(f"Error processing test case: {str(e)}")

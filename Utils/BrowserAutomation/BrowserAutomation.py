@@ -9,6 +9,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import logging
 import sys
 
+from Utils.BrowserAutomation.EnvHelper import EnvHelper
+
 
 class BrowserAutomation:
     def __init__(self, headless=False, timeout=10):
@@ -16,6 +18,8 @@ class BrowserAutomation:
         self.driver = None
         self.logger = self._setup_logger()
         self.setup_driver(headless)
+        self.env = EnvHelper()
+
 
     def _setup_logger(self):
         logger = logging.getLogger('BrowserAutomation')
@@ -166,6 +170,71 @@ class BrowserAutomation:
         except TimeoutException:
             self.logger.error(f"Timeout waiting for element: {selector}")
             raise
+
+    def assert_element(self, element_path: str, expected_value: str = None, by_strategy: str = None):
+        """
+        Assert various conditions about web elements.
+
+        Args:
+            element_path (str): The locator path to find the element
+            expected_value (str, optional): The expected value or condition to assert
+            by_strategy (str, optional): The strategy to locate the element (e.g., 'id', 'xpath', 'css')
+
+        Raises:
+            AssertionError: If the assertion fails
+            ValueError: If the assertion type is invalid
+        """
+        element = self.find_element(element_path, by_strategy)
+
+        if not element:
+            raise AssertionError(f"Element not found: {element_path}")
+
+        # If no expected value is provided, just assert element exists
+        if not expected_value:
+            return True
+
+        # Parse assertion type and expected value
+        if "=" in expected_value:
+            assertion_type, value = expected_value.split("=", 1)
+        else:
+            assertion_type = "text"
+            value = expected_value
+
+        assertion_type = assertion_type.strip().lower()
+
+        # Handle different types of assertions
+        if assertion_type == "text":
+            actual_text = element.text.strip()
+            if actual_text != value.strip():
+                raise AssertionError(f"Expected text '{value}' but got '{actual_text}'")
+
+        elif assertion_type == "value":
+            actual_value = element.get_attribute("value")
+            if actual_value != value:
+                raise AssertionError(f"Expected value '{value}' but got '{actual_value}'")
+
+        elif assertion_type == "visible":
+            is_visible = element.is_displayed()
+            expected_visible = value.lower() == "true"
+            if is_visible != expected_visible:
+                raise AssertionError(f"Expected visibility {expected_visible} but got {is_visible}")
+
+        elif assertion_type == "enabled":
+            is_enabled = element.is_enabled()
+            expected_enabled = value.lower() == "true"
+            if is_enabled != expected_enabled:
+                raise AssertionError(f"Expected enabled {expected_enabled} but got {is_enabled}")
+
+        elif assertion_type == "selected":
+            is_selected = element.is_selected()
+            expected_selected = value.lower() == "true"
+            if is_selected != expected_selected:
+                raise AssertionError(f"Expected selected {expected_selected} but got {is_selected}")
+
+        else:
+            raise ValueError(f"Unsupported assertion type: {assertion_type}")
+
+        return True
 
     def get_page_source(self):
         """

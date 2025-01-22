@@ -255,18 +255,43 @@ class AIHelper:
         )
         return text_prompt
 
-    def get_analyze_html_promt(self, html_code: str, element_purpose: str):
+    def get_analyze_html_promt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str):
         response_format = """
         {
           "element_locator": "xpath or css locator",
           "by_strategy": "css or xpath",
-          "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key"
+          "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
+          "element_purpose": "Describe the assertion purpose, e.g.: 'verify error message is displayed', 'check if button is enabled'",
+          "value": "For assertions, use one of the following formats:
+                   - Just text to verify element text content
+                   - visible=true/false to check element visibility
+                   - enabled=true/false to check if element is enabled
+                   - selected=true/false to check checkbox/radio selection
+                   - value=expected_value to check input/field value",
+          "next_step": "Prompt for the next action or 'Stop' if test is complete"
         }
         """
+        prev_step_prompt = ''
+        if prev_step_description != '':
+            prev_step_prompt = f'. Take in account that previous step was {prev_step_description}'
+
+        skip_start_navigate = ''
+        if step_order == 0:
+            skip_start_navigate = ". Skip the step with navigating to the first page.\n"
 
         text_prompt = (
-            f"Act as an experienced QA engineer. Analyze the provided HTML code of a web page to identify an element responsible for: {element_purpose}.\n\n"
-            f"HTML Code:\n{html_code}\n\n"
+            f"Act as an experienced QA engineer, you are creating {test_name} {test_description} {next_prompt if next_prompt is not None else ''}."
+            f"You should recursively go through all test steps and on each step you should assume next step until the test will be finished\n"
+            "If current step will be final step, put to the next_step attribute the word 'Stop'\n"
+            f"You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}\n"
+                "When performing assertions, consider the following validation patterns:\n"
+                "- Verify presence and text content of error messages, success messages, or labels\n"
+                "- Check if buttons or forms are enabled/disabled after certain actions\n"
+                "- Validate if elements are visible/hidden based on user interactions\n"
+                "- Confirm correct values in input fields, dropdowns, or other form elements\n"
+                "- Verify selected state of checkboxes and radio buttons\n"
+            f"Analyze the provided HTML code of a web page to identify an element that possible to be used on this step\n"
+            f"HTML Code:\n{html_code}\n"
             "Provide your response **only** in JSON format without any additional explanation. Follow this format strictly:\n"
             f"{response_format}"
         )
@@ -297,7 +322,6 @@ class AIHelper:
                     # model = genai.GenerativeModel('gemini-pro')
                     response = model.generate_content(prompt)
 
-                self.logger.info(response)
                 break
             except google.api_core.exceptions.InternalServerError as e:
                 self.logger.info(e)
