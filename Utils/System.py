@@ -74,7 +74,7 @@ class System:
             psycopg2.extensions.connection: A database connection from the pool
         """
         if cls._pool is None:
-            cls().initialize_connection_pool()
+            cls()._initialize_connection_pool()
 
         try:
             connection = cls._pool.getconn()
