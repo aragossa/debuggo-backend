@@ -5,6 +5,9 @@ import json
 import logging
 import sys
 
+from Utils.BrowserAutomation.TestRunner import TestRunner
+
+
 class KafkaMessageConsumer:
     def __init__(self, bootstrap_servers: str, topic: str, group_id: str):
         self.running = True
@@ -37,33 +40,30 @@ class KafkaMessageConsumer:
                     for record in records:
                         try:
                             request = record.value
-                            print(f"Received message: {request}")
-                            
-                            if request.get('attachment_type') == 'image':
-                                print('Processing image request')
+                            if request.get('attachment_type') == 'image' and request.get('request_type') == 'generate_test_cases':
                                 file_path = request['file_path']
-                                file_name = request['file_name']
-                                print(f"Processing image from {file_path}")
-                                
+
                                 image_analyzer = ImageAnalyzer()
                                 image_analyzer.analyze_img(file_path=file_path)
                                 
-                            elif request.get('attachment_type') == 'text':
-                                print('Processing text request')
+                            elif request.get('attachment_type') == 'text' and request.get('request_type') == 'generate_test_cases':
                                 text_analyzer = TextAnalyzer()
                                 file_content = request.get('file_content')
                                 if file_content:
                                     result = text_analyzer.analyze_txt(file_content)
                                 else:
                                     print("Warning: No file content in text request")
+
+                            elif request.get('request_type') == 'generate_test_steps':
+                                runner = TestRunner()
+                                test_case_id = request.get('test_case_id')
+                                runner.generate_test_steps(test_case_id)
                                     
                         except Exception as e:
-                            print(f"Error processing message: {str(e)}")
                             self.logger.error(f"Error processing message: {e}")
                             continue
 
             except Exception as e:
-                print(f"Error consuming message: {str(e)}")
                 self.logger.error(f"Error consuming message: {e}")
 
     def stop(self):

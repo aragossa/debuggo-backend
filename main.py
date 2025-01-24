@@ -10,6 +10,7 @@ from threading import Thread
 
 from Utils.AIHelper.ImageAnalyzer import ImageAnalyzer
 from Utils.AIHelper.TextAnalyzer import TextAnalyzer
+from Utils.BrowserAutomation.TestRunner import TestRunner
 from Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
 from Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
 from fetch_test_steps import get_test_data_from_db
@@ -29,6 +30,7 @@ origins = [
     "http://18.194.44.160:3000",
     "http://localhost:8080",
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://127.0.0.1:8080",
     "http://18.184.65.241",
     "http://auroqa.com",
@@ -62,9 +64,6 @@ app.add_middleware(
 
 @app.post("/api/generate_test_cases_from_data")
 async def generate_test_cases(file: UploadFile = File(...)):
-    print('generate_test_cases')
-    print(f'Processing file: {file.filename.lower()}')
-    
     BOOTSTRAP_SERVERS = 'localhost:9092'
     TOPIC = 'user_requests'
     GROUP_ID = 'auroqa-group'
@@ -107,17 +106,10 @@ async def generate_test_cases(file: UploadFile = File(...)):
                 contents += chunk
                 
             if not contents:
-                print('Error: File content is empty')
                 return {"error": "Empty file uploaded"}
-            
-            print(f'Successfully read {len(contents)} bytes')
-            
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             with open(file_path, "wb") as f:
                 f.write(contents)
-                
-            print(f'File saved to {file_path}')
-            print('Sending request to Kafka:', request)
             producer.send_message(request)
             producer.close()
 
@@ -151,8 +143,32 @@ async def run_test_case(id: int) -> JSONResponse:
     """
     Endpoint to run test script.
     """
-    result = execute_test_case(id)
+    runner = TestRunner()
+    result = runner.run_test_case(id)
     return JSONResponse(content=result)
+
+@app.post("/api/generate_steps/{id}", response_model=Dict)
+async def run_test_case(id: int) -> JSONResponse:
+    """
+    Endpoint to run test script.
+    """
+    BOOTSTRAP_SERVERS = 'localhost:9092'
+    TOPIC = 'user_requests'
+    GROUP_ID = 'auroqa-group'
+
+    producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
+    request = {}
+
+    request['request_type'] = 'generate_test_steps'
+    request['test_case_id'] = f'{id}'
+    producer.send_message(request)
+    producer.close()
+
+    # runner = TestRunner()
+    # result = runner.generate_test_steps(id)
+    result = {'result': 'queued'}
+    return JSONResponse(content=result)
+
 
 if __name__ == "__main__":
     import uvicorn

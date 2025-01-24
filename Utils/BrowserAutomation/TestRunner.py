@@ -135,6 +135,7 @@ class TestRunner:
                 result="success",
                 duration=duration
             )
+            result = '{"result": "Success"}'
 
         except Exception as e:
             # Log failure
@@ -145,11 +146,13 @@ class TestRunner:
                 exception=str(e),
                 duration=duration
             )
+            result = '{"result": "Failed"}'
             raise
 
         finally:
             if self.browser:
                 self.browser.close()
+            return result
 
 
     def generate_test_steps(self, test_case_id: int):
@@ -167,9 +170,6 @@ class TestRunner:
             page_source = self.browser.get_page_source()
             prev_step_description = ''
             next_prompt = ''
-            # model = genai.GenerativeModel("gemini-1.5-flash-001")
-            # genai.configure(api_key=system.gemini_api_key)
-            # chat = model.start_chat()
             while next_prompt != 'Stop':
                 self.logger.info(f"next_prompt: {next_prompt}, condition: {next_prompt != 'Stop'}")
                 next_step, element_purpose, action, element_locator, by_strategy = html_analyzer.html_analyzer(
@@ -197,9 +197,3 @@ class TestRunner:
         finally:
             if self.browser:
                 self.browser.close()
-
-
-if __name__ == "__main__":
-    runner = TestRunner()
-    # runner.generate_test_steps(492)
-    runner.run_test_case(492)
