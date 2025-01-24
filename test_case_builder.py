@@ -1,6 +1,4 @@
-import json
-
-from Utils.DbConnector import DbConnector
+from Utils.Connectors.DbConnector import DbConnector
 
 
 # Function to recursively build tree structure from flat data

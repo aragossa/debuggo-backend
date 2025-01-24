@@ -1,4 +1,4 @@
-from Utils.DbConnector import DbConnector
+from Utils.Connectors.DbConnector import DbConnector
 
 
 def save_test_run_result(test_case_id, result, exception="", duration=None, stdout="", stderr="", additional_info=""):
@@ -44,7 +44,7 @@ def execute_test_case(test_case_id):
             "exception": exception_message
         }
 
-    python_script, curl_command = result
+    curl_command = result
     conn.close()
 
     stdout_content = ""

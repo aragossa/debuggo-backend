@@ -24,10 +24,10 @@ class ImageAnalyzer(AIHelper):
             if connection:
                 System._pool.putconn(connection)
 
-    def read_img(self, file_content: bytes, file: UploadFile) -> Union[Image.Image, bool]:
+    def read_img(self, file_path: str) -> Union[Image.Image, bool]:
         try:
-            self.logger.debug({"message": f"Processed image: {file.filename}"})
-            return Image.open(BytesIO(file_content))
+            self.logger.debug({"message": f"Processed image: {file_path}"})
+            return Image.open(file_path)
         except (IOError, OSError) as e:
             self.logger.error({"error": f"Failed to process image: {str(e)}"})
             return False
@@ -123,15 +123,15 @@ class ImageAnalyzer(AIHelper):
                 if new_id and 'children' in test_case and test_case['children']:
                     self.save_test_cases(test_case['children'], new_id, test_type)
 
-                if test_case['steps']:
-                    self.save_test_steps(test_case['steps'], new_id)
+                # if test_case['steps']:
+                #     self.save_test_steps(test_case['steps'], new_id)
 
             except Exception as e:
                 self.logger.error(f"Error processing test case: {str(e)}")
                 continue
 
-    def analyze_img(self, file_content: bytes, file: UploadFile) -> Union[Image.Image, bool]:
-        image = self.read_img(file_content=file_content, file=file)
+    def analyze_img(self, file_path: str) -> Union[Image.Image, bool]:
+        image = self.read_img(file_path=file_path)
         genai_response = self.send_request_to_gemini(prompt=self.get_analyze_img_promt(), image=image)
         self.save_test_cases(genai_response)
         return True

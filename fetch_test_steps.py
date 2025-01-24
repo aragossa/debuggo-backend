@@ -1,4 +1,4 @@
-from Utils.DbConnector import DbConnector
+from Utils.Connectors.DbConnector import DbConnector
 
 
 def get_test_data_from_db(test_case_id: int):

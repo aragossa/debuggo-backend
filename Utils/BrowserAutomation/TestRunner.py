@@ -1,13 +1,12 @@
 import sys
 from contextlib import contextmanager
 from datetime import datetime
-import google.generativeai as genai
 import logging
 
 from Utils.AIHelper.HtmlAnalyzer import HtmlAlanyzer
 from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
-from Utils.DbConnector import DbConnector
+from Utils.Connectors.DbConnector import DbConnector
 from Utils.System import System
 
 

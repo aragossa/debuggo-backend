@@ -1,6 +1,6 @@
 import psycopg2
 from psycopg2 import sql
-from .System import System
+from Utils.System import System
 
 class DbConnector:
     def __init__(self):

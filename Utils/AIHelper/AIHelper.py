@@ -56,24 +56,7 @@ class AIHelper:
                                    "name": "Test case name",
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
-                                   "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
+                                   "type": "test"
                                    ]
                                },
                                {
@@ -81,25 +64,7 @@ class AIHelper:
                                    "name": "Test case name",
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
-                                   "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
-                                   ]
+                                   "type": "test"
                                }
                            ]
                        },
@@ -114,24 +79,6 @@ class AIHelper:
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
                                    "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
-                                   ]
                                }
                            ]
                        }
@@ -142,7 +89,6 @@ class AIHelper:
         text_prompt = (
             f"Act as QA engineer. Analyze attached screenshot of a web page and generate as much as possible test cases for this Web page\n"
             "I need response only in json format don't give me any other info:\n"
-            "Give me detailed test steps, each action should be as a separated step (like put value in a field, click button etc.) each step should be an action for selenium tests\n"
             f"{json_structure}"
         )
         return text_prompt
@@ -162,50 +108,14 @@ class AIHelper:
                                    "name": "Test case name",
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
-                                   "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
-                                   ]
+                                   "type": "test"
                                },
                                {
                                    "id": 4,
                                    "name": "Test case name",
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
-                                   "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
-                                   ]
+                                   "type": "test"
                                }
                            ]
                        },
@@ -219,25 +129,7 @@ class AIHelper:
                                    "name": "Test case name",
                                    "description": "Test description",
                                    "expected_result": "Test expected result",
-                                   "type": "test",
-                                   "steps": [
-                                       {
-                                           "description": "Navigate to the page ...",
-                                           "expected_result": "The page ... is opened"
-                                       },
-                                       {
-                                           "description": "Click on the button ...",
-                                           "expected_result": "User navigated to the page"
-                                       },
-                                       {
-                                           "description": "Put text to the field",
-                                           "expected_result": "Text is in the field"
-                                       },
-                                       {
-                                           "description": "Press ENTER",
-                                           "expected_result": "Filed saved"
-                                       }
-                                   ]
+                                   "type": "test"
                                }
                            ]
                        }
