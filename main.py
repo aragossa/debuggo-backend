@@ -164,12 +164,13 @@ async def run_test_case(id: int) -> JSONResponse:
     producer.send_message(request)
     producer.close()
 
-    # runner = TestRunner()
-    # result = runner.generate_test_steps(id)
     result = {'result': 'queued'}
     return JSONResponse(content=result)
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=9000, reload=True)
+    # PROD
+    uvicorn.run(app, host="127.0.0.1", port=9000)
+    # DEBUG
+    # uvicorn.run("main:app", host="127.0.0.1", port=9000, reload=True)
