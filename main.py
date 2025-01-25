@@ -1,7 +1,9 @@
 import os
 import uuid
+from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
@@ -12,8 +14,18 @@ from Utils.BrowserAutomation.TestRunner import TestRunner
 from Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
 from Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
 from Utils.System import System
+from Utils.auth import (
+    create_access_token,
+    get_password_hash,
+    verify_password,
+    SECRET_KEY,
+    ALGORITHM,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
+from models.user import UserCreate, User, Token
 from fetch_test_steps import get_test_data_from_db
 from test_case_builder import get_tests_tree
+from jose import JWTError, jwt
 
 # Initialize connection pool
 db_pool = None
@@ -33,6 +45,48 @@ class UpdateTestStepAction(BaseModel):
 class StepOrderUpdate(BaseModel):
     test_case_id: int
     step_orders: List[Dict[str, int]]
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, email, full_name, is_active, created_at, last_login
+            FROM users WHERE email = %s
+            """,
+            (email,)
+        )
+        user_data = cur.fetchone()
+        if user_data is None:
+            raise credentials_exception
+        
+        return User(
+            id=user_data[0],
+            email=user_data[1],
+            full_name=user_data[2],
+            is_active=user_data[3],
+            created_at=user_data[4],
+            last_login=user_data[5]
+        )
+    finally:
+        cur.close()
+        return_db_connection(conn)
 
 # app = FastAPI()
 kafka_consumer = None
@@ -102,8 +156,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_db_dependencies():
+    return {
+        "get_conn": get_db_connection,
+        "return_conn": return_db_connection
+    }
+
+@app.post("/api/register", response_model=User)
+async def register_user(user_data: UserCreate):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        # Check if user already exists
+        cur.execute("SELECT id FROM users WHERE email = %s", (user_data.email,))
+        if cur.fetchone() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+        
+        # Create new user
+        hashed_password = get_password_hash(user_data.password)
+        cur.execute(
+            """
+            INSERT INTO users (email, password_hash, full_name)
+            VALUES (%s, %s, %s)
+            RETURNING id, email, full_name, is_active, created_at, last_login
+            """,
+            (user_data.email, hashed_password, user_data.full_name)
+        )
+        user_data = cur.fetchone()
+        conn.commit()
+        
+        return User(
+            id=user_data[0],
+            email=user_data[1],
+            full_name=user_data[2],
+            is_active=user_data[3],
+            created_at=user_data[4],
+            last_login=user_data[5]
+        )
+    finally:
+        cur.close()
+        return_db_connection(conn)
+
+@app.post("/api/login", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, email, password_hash, full_name, is_active
+            FROM users WHERE email = %s
+            """,
+            (form_data.username,)
+        )
+        user_data = cur.fetchone()
+        
+        if not user_data or not verify_password(form_data.password, user_data[2]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Update last login time
+        cur.execute(
+            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
+            (user_data[0],)
+        )
+        conn.commit()
+
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user_data[1]}, expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+    finally:
+        cur.close()
+        return_db_connection(conn)
+
+@app.get("/api/users/me", response_model=User)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
 @app.post("/api/generate_test_cases_from_data")
-async def generate_test_cases(file: UploadFile = File(...)):
+async def generate_test_cases(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
     system = System()
     BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
     TOPIC = 'user_requests'
@@ -162,25 +304,22 @@ async def generate_test_cases(file: UploadFile = File(...)):
     else:
         return {"error": "File type is unsupported yet"}
 
-
 @app.get("/api/get_tree", response_model=Dict)
-async def get_tree() -> JSONResponse:
+async def get_tree(current_user: User = Depends(get_current_user)):
     """
     Endpoint to get the test tree structure.
     """
     tree_data = get_tests_tree()
     return JSONResponse(content=tree_data)
 
-
 @app.get("/api/get_test_cases/{id}", response_model=List[Dict])
-async def get_test_cases(id: int) -> JSONResponse:
+async def get_test_cases(id: int, current_user: User = Depends(get_current_user)):
     test_steps = get_test_data_from_db(id)
 
     return JSONResponse(content=test_steps)
 
-
 @app.post("/api/run_test_case/{id}", response_model=Dict)
-async def run_test_case(id: int) -> JSONResponse:
+async def run_test_case(id: int, current_user: User = Depends(get_current_user)):
     """
     Endpoint to run test script.
     """
@@ -189,7 +328,7 @@ async def run_test_case(id: int) -> JSONResponse:
     return JSONResponse(content=result)
 
 @app.post("/api/generate_steps/{id}", response_model=Dict)
-async def run_test_case(id: int) -> JSONResponse:
+async def run_test_case(id: int, current_user: User = Depends(get_current_user)):
     """
     Endpoint to run test script.
     """
@@ -209,9 +348,12 @@ async def run_test_case(id: int) -> JSONResponse:
     result = {'result': 'queued'}
     return JSONResponse(content=result)
 
-
 @app.patch("/api/update_test_step/{id}")
-async def update_test_step(id: int, update_data: UpdateTestStepAction):
+async def update_test_step(
+    id: int,
+    update_data: UpdateTestStepAction,
+    current_user: User = Depends(get_current_user)
+):
     conn = None
     try:
         conn = get_db_connection()
@@ -241,9 +383,11 @@ async def update_test_step(id: int, update_data: UpdateTestStepAction):
         if conn:
             return_db_connection(conn)
 
-
 @app.patch("/api/update_step_orders")
-async def update_step_orders(update_data: StepOrderUpdate) -> JSONResponse:
+async def update_step_orders(
+    update_data: StepOrderUpdate,
+    current_user: User = Depends(get_current_user)
+):
     conn = None
     try:
         conn = get_db_connection()
@@ -284,6 +428,6 @@ async def update_step_orders(update_data: StepOrderUpdate) -> JSONResponse:
 if __name__ == "__main__":
     import uvicorn
     # PROD
-    # uvicorn.run(app, host="127.0.0.1", port=9000)
+    uvicorn.run(app, host="127.0.0.1", port=9000)
     # DEBUG
-    uvicorn.run("main:app", host="127.0.0.1", port=9000, reload=True)
+    # uvicorn.run("main:app", host="127.0.0.1", port=9000, reload=True)
