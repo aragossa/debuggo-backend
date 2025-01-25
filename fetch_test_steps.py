@@ -17,7 +17,7 @@ def get_test_data_from_db(test_case_id: int):
 
     # Query to get the test steps for the given test_case_id
     cursor.execute('''
-        SELECT id, step_order, description, expected_result
+        SELECT id, step_order, description, expected_result, action
         FROM test_steps
         WHERE test_case_id = %s
         ORDER BY step_order ASC
@@ -32,7 +32,8 @@ def get_test_data_from_db(test_case_id: int):
             "id": row[0],
             "name": f"Test Step {row[1]}",
             "description": row[2],
-            "expected_result": row[3]
+            "expected_result": row[3],
+            "action": row[4]
         }
         for row in steps_rows
     ]

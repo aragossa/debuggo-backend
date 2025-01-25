@@ -33,6 +33,10 @@ class System:
         self.db_user = os.getenv('DB_USER', 'postgres')
         self.db_password = os.getenv('DB_PASSWORD', 'postgres')
 
+        # Kafka configuration
+        self.kafka_host = os.getenv('KAFKA_HOST', 'localhost')
+        self.kafka_port = os.getenv('KAFKA_PORT', '9092')
+
         # Connection pool configuration
         self.min_connections = int(os.getenv('DB_MIN_CONNECTIONS', '1'))
         self.max_connections = int(os.getenv('DB_MAX_CONNECTIONS', '10'))

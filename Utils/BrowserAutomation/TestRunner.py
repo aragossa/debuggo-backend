@@ -119,7 +119,7 @@ class TestRunner:
         try:
             # Initialize browser
 
-            self.browser = BrowserAutomation(headless=False)
+            self.browser = BrowserAutomation(headless=True)
 
             # Get and execute test steps
             steps = self._get_test_steps(test_case_id)
@@ -160,7 +160,7 @@ class TestRunner:
             system = System()
             env = EnvHelper()
             html_analyzer = HtmlAlanyzer()
-            self.browser = BrowserAutomation(headless=False)
+            self.browser = BrowserAutomation(headless=True)
             test_case_data = self._get_test_case(test_case_id=test_case_id)
             test_name = test_case_data[0]
             test_description = test_case_data[1]
