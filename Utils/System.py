@@ -23,8 +23,7 @@ class System:
             return
 
         # Load environment variables from .env file
-        env_path = Path(__file__).parent.parent / '.env'
-        load_dotenv(dotenv_path=env_path)
+        load_dotenv()
 
         # Database configuration
         self.db_host = os.getenv('DB_HOST', 'localhost')
@@ -32,6 +31,11 @@ class System:
         self.db_name = os.getenv('DB_NAME', 'postgres')
         self.db_user = os.getenv('DB_USER', 'postgres')
         self.db_password = os.getenv('DB_PASSWORD', 'postgres')
+
+        # Redis configuration
+        # Use 'redis' service name in Docker, localhost for direct run
+        self.redis_host = os.getenv('REDIS_HOST', 'localhost')
+        self.redis_port = int(os.getenv('REDIS_PORT', '6379'))
 
         # Kafka configuration
         self.kafka_host = os.getenv('KAFKA_HOST', 'localhost')

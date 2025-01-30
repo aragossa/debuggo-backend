@@ -26,6 +26,7 @@ from models.user import UserCreate, User, Token
 from fetch_test_steps import get_test_data_from_db
 from test_case_builder import get_tests_tree
 from jose import JWTError, jwt
+import asyncio
 
 # Initialize connection pool
 db_pool = None
@@ -134,6 +135,13 @@ async def lifespan(app: FastAPI):
     kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'auroqa-group')
     consumer_thread = Thread(target=kafka_consumer.consume_messages, daemon=True)
     consumer_thread.start()
+    
+    # Initialize TestRunner singleton
+    try:
+        TestRunner()  # This will initialize the Redis connection
+    except Exception as e:
+        print(f"Failed to initialize TestRunner: {e}")
+        raise
     
     yield
 
@@ -323,9 +331,18 @@ async def run_test_case(id: int, current_user: User = Depends(get_current_user))
     """
     Endpoint to run test script.
     """
-    runner = TestRunner()
-    result = runner.run_test_case(id)
-    return JSONResponse(content=result)
+    try:
+        # Get the singleton instance of TestRunner
+        runner = TestRunner()
+        
+        # Run the test case in a blocking manner to prevent concurrent executions
+        result = await asyncio.to_thread(runner.run_test_case, id)
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to run test case: {str(e)}"
+        )
 
 @app.post("/api/generate_steps/{id}", response_model=Dict)
 async def run_test_case(id: int, current_user: User = Depends(get_current_user)):
@@ -427,7 +444,12 @@ async def update_step_orders(
 
 if __name__ == "__main__":
     import uvicorn
-    # PROD
-    uvicorn.run(app, host="127.0.0.1", port=9000)
-    # DEBUG
-    # uvicorn.run("main:app", host="127.0.0.1", port=9000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=9000,
+        workers=1,  # Use single worker to avoid process-level concurrency
+        timeout_keep_alive=30,
+        access_log=True,
+        reload=True
+    )

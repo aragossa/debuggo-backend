@@ -8,6 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 import logging
 import sys
+import os
 
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
 
@@ -19,11 +20,14 @@ class BrowserAutomation:
         self.logger = self._setup_logger()
         self.setup_driver(headless)
         self.env = EnvHelper()
-
+        self.pid = os.getpid()
 
     def _setup_logger(self):
         logger = logging.getLogger('BrowserAutomation')
         logger.setLevel(logging.INFO)
+
+        # Remove existing handlers to prevent duplicate logging
+        logger.handlers = []
 
         handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(logging.INFO)
@@ -47,18 +51,18 @@ class BrowserAutomation:
 
             self.driver = webdriver.Chrome(options=chrome_options)
             self.driver.implicitly_wait(5)
-            self.logger.info("Browser started successfully")
+            # Don't log here as TestRunner will handle it
 
-        except WebDriverException as e:
-            self.logger.error(f"Failed to start browser: {str(e)}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to setup browser: {str(e)}")
             raise
 
     def navigate(self, url):
         try:
             self.driver.get(url)
-            self.logger.info(f"Navigated to {url}")
+            self.logger.info(f"[PID:{self.pid}] Navigated to {url}")
         except WebDriverException as e:
-            self.logger.error(f"Failed to navigate to {url}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
 
     def find_element(self, selector, by='css'):
@@ -79,10 +83,10 @@ class BrowserAutomation:
             return element
 
         except TimeoutException:
-            self.logger.error(f"Element not found: {selector}")
+            self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
             raise
         except Exception as e:
-            self.logger.error(f"Error finding element {selector}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Error finding element {selector}: {str(e)}")
             raise
 
     def click(self, selector, by='css'):
@@ -97,9 +101,9 @@ class BrowserAutomation:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
             element = self.find_element(selector, by_strategy)
             element.click()
-            self.logger.info(f"Clicked element: {selector}")
+            self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
         except Exception as e:
-            self.logger.error(f"Failed to click element {selector}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to click element {selector}: {str(e)}")
             raise
 
     def type_text(self, selector, text, by='css'):
@@ -108,9 +112,9 @@ class BrowserAutomation:
             element = self.find_element(selector, by_strategy)
             element.clear()
             element.send_keys(text)
-            self.logger.info(f"Typed text into element: {selector}")
+            self.logger.info(f"[PID:{self.pid}] Typed text into element: {selector}")
         except Exception as e:
-            self.logger.error(f"Failed to type text into element {selector}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to type text into element {selector}: {str(e)}")
             raise
 
     def press_key(self, selector, value, by='css'):
@@ -144,10 +148,10 @@ class BrowserAutomation:
             # Find and interact with the element
             element = self.find_element(selector, by_strategy)
             element.send_keys(selenium_key)
-            self.logger.info(f"Pressed {key.upper()} key on element: {selector}")
+            self.logger.info(f"[PID:{self.pid}] Pressed {key.upper()} key on element: {selector}")
 
         except Exception as e:
-            self.logger.error(f"Failed to press {key.upper()} key on element {selector}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to press {key.upper()} key on element {selector}: {str(e)}")
             raise
 
     def get_text(self, selector, by='css'):
@@ -156,7 +160,31 @@ class BrowserAutomation:
             element = self.find_element(selector, by_strategy)
             return element.text
         except Exception as e:
-            self.logger.error(f"Failed to get text from element {selector}: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to get text from element {selector}: {str(e)}")
+            raise
+
+    def hover(self, selector, by='css'):
+        """
+        Hover over an element using either CSS selector or XPath.
+
+        Args:
+            selector (str): Element selector
+            by (str): Selector type - 'xpath' or 'css' (default: 'css')
+        """
+        try:
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            element = self.find_element(selector, by)
+            
+            # Import ActionChains for hover
+            from selenium.webdriver.common.action_chains import ActionChains
+            
+            # Create ActionChains instance and perform hover
+            actions = ActionChains(self.driver)
+            actions.move_to_element(element).perform()
+            
+            self.logger.info(f"[PID:{self.pid}] Hovered over element: {selector}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to hover over element {selector}: {str(e)}")
             raise
 
     def wait_for_element(self, selector, by='css', timeout=None):
@@ -168,7 +196,7 @@ class BrowserAutomation:
             )
             return element
         except TimeoutException:
-            self.logger.error(f"Timeout waiting for element: {selector}")
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element: {selector}")
             raise
 
     def assert_element(self, element_path: str, expected_value: str = None, by_strategy: str = None):
@@ -187,7 +215,7 @@ class BrowserAutomation:
         element = self.find_element(element_path, by_strategy)
 
         if not element:
-            raise AssertionError(f"Element not found: {element_path}")
+            raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
 
         # If no expected value is provided, just assert element exists
         if not expected_value:
@@ -206,33 +234,33 @@ class BrowserAutomation:
         if assertion_type == "text":
             actual_text = element.text.strip()
             if actual_text != value.strip():
-                raise AssertionError(f"Expected text '{value}' but got '{actual_text}'")
+                raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
 
         elif assertion_type == "value":
             actual_value = element.get_attribute("value")
             if actual_value != value:
-                raise AssertionError(f"Expected value '{value}' but got '{actual_value}'")
+                raise AssertionError(f"[PID:{self.pid}] Expected value '{value}' but got '{actual_value}'")
 
         elif assertion_type == "visible":
             is_visible = element.is_displayed()
             expected_visible = value.lower() == "true"
             if is_visible != expected_visible:
-                raise AssertionError(f"Expected visibility {expected_visible} but got {is_visible}")
+                raise AssertionError(f"[PID:{self.pid}] Expected visibility {expected_visible} but got {is_visible}")
 
         elif assertion_type == "enabled":
             is_enabled = element.is_enabled()
             expected_enabled = value.lower() == "true"
             if is_enabled != expected_enabled:
-                raise AssertionError(f"Expected enabled {expected_enabled} but got {is_enabled}")
+                raise AssertionError(f"[PID:{self.pid}] Expected enabled {expected_enabled} but got {is_enabled}")
 
         elif assertion_type == "selected":
             is_selected = element.is_selected()
             expected_selected = value.lower() == "true"
             if is_selected != expected_selected:
-                raise AssertionError(f"Expected selected {expected_selected} but got {is_selected}")
+                raise AssertionError(f"[PID:{self.pid}] Expected selected {expected_selected} but got {is_selected}")
 
         else:
-            raise ValueError(f"Unsupported assertion type: {assertion_type}")
+            raise ValueError(f"[PID:{self.pid}] Unsupported assertion type: {assertion_type}")
 
         return True
 
@@ -245,13 +273,19 @@ class BrowserAutomation:
         """
         try:
             page_source = self.driver.page_source
-            self.logger.info("Retrieved page source successfully")
+            self.logger.info(f"[PID:{self.pid}] Retrieved page source successfully")
             return page_source
         except Exception as e:
-            self.logger.error(f"Failed to get page source: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to get page source: {str(e)}")
             raise
 
     def close(self):
+        """Close the browser and cleanup"""
         if self.driver:
-            self.driver.quit()
-            self.logger.info("Browser closed")
+            try:
+                self.driver.quit()
+                # Don't log here as TestRunner will handle it
+            except Exception as e:
+                self.logger.error(f"[PID:{self.pid}] Error closing browser: {str(e)}")
+            finally:
+                self.driver = None

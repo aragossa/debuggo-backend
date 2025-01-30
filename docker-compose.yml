@@ -8,6 +8,24 @@ services:
       - 8000
     networks:
       - auroqa_network
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: auroqa-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - auroqa_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   auroqa-ui:
     image: localhost/testing-platform-ui
@@ -65,3 +83,7 @@ services:
 networks:
   auroqa_network:
     driver: bridge
+
+volumes:
+  redis_data:
+    driver: local
