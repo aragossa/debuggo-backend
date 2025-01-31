@@ -249,68 +249,105 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-@app.post("/api/generate_test_cases_from_data")
+@app.post("/api/generate_test_cases_from_data", response_model=Dict)
 async def generate_test_cases(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
-    system = System()
-    BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
-    TOPIC = 'user_requests'
-    GROUP_ID = 'auroqa-group'
+    """
+    Generate test cases from uploaded file data.
+    Accepts JSON, YAML, or PNG files.
+    """
+    try:
+        # Validate file extension
+        allowed_extensions = ['.json', '.yaml', '.yml', '.png']
+        file_ext = os.path.splitext(file.filename.lower())[1]
+        
+        if not file_ext:
+            raise HTTPException(
+                status_code=422,
+                detail="File must have an extension"
+            )
+            
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
+            )
 
-    producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
-    request = {}
-    
-    if 'json' in file.filename.lower():
-        file_content = await file.read()
-        request['request_type'] = 'generate_test_cases'
-        request['content'] = 'json'
-        request['attachment_type'] = 'text'
-        request['file_content'] = file_content
-        producer.send_message(request)
-        producer.close()
-    elif 'yaml' in file.filename.lower():
-        file_content = await file.read()
-        request['request_type'] = 'generate_test_cases'
-        request['content'] = 'yaml'
-        request['attachment_type'] = 'text'
-        request['file_content'] = file_content
-        producer.send_message(request)
-        producer.close()
-    elif 'png' in file.filename.lower():
-        print('Processing PNG file')
+        # Initialize Kafka producer
+        system = System()
+        BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
+        TOPIC = 'user_requests'
+        producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
+        request = {
+            'request_type': 'generate_test_cases',
+            'user_id': current_user.id
+        }
+        
         try:
-            request['request_type'] = 'generate_test_cases'
-            request['content'] = 'png'
-            request['attachment_type'] = 'image'
-            filename = f"{uuid.uuid4()}.png"
-            file_path = os.path.abspath(os.path.join(UPLOAD_DIRECTORY, filename))
-            request['file_name'] = filename
-            request['file_path'] = file_path
-            
-            # Read file in chunks to handle large files
-            contents = b''
-            chunk_size = 8192  # 8KB chunks
-            
-            while chunk := await file.read(chunk_size):
-                contents += chunk
+            if file_ext in ['.json', '.yaml', '.yml']:
+                file_content = await file.read()
+                if not file_content:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Empty file uploaded"
+                    )
+                    
+                request.update({
+                    'content': 'json' if file_ext == '.json' else 'yaml',
+                    'attachment_type': 'text',
+                    'file_content': file_content
+                })
+                producer.send_message(request)
                 
-            if not contents:
-                return {"error": "Empty file uploaded"}
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            with open(file_path, "wb") as f:
-                f.write(contents)
-            producer.send_message(request)
-            producer.close()
-
-            return {"message": "File uploaded successfully", "path": file_path}
+            elif file_ext == '.png':
+                # Handle PNG files
+                filename = f"{uuid.uuid4()}.png"
+                file_path = os.path.abspath(os.path.join(UPLOAD_DIRECTORY, filename))
+                
+                # Read file in chunks
+                contents = b''
+                chunk_size = 8192  # 8KB chunks
+                while chunk := await file.read(chunk_size):
+                    contents += chunk
+                    
+                if not contents:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Empty PNG file uploaded"
+                    )
+                
+                # Save PNG file
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "wb") as f:
+                    f.write(contents)
+                
+                request.update({
+                    'content': 'png',
+                    'attachment_type': 'image',
+                    'file_name': filename,
+                    'file_path': file_path
+                })
+                producer.send_message(request)
             
-        except Exception as e:
-            print(f'Error processing PNG file: {str(e)}')
-            return {"error": f"Failed to save PNG file: {str(e)}"}
-    else:
-        return {"error": "File type is unsupported yet"}
+            return {
+                "status": "success",
+                "message": "File processed successfully",
+                "file_type": file_ext[1:],  # Remove leading dot
+                "user_id": current_user.id
+            }
+            
+        finally:
+            producer.close()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing file: {str(e)}"
+        )
 
 @app.get("/api/get_tree", response_model=Dict)
 async def get_tree(current_user: User = Depends(get_current_user)):

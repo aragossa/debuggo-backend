@@ -9,7 +9,7 @@ from threading import Lock
 import time
 import multiprocessing
 from datetime import timedelta
-from Utils.AIHelper.HtmlAnalyzer import HtmlAlanyzer
+from Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
 from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
 from Utils.Connectors.DbConnector import DbConnector
@@ -32,6 +32,7 @@ class TestRunner:
                 cls._instance.browser = None
                 cls._instance.test_run_id = None
                 cls._instance.logger = cls._instance._setup_logger()
+                cls._instance.html_analyzer = None  # Initialize HTML analyzer as None
                 cls._instance.logger.info(f"[PID:{pid}] Creating new TestRunner instance")
                 
                 # Initialize Redis connection
@@ -65,6 +66,9 @@ class TestRunner:
         if not hasattr(self, '_initialized'):
             self.logger.info(f"[PID:{pid}] Initializing TestRunner")
             self._initialized = True
+            # Initialize HTML analyzer only once
+            self.html_analyzer = HtmlAnalyzer()
+            self.logger.info(f"[PID:{pid}] HTML Analyzer initialized")
         else:
             self.logger.info(f"[PID:{pid}] TestRunner already initialized")
 
@@ -248,48 +252,95 @@ class TestRunner:
                 self._cleanup_browser()
 
     def generate_test_steps(self, test_case_id: int):
+        """Generate test steps using AI analysis of page HTML."""
+        pid = os.getpid()
         try:
+            # Acquire process lock
+            if not self._process_lock():
+                raise Exception("Could not acquire lock for test step generation")
+
+            self.logger.info(f"[PID:{pid}] Starting test step generation for ID: {test_case_id}")
+            
+            # Initialize components
             system = System()
             env = EnvHelper()
-            html_analyzer = HtmlAlanyzer()
+            html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
+            
+            # Clean up any existing browser instance
+            self._cleanup_browser()
+            
+            # Create new browser instance
             self.browser = BrowserAutomation(headless=True)
             test_case_data = self._get_test_case(test_case_id=test_case_id)
             test_name = test_case_data[0]
             test_description = test_case_data[1]
 
+            self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
             self.browser.navigate(url=env.base_url)
+            
             step_order = 0
             page_source = self.browser.get_page_source()
             prev_step_description = ''
             next_prompt = ''
+            
+            # Track previous steps to avoid duplicates
+            previous_steps = set()
+            max_retries = 3
+            retry_delay = 2  # seconds
+            
             while next_prompt != 'Stop':
-                self.logger.info(f"next_prompt: {next_prompt}, condition: {next_prompt != 'Stop'}")
-                next_step, element_purpose, action, element_locator, by_strategy = html_analyzer.html_analyzer(
-                                            test_case_id=test_case_id,
-                                            html_code=page_source,
-                                            test_name=test_name,
-                                            test_description=test_description,
-                                            step_order=step_order,
-                                            next_prompt=next_prompt,
-                                            prev_step_description=prev_step_description
-                )
+                self.logger.info(f"[PID:{pid}] Processing step {step_order}, next_prompt: {next_prompt}")
+                
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        next_step, element_purpose, action, element_locator, by_strategy = html_analyzer.html_analyzer(
+                            test_case_id=test_case_id,
+                            html_code=page_source,
+                            test_name=test_name,
+                            test_description=test_description,
+                            step_order=step_order,
+                            next_prompt=next_prompt,
+                            prev_step_description=prev_step_description
+                        )
+                        break
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count == max_retries:
+                            raise
+                        if "429" in str(e):  # Rate limit error
+                            self.logger.warning(f"[PID:{pid}] Rate limit hit, waiting {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        else:
+                            raise
+                
                 next_prompt = next_step
                 prev_step_description = test_description
-                self.execute_step(action, element_locator, "", by_strategy)
-                self.logger.info(f"next_step: {next_prompt}, element_purpose: {element_purpose}, action: {action}, element_locator: {element_locator}, by_strategy: {by_strategy}, next_prompt: {next_prompt}")
-
-
+                
+                # Create a unique key for this step
+                step_key = f"{action}:{element_locator}:{element_purpose}"
+                
+                # Skip if we've seen this exact step before
+                if step_key in previous_steps:
+                    self.logger.info(f"[PID:{pid}] Skipping duplicate step: {element_purpose}")
+                    continue
+                
+                previous_steps.add(step_key)
+                
+                if action and element_locator:
+                    self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
+                    self.execute_step(action, element_locator, "", by_strategy)
+                
+                self.logger.info(f"[PID:{pid}] Step {step_order} completed - Purpose: {element_purpose}")
                 page_source = self.browser.get_page_source()
                 step_order += 1
 
-
         except Exception as e:
-            self.logger.error(e)
+            self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
+            raise
 
         finally:
-            if self.browser:
-                try:
-                    self.browser.close()
-                except:
-                    pass
-                self.browser = None
+            # Always clean up resources
+            self._cleanup_browser()
+            self.logger.info(f"[PID:{pid}] Test step generation completed")

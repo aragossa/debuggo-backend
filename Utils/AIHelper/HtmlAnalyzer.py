@@ -1,17 +1,30 @@
 import psycopg2
-
+import threading
 from datetime import datetime
 from typing import Dict, Any, Tuple
 
 from Utils.AIHelper.AIHelper import AIHelper
 from Utils.System import System
-
 from contextlib import contextmanager
+import logging
 
-class HtmlAlanyzer(AIHelper):
+class HtmlAnalyzer(AIHelper):
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(HtmlAnalyzer, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
     def __init__(self):
-        super().__init__()
-        self.system = System()
+        if not self._initialized:
+            super().__init__()
+            self.system = System()
+            self.logger = logging.getLogger(__name__)
+            self._initialized = True
 
     @contextmanager
     def get_db_connection(self):
@@ -115,5 +128,3 @@ class HtmlAlanyzer(AIHelper):
             return next_step, element_purpose, action, element_locator, by_strategy
         else:
             raise ValueError(f"Unsupported AI provider: {self.provider}")
-
-
