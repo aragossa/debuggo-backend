@@ -49,6 +49,7 @@ class System:
         self.ai_model = os.getenv('AI_MODEL', 'gemini').lower()
         self.gemini_api_key = os.getenv('GEMINI_API')
         self.claude_api_key = os.getenv('CLAUDE_API')
+        self.deepseek_api_key = os.getenv('DEEPSEEK_API')
 
         self._initialized = True
 

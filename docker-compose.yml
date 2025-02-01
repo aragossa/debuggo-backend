@@ -1,6 +1,7 @@
 services:
   auroqa:
     image: localhost/auroqa
+    platform: linux/amd64
     container_name: auroqa
     environment:
       - ENV_FILE_PATH=/app/.env
@@ -13,6 +14,7 @@ services:
 
   redis:
     image: redis:7.2-alpine
+    platform: linux/amd64
     container_name: auroqa-redis
     command: redis-server --appendonly yes
     ports:
@@ -30,6 +32,7 @@ services:
   auroqa-ui:
     image: localhost/testing-platform-ui
     container_name: auroqa-ui
+    platform: linux/amd64
     expose:
       - 80
     networks:
@@ -37,6 +40,7 @@ services:
 
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
+    platform: linux/amd64
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -45,6 +49,7 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:latest
+    platform: linux/amd64
     depends_on:
       - zookeeper
     ports:
@@ -57,11 +62,26 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    container_name: auroqa-postgres
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - /Users/aragossa/dzrprj/auroqa/auroqa-postgres:/var/lib/postgresql/data
+    networks:
+      - auroqa_network
 
   nginx:
     container_name: nginx
     restart: unless-stopped
     image: nginx
+    platform: linux/amd64
     ports:
         - 80:80
         - 443:443
@@ -72,6 +92,7 @@ services:
 
   certbot:
     image: certbot/certbot
+    platform: linux/amd64
     container_name: certbot
     volumes:
       - ./certbot/conf:/etc/letsencrypt

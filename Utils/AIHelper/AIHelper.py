@@ -19,6 +19,7 @@ class AIHelper:
         self.provider = system.ai_model.lower()
         self.gemini_api_key = system.gemini_api_key
         self.claude_api_key = system.claude_api_key
+        self.deepseek_api_key = system.deepseek_api_key
         self.logger = self._setup_logger()
         self.logger.info(f"Initialized AIHelper with provider: {self.provider}")
         self.db_connection = System.get_db_connection()
@@ -189,15 +190,15 @@ class AIHelper:
         )
         return text_prompt
 
-    def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude"]):
+    def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
         """
         Switch the AI provider.
 
         Args:
-            provider (str): The new AI provider to use ("ChatGPT", "Gemini", "Claude").
+            provider (str): The new AI provider to use ("ChatGPT", "Gemini", "Claude", "Deepseek").
         """
         self.provider = provider.lower()
-        self.logger.info(f"Switched AI provider to: {self.provider}")
+        self.logger.info(f"Switched to provider: {self.provider}")
 
     def send_request_to_gemini(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> Union[bool, Any]:
         if not self.gemini_api_key:
@@ -208,12 +209,9 @@ class AIHelper:
         for i in range(5):
             try:
                 if image:
-                    # model = genai.GenerativeModel('gemini-pro-vision')
                     response = model.generate_content([prompt, image])
                 else:
-                    # model = genai.GenerativeModel('gemini-pro')
                     response = model.generate_content(prompt)
-
                 break
             except google.api_core.exceptions.InternalServerError as e:
                 self.logger.info(e)
@@ -224,11 +222,19 @@ class AIHelper:
         if not response:
             raise RuntimeError('Unable to send request')
         try:
-            valid_json = response.text.replace("`", "").replace("json", "")
+            valid_json = response.text.replace("`", "").replace("json", "").strip()
             response_json = json.loads(valid_json)
-            return response_json
+            # Ensure we return a list of test cases
+            if isinstance(response_json, dict) and 'children' in response_json:
+                return response_json['children']
+            elif isinstance(response_json, list):
+                return response_json
+            else:
+                raise ValueError('Response does not contain a valid test case structure')
 
-        except ValueError:
+        except ValueError as e:
+            self.logger.error(f"JSON parsing error: {str(e)}")
+            self.logger.error(f"Raw response: {response.text}")
             raise ValueError('Cannot parse the response')
 
     def send_message_to_claude(self, prompt: str, image: Union[Image.Image, None] = None):
@@ -318,3 +324,84 @@ class AIHelper:
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 print(f"Error details: {e.response.text}")
             return {"error": error_msg}
+
+    def send_request_to_deepseek(self, prompt: str, image: Union[Image.Image, None] = None, text_content: str = None) -> Union[bool, Any]:
+        """
+        Send a request to Deepseek R1 API.
+        
+        Args:
+            prompt (str): The prompt to send to Deepseek
+            image (Image.Image, optional): PIL Image to analyze
+            text_content (str, optional): Additional text content
+        
+        Returns:
+            Union[bool, Any]: Response from the API
+        """
+        if not self.deepseek_api_key:
+            raise ValueError("Deepseek API key is required")
+
+        headers = {
+            "Authorization": f"Bearer {self.deepseek_api_key}",
+            "Content-Type": "application/json"
+        }
+
+        messages = [{"role": "user", "content": prompt}]
+
+        # Handle image if provided
+        if image:
+            # Convert image to base64
+            buffered = BytesIO()
+            image.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            # Add image content to messages
+            messages[0]["content"] = [
+                {
+                    "type": "text",
+                    "text": prompt
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_str}"
+                    }
+                }
+            ]
+
+        payload = {
+            "model": "deepseek-coder-33b-instruct",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048
+        }
+
+        try:
+            response = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            response_data = response.json()
+            
+            try:
+                valid_json = response_data['choices'][0]['message']['content'].replace("`", "").replace("json", "").strip()
+                response_json = json.loads(valid_json)
+                # Ensure we return a list of test cases
+                if isinstance(response_json, dict) and 'children' in response_json:
+                    return response_json['children']
+                elif isinstance(response_json, list):
+                    return response_json
+                else:
+                    raise ValueError('Response does not contain a valid test case structure')
+            except ValueError as e:
+                self.logger.error(f"JSON parsing error: {str(e)}")
+                self.logger.error(f"Raw response: {response_data}")
+                raise ValueError('Cannot parse the response')
+
+        except requests.RequestException as e:
+            error_msg = f"Error sending request to Deepseek: {str(e)}"
+            self.logger.error(error_msg)
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                self.logger.error(f"Error details: {e.response.text}")
+            raise RuntimeError(error_msg)
