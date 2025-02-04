@@ -37,94 +37,80 @@ class HtmlAnalyzer(AIHelper):
             if connection:
                 System._pool.putconn(connection)
 
+    def add_step_to_history(self, test_case_id: int, step_data: dict):
+        """Add a step to the test case history."""
+        if test_case_id not in self._step_history:
+            self._step_history[test_case_id] = []
+        self._step_history[test_case_id].append(step_data)
 
-    def save_step(self, test_case_id: int, step_order: int, element_purpose: str, action: str, element_locator: str, value: str, by_strategy: str) -> int:
-        try:
-            with self.get_db_connection() as connection:
-                with connection.cursor() as cursor:
-                    insert_query = """
-                        INSERT INTO public.test_steps (
-                            test_case_id,
-                            step_order,
-                            description,
-                            action,
-                            element_path,
-                            value,
-                            path_type,
-                            created_at,
-                            updated_at
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        ) RETURNING id;
-                    """
+    def get_step_history(self, test_case_id: int) -> list:
+        """Get the step history for a test case."""
+        return self._step_history.get(test_case_id, [])
 
-                    current_timestamp = datetime.now()
+    def clear_step_history(self, test_case_id: int):
+        """Clear the step history for a test case."""
+        if test_case_id in self._step_history:
+            del self._step_history[test_case_id]
 
-                    cursor.execute(
-                        insert_query,
-                        (
-                            test_case_id,
-                            step_order,
-                            element_purpose,
-                            action,
-                            element_locator,
-                            value,
-                            by_strategy,
-                            current_timestamp,
-                            current_timestamp
-                        )
-                    )
-
-                    new_step_id = cursor.fetchone()[0]
-                    connection.commit()
-
-                    self.logger.info(f"Successfully saved test step with ID: {new_step_id}")
-                    return new_step_id
-
-        except psycopg2.Error as e:
-            self.logger.error(f"Database error while saving test step: {str(e)}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error while saving test step: {str(e)}")
-            raise
-
-
-    def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str) -> \
-    tuple[Any, Any, Any, Any, Any]:
-
+    def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
+                      next_prompt: str, prev_step_description: str) -> tuple[str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
-        prompt = self.get_analyze_html_promt(html_code=html_code,
-                                             test_name=test_name,
-                                             test_description=test_description,
-                                             step_order=step_order,
-                                             next_prompt=next_prompt,
-                                             prev_step_description=prev_step_description
-                                             )
+        prompt = self.get_analyze_html_prompt(
+            html_code=html_code,
+            test_name=test_name,
+            test_description=test_description,
+            step_order=step_order,
+            next_prompt=next_prompt,
+            prev_step_description=prev_step_description
+        )
 
 
         if self.provider == "gemini":
-            ai_response = self.send_request_to_gemini(prompt)
-            # todo: implement sending request to chatgpt, claude
-            # elif self.provider == "chatgpt":
-            #     response = self._mock_response("ChatGPT", html_code, element_purpose)
-            # elif self.provider == "claude":
-            #     response = self._mock_response("Claude", html_code, element_purpose)
+            self.logger.info("Sending request to Gemini")
+            response = self.send_request_to_gemini(prompt)
+            self.logger.info("=== HTML ANALYZER RESPONSE START ===")
 
-            element_purpose = ai_response['element_purpose']
-            action = ai_response['action']
-            element_locator = ai_response['element_locator']
-            by_strategy = ai_response['by_strategy']
-            value = ai_response['value']
-            next_step = ai_response['next_step']
+            # Validate required keys
+            required_keys = ['element_locator', 'by_strategy', 'action', 'element_purpose', 'next_step', 'value']
+            missing_keys = [k for k in required_keys if k not in response]
+            if missing_keys:
+                self.logger.warning(f"Missing required keys in response: {missing_keys}")
+                # Set default values for missing keys
+                for key in missing_keys:
+                    response[key] = ''
 
-            self.save_step(test_case_id=test_case_id,
-                           step_order=step_order,
-                           element_purpose=element_purpose,
-                           action=action,
-                           element_locator=element_locator,
-                           value=value,
-                           by_strategy=by_strategy)
-            self.logger.info(f"Received response from {self.provider}: {ai_response}")
-            return next_step, element_purpose, action, element_locator, by_strategy
+            # Normalize by_strategy to match database constraints
+            if response['by_strategy'].lower() not in ['css', 'xpath']:
+                response['by_strategy'] = 'xpath'  # Default to xpath if invalid
+            else:
+                response['by_strategy'] = response['by_strategy'].lower()
+
+            # Add step to history
+            step_data = {
+                'element_purpose': response['element_purpose'],
+                'action': response['action'],
+                'element_locator': response['element_locator'],
+                'by_strategy': response['by_strategy'],
+                'value': response['value'],
+                'next_step': response['next_step']
+            }
+
+            self.add_step_to_history(test_case_id, step_data)
+
+            # Return tuple in the expected order
+            return (
+                step_data['next_step'],
+                step_data['element_purpose'],
+                step_data['action'],
+                step_data['element_locator'],
+                step_data['by_strategy'],
+                step_data['value']
+            )
+        elif self.provider == "claude":
+            # Mock response for now
+            return "Stop", "Mock purpose", "click", "#mock", "css", ""
+        elif self.provider == "deepseek":
+            # Mock response for now
+            return "Stop", "Mock purpose", "click", "#mock", "css", ""
         else:
             raise ValueError(f"Unsupported AI provider: {self.provider}")

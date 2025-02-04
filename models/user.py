@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr
-from typing import Optional
+from pydantic import BaseModel, EmailStr, UUID4
+from typing import Optional, Literal
 from datetime import datetime
 
 class UserBase(BaseModel):
@@ -11,6 +11,8 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+    client_id: Optional[UUID4] = None
+    role: Optional[Literal['admin', 'user']] = 'user'
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -21,6 +23,8 @@ class User(UserBase):
     is_active: bool
     created_at: datetime
     last_login: Optional[datetime] = None
+    client_id: Optional[UUID4] = None
+    role: str = 'user'
 
     class Config:
         from_attributes = True

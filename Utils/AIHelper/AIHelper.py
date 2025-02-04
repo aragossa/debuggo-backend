@@ -1,19 +1,25 @@
 import base64
+import sys
 from io import BytesIO
-
+import time
 import google.generativeai as genai
 import google
 import json
 import logging
 from typing import Literal, Dict, Any, Union, Optional
 from PIL import Image
-
+import threading
 import requests
 
 from Utils.System import System
 
 
 class AIHelper:
+    _request_times = []  # Class variable to track request timestamps
+    _request_lock = threading.Lock()  # Lock for thread-safe access
+    _MAX_REQUESTS_PER_MINUTE = 10  # Gemini API limit
+    _step_history = {}  # Dictionary to store step history for each test case
+
     def __init__(self):
         system = System()
         self.provider = system.ai_model.lower()
@@ -25,18 +31,15 @@ class AIHelper:
         self.db_connection = System.get_db_connection()
 
     def _setup_logger(self):
-        """
-        Set up a logger for AIHelper.
-
-        Returns:
-            logging.Logger: Configured logger instance.
-        """
-        logger = logging.getLogger("AIHelper")
+        logger = logging.getLogger('AIHelper')
         logger.setLevel(logging.INFO)
 
-        handler = logging.StreamHandler()
+        # Remove existing handlers to prevent duplicate logging
+        logger.handlers = []
+
+        handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d  - %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
@@ -148,22 +151,28 @@ class AIHelper:
         )
         return text_prompt
 
-    def get_analyze_html_promt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str):
-        response_format = """
-        {
-          "element_locator": "xpath or css locator",
-          "by_strategy": "css or xpath",
-          "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
-          "element_purpose": "Describe the assertion purpose, e.g.: 'verify error message is displayed', 'check if button is enabled'",
-          "value": "For assertions, use one of the following formats:
-                   - Just text to verify element text content
-                   - visible=true/false to check element visibility
-                   - enabled=true/false to check if element is enabled
-                   - selected=true/false to check checkbox/radio selection
-                   - value=expected_value to check input/field value",
-          "next_step": "Prompt for the next action or 'Stop' if test is complete"
-        }
-        """
+    def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str) -> str:
+        # Get test case ID from test name (assuming it's stored in the format "Test Case #123")
+        try:
+            test_case_id = int(''.join(filter(str.isdigit, test_name)))
+        except (ValueError, TypeError):
+            test_case_id = None
+            
+        # Build step history string
+        step_history = ""
+        if test_case_id is not None:
+            history = self.get_step_history(test_case_id)
+            if history:
+                step_history = "Previous steps executed:\n"
+                for idx, step in enumerate(history):
+                    step_history += (
+                        f"Step {idx}: {step['element_purpose']}\n"
+                        f"- Action: {step['action']}\n"
+                        f"- Element: {step['element_locator']} (using {step['by_strategy']})\n"
+                        f"- Value: {step['value']}\n"
+                    )
+                step_history += "\nAvoid repeating the same steps. Each new step should progress the test forward.\n"
+
         prev_step_prompt = ''
         if prev_step_description != '':
             prev_step_prompt = f'. Take in account that previous step was {prev_step_description}'
@@ -172,23 +181,43 @@ class AIHelper:
         if step_order == 0:
             skip_start_navigate = ". Skip the step with navigating to the first page.\n"
 
-        text_prompt = (
-            f"Act as an experienced QA engineer, you are creating {test_name} {test_description} {next_prompt if next_prompt is not None else ''}."
-            f"You should recursively go through all test steps and on each step you should assume next step until the test will be finished\n"
-            "If current step will be final step, put to the next_step attribute the word 'Stop'\n"
-            f"You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}\n"
-                "When performing assertions, consider the following validation patterns:\n"
-                "- Verify presence and text content of error messages, success messages, or labels\n"
-                "- Check if buttons or forms are enabled/disabled after certain actions\n"
-                "- Validate if elements are visible/hidden based on user interactions\n"
-                "- Confirm correct values in input fields, dropdowns, or other form elements\n"
-                "- Verify selected state of checkboxes and radio buttons\n"
-            f"Analyze the provided HTML code of a web page to identify an element that possible to be used on this step\n"
-            f"HTML Code:\n{html_code}\n"
-            "Provide your response **only** in JSON format without any additional explanation. Follow this format strictly:\n"
-            f"{response_format}"
-        )
-        return text_prompt
+        return f"""Act as an experienced QA engineer, you are creating {test_name} {test_description} {next_prompt if next_prompt is not None else ''}.
+You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
+If current step will be final step, put to the next_step attribute the word 'Stop'.
+You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
+{step_history}
+
+When performing assertions, consider the following validation patterns:
+- Verify presence and text content of error messages, success messages, or labels
+- Check if buttons or forms are enabled/disabled after certain actions
+- Validate if elements are visible/hidden based on user interactions
+- Confirm correct values in input fields, dropdowns, or other form elements
+- Verify selected state of checkboxes and radio buttons
+
+Analyze the provided HTML code of a web page to identify an element that possible to be used on this step.
+HTML Code:
+{html_code}
+
+Your response MUST be a valid JSON object with ALL of the following required fields:
+{{
+    "element_locator": "CSS or XPath selector to locate the element",
+    "by_strategy": "Must be either 'css' or 'xpath' (no other values allowed)",
+    "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
+    "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
+    "value": "For type actions: MUST provide actual test data (e.g., 'test@' for invalid email)",
+    "next_step": "Description of what to verify next, or 'Stop' if test is complete"
+}}
+
+IMPORTANT REQUIREMENTS:
+1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
+2. Action Types: For any type of actions, ensure that the value field is non-empty and includes appropriate test data.
+3. Invalid Email Formats: When testing email fields, use invalid formats such as: test@, @domain.com, invalid.email
+4. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
+5. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
+6. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
+7. No Explanations: Do not include any explanation text. Only the required JSON object should be output.
+8. Assertion: If applicable, specify an assertion to validate expected behavior. 
+"""
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
         """
@@ -200,43 +229,124 @@ class AIHelper:
         self.provider = provider.lower()
         self.logger.info(f"Switched to provider: {self.provider}")
 
+    def _wait_for_rate_limit(self):
+        """Wait if necessary to comply with rate limits."""
+        with self._request_lock:
+            now = time.time()
+            # Remove timestamps older than 1 minute
+            self._request_times = [t for t in self._request_times if now - t < 60]
+            
+            if len(self._request_times) >= self._MAX_REQUESTS_PER_MINUTE:
+                # Calculate how long to wait
+                oldest_request = self._request_times[0]
+                wait_time = 60 - (now - oldest_request)
+                if wait_time > 0:
+                    self.logger.warning(f"Rate limit approaching. Waiting {wait_time:.2f} seconds...")
+                    time.sleep(wait_time)
+                
+                # Clean up old timestamps again after waiting
+                now = time.time()
+                self._request_times = [t for t in self._request_times if now - t < 60]
+            
+            # Add current request timestamp
+            self._request_times.append(now)
+
     def send_request_to_gemini(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> Union[bool, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
+        
+        self._wait_for_rate_limit()
+        
         model = genai.GenerativeModel("gemini-2.0-flash-exp")
         genai.configure(api_key=self.gemini_api_key)
         response = None
-        for i in range(5):
+        max_retries = 5
+        base_delay = 2  # Start with 2 second delay
+        for attempt in range(max_retries):
             try:
+                # Wait for rate limit before each attempt
+                if attempt > 0:
+                    self._wait_for_rate_limit()
+                
                 if image:
                     response = model.generate_content([prompt, image])
                 else:
+                    self.logger.info(f"Sending prompt to Gemini: {prompt}")
                     response = model.generate_content(prompt)
+                # Get the response text
+                response_text = response.text.strip()
+
+                self.logger.info("=== RAW GEMINI RESPONSE START ===")
+                self.logger.info(f"Raw response text (first 1000 chars):\n{response_text[:1000]}")
+                if len(response_text) > 1000:
+                    self.logger.info(f"... and {len(response_text) - 1000} more characters")
+                self.logger.info("=== RAW GEMINI RESPONSE END ===")
+
+                # Try to parse as JSON
+                try:
+                    self.logger.info("Attempting to parse response as JSON...")
+                    parsed_response = json.loads(response_text)
+                    self.logger.info("Successfully parsed JSON response")
+                    self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                    return parsed_response
+                except json.JSONDecodeError as e:
+                    self.logger.info(f"Direct JSON parsing failed: {str(e)}")
+                    self.logger.info("Checking for JSON in code blocks...")
+
+                    # If JSON parsing fails, check if it's in a code block
+                    if "```json" in response_text:
+                        self.logger.info("Found ```json code block")
+                        json_content = response_text.split("```json")[1].split("```")[0].strip()
+                        self.logger.info(f"Extracted JSON from code block:\n{json_content}")
+                        try:
+                            parsed_response = json.loads(json_content)
+                            self.logger.info("Successfully parsed JSON from code block")
+                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                            return parsed_response
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"Failed to parse JSON from code block: {str(e)}")
+                            raise
+                    elif "```" in response_text:
+                        # Try extracting from any code block
+                        self.logger.info("Found generic code block")
+                        json_content = response_text.split("```")[1].strip()
+                        self.logger.info(f"Extracted content from code block:\n{json_content}")
+                        try:
+                            parsed_response = json.loads(json_content)
+                            self.logger.info("Successfully parsed JSON from generic code block")
+                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                            return parsed_response
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"Failed to parse JSON from generic code block: {str(e)}")
+                            raise
+
+                    self.logger.error("No valid JSON found in code blocks")
+                    self.logger.error(f"Raw response that failed parsing: {response_text}")
+                    raise ValueError('Cannot parse the response')
                 break
             except google.api_core.exceptions.InternalServerError as e:
-                self.logger.info(e)
-                continue
+                self.logger.warning(f"Internal server error (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay)
             except google.api_core.exceptions.DeadlineExceeded as e:
-                self.logger.info(e)
-                continue
+                self.logger.warning(f"Deadline exceeded (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay)
+            except google.api_core.exceptions.ResourceExhausted as e:
+                # For rate limit errors, always wait for the rate limiter
+                self.logger.warning(f"Rate limit hit (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    # Use exponential backoff in addition to rate limiting
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    self.logger.warning(f"Additional backoff: {delay} seconds")
+                    time.sleep(delay)
+            except Exception as e:
+                self.logger.error(f"Unexpected error: {str(e)}")
+                raise
+        
         if not response:
-            raise RuntimeError('Unable to send request')
-        try:
-            valid_json = response.text.replace("`", "").replace("json", "").strip()
-            response_json = json.loads(valid_json)
-            # Ensure we return a list of test cases
-            if isinstance(response_json, dict) and 'children' in response_json:
-                return response_json['children']
-            elif isinstance(response_json, list):
-                return response_json
-            else:
-                raise ValueError('Response does not contain a valid test case structure')
-
-        except ValueError as e:
-            self.logger.error(f"JSON parsing error: {str(e)}")
-            self.logger.error(f"Raw response: {response.text}")
-            raise ValueError('Cannot parse the response')
-
+            raise ValueError("No response received from Gemini API after retries")
+        
     def send_message_to_claude(self, prompt: str, image: Union[Image.Image, None] = None):
         """Send a message to Claude API."""
         if not self.claude_api_key:
@@ -253,19 +363,20 @@ class AIHelper:
 
         # Check image size and compress if necessary
         max_size = (1600, 1600)  # Maximum dimensions
-        if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
+        if image and (image.size[0] > max_size[0] or image.size[1] > max_size[1]):
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
 
         # Convert to RGB if necessary (removing alpha channel)
-        if image.mode in ('RGBA', 'LA'):
+        if image and image.mode in ('RGBA', 'LA'):
             background = Image.new('RGB', image.size, (255, 255, 255))
             background.paste(image, mask=image.split()[-1])
             image = background
 
         # Convert Image to base64 with compression
-        buffered = BytesIO()
-        image.save(buffered, format='JPEG', quality=85, optimize=True)
-        base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        if image:
+            buffered = BytesIO()
+            image.save(buffered, format='JPEG', quality=85, optimize=True)
+            base64_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
         media_type = "image/jpeg"
         content = [
@@ -398,10 +509,11 @@ class AIHelper:
                 self.logger.error(f"JSON parsing error: {str(e)}")
                 self.logger.error(f"Raw response: {response_data}")
                 raise ValueError('Cannot parse the response')
-
         except requests.RequestException as e:
             error_msg = f"Error sending request to Deepseek: {str(e)}"
             self.logger.error(error_msg)
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 self.logger.error(f"Error details: {e.response.text}")
             raise RuntimeError(error_msg)
+
+

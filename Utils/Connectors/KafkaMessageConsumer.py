@@ -4,6 +4,7 @@ from kafka import KafkaConsumer
 import json
 import logging
 import sys
+import os
 
 from Utils.BrowserAutomation.TestRunner import TestRunner
 
@@ -41,19 +42,11 @@ class KafkaMessageConsumer:
                         try:
                             request = record.value
                             if request.get('attachment_type') == 'image' and request.get('request_type') == 'generate_test_cases':
-                                file_path = request['file_path']
-
-                                image_analyzer = ImageAnalyzer()
-                                image_analyzer.analyze_img(file_path=file_path)
+                                self.process_message(request)
                                 
                             elif request.get('attachment_type') == 'text' and request.get('request_type') == 'generate_test_cases':
-                                text_analyzer = TextAnalyzer()
-                                file_content = request.get('file_content')
-                                if file_content:
-                                    result = text_analyzer.analyze_txt(file_content)
-                                else:
-                                    print("Warning: No file content in text request")
-
+                                self.process_message(request)
+                                
                             elif request.get('request_type') == 'generate_test_steps':
                                 runner = TestRunner()
                                 test_case_id = request.get('test_case_id')
@@ -65,6 +58,39 @@ class KafkaMessageConsumer:
 
             except Exception as e:
                 self.logger.error(f"Error consuming message: {e}")
+
+    def process_message(self, message):
+        """Process a message received from Kafka."""
+        try:
+            file_path = message.get('file_path')
+            file_name = message.get('file_name')
+            attachment_type = message.get('attachment_type')
+            client_id = message.get('client_id')
+
+            if not file_path or not file_name or not attachment_type:
+                self.logger.error("Missing required fields in message")
+                return
+
+            if attachment_type == 'image':
+                analyzer = ImageAnalyzer()
+                analyzer.analyze_img(file_path=file_path, client_id=client_id)
+            else:
+                analyzer = TextAnalyzer()
+                with open(file_path, 'rb') as file:
+                    file_content = file.read()
+                    analyzer.analyze_txt(file_content=file_content, client_id=client_id)
+
+            self.logger.info(f"Successfully processed {file_name}")
+
+            # Clean up the file after processing
+            try:
+                os.remove(file_path)
+                self.logger.info(f"Cleaned up file: {file_path}")
+            except OSError as e:
+                self.logger.error(f"Error removing file {file_path}: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Error processing message: {e}")
 
     def stop(self):
         self.running = False

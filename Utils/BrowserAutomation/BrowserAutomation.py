@@ -31,7 +31,7 @@ class BrowserAutomation:
 
         handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d  - %(message)s')
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
@@ -41,13 +41,16 @@ class BrowserAutomation:
         try:
             chrome_options = Options()
             if headless:
-                chrome_options.add_argument('--headless')
+                chrome_options.add_argument('--headless=new')  # Using new headless mode
 
             # Add common Chrome options
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--remote-debugging-port=9222')  # Enable debugging
+            chrome_options.add_argument('--enable-logging')  # Enable Chrome logging
+            chrome_options.add_argument('--v=1')  # Verbose logging
 
             self.driver = webdriver.Chrome(options=chrome_options)
             self.driver.implicitly_wait(5)
@@ -55,6 +58,8 @@ class BrowserAutomation:
 
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to setup browser: {str(e)}")
+            if hasattr(e, 'msg'):
+                self.logger.error(f"[PID:{self.pid}] Error message: {e.msg}")
             raise
 
     def navigate(self, url):
@@ -74,6 +79,10 @@ class BrowserAutomation:
             by (str): Selector type - 'xpath' or 'css' (default: 'css')
         """
         try:
+            # Handle None or empty by parameter
+            if not by:
+                by = 'css'  # Default to CSS if by is None or empty
+            
             # Set the appropriate By strategy based on by parameter
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
 
@@ -112,7 +121,7 @@ class BrowserAutomation:
             element = self.find_element(selector, by_strategy)
             element.clear()
             element.send_keys(text)
-            self.logger.info(f"[PID:{self.pid}] Typed text into element: {selector}")
+            self.logger.info(f"[PID:{self.pid}] Typed text: {text} into element: {selector}")
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to type text into element {selector}: {str(e)}")
             raise
@@ -173,7 +182,7 @@ class BrowserAutomation:
         """
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
-            element = self.find_element(selector, by)
+            element = self.find_element(selector, by_strategy)
             
             # Import ActionChains for hover
             from selenium.webdriver.common.action_chains import ActionChains
@@ -212,6 +221,10 @@ class BrowserAutomation:
             AssertionError: If the assertion fails
             ValueError: If the assertion type is invalid
         """
+        # Handle None or empty by_strategy
+        if not by_strategy:
+            by_strategy = 'css'  # Default to CSS if by_strategy is None or empty
+            
         element = self.find_element(element_path, by_strategy)
 
         if not element:
@@ -272,12 +285,68 @@ class BrowserAutomation:
             str: The HTML source code of the page.
         """
         try:
+            # Wait for the page to be in a stable state
+            WebDriverWait(self.driver, self.timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            
+            # Get page source
             page_source = self.driver.page_source
+            
+            if not page_source:
+                raise WebDriverException("Empty page source returned")
+                
             self.logger.info(f"[PID:{self.pid}] Retrieved page source successfully")
             return page_source
+            
+        except TimeoutException:
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for page to load")
+            raise
+        except WebDriverException as e:
+            self.logger.error(f"[PID:{self.pid}] WebDriver error getting page source: {str(e)}")
+            if hasattr(e, 'msg'):
+                self.logger.error(f"[PID:{self.pid}] Error message: {e.msg}")
+            raise
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to get page source: {str(e)}")
             raise
+
+    def wait_for_page_changes(self, timeout=None):
+        """
+        Wait for any changes in the page DOM.
+        
+        Args:
+            timeout (int, optional): Maximum time to wait in seconds. Defaults to self.timeout.
+        """
+        timeout = timeout or self.timeout
+        try:
+            # Get initial page source
+            initial_source = self.driver.page_source
+            
+            # Wait for page source to change
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.page_source != initial_source
+            )
+            
+            # Wait for the page to be in a stable state
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            
+            # Wait for any AJAX requests to complete
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return jQuery.active == 0') or True
+            )
+            
+            self.logger.info(f"[PID:{self.pid}] Page changes detected and page is stable")
+            return True
+            
+        except TimeoutException:
+            self.logger.warning(f"[PID:{self.pid}] No page changes detected within {timeout} seconds")
+            return False
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for page changes: {str(e)}")
+            return False
 
     def close(self):
         """Close the browser and cleanup"""

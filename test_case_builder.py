@@ -15,7 +15,7 @@ def build_tree(nodes, parent_id=None):
     return tree
 
 # Connect to the SQLite database
-def fetch_tree_data():
+def fetch_tree_data(client_id):
     # Establish connection to the SQLite database
     db = DbConnector()
     conn = db.get_connection()
@@ -26,7 +26,7 @@ def fetch_tree_data():
         WITH RECURSIVE TestCaseHierarchy AS (
             SELECT id, name, parent_id, type, "order", curl, test_case_id
             FROM test_cases
-            WHERE parent_id IS NULL  -- Start with root nodes
+            WHERE parent_id IS NULL AND client_id = ?  -- Start with root nodes
             UNION ALL
             SELECT tc.id, tc.name, tc.parent_id, tc.type, tc."order", tc.curl, tc.test_case_id
             FROM test_cases tc
@@ -34,7 +34,7 @@ def fetch_tree_data():
         )
         SELECT * FROM TestCaseHierarchy
         ORDER BY "order";
-    ''')
+    ''', (client_id,))
 
     # Fetch all results
     result = cursor.fetchall()
@@ -57,12 +57,12 @@ def fetch_tree_data():
     return nodes
 
 # Main function to generate the JSON object
-def get_tests_tree():
+def get_tests_tree(client_id):
     # Fetch the flat test case data from the database
-    nodes = fetch_tree_data()
+    nodes = fetch_tree_data(client_id)
 
     # Build the hierarchical tree structure
     tree_data = build_tree(nodes)
 
-    # Convert the tree structure to JSON format
+    # Return the tree structure
     return tree_data

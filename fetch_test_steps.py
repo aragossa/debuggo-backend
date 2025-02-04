@@ -1,23 +1,34 @@
 from Utils.Connectors.DbConnector import DbConnector
 
 
-def get_test_data_from_db(test_case_id: int):
+def get_test_data_from_db(test_case_id: int, client_id: str):
     db = DbConnector()
     conn = db.get_connection()
+
+    result = get_test_data_from_db_helper(conn, test_case_id, client_id)
+
+    conn.close()
+
+    return result
+
+
+def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
     cursor = conn.cursor()
 
     cursor.execute('''
          SELECT name, description, updated_at
          FROM test_cases
-         WHERE id = %s
-     ''', (test_case_id,))
+         WHERE id = %s AND client_id = %s
+     ''', (test_case_id, client_id))
 
     # Fetch test case details
     test_case_row = cursor.fetchone()
+    if not test_case_row:
+        return None
 
     # Query to get the test steps for the given test_case_id
     cursor.execute('''
-        SELECT id, step_order, description, expected_result, action
+        SELECT id, step_order, description, expected_result, action, value
         FROM test_steps
         WHERE test_case_id = %s
         ORDER BY step_order ASC
@@ -33,7 +44,8 @@ def get_test_data_from_db(test_case_id: int):
             "name": f"Test Step {row[1]}",
             "description": row[2],
             "expected_result": row[3],
-            "action": row[4]
+            "action": row[4],
+            "value": row[5]
         }
         for row in steps_rows
     ]
@@ -63,8 +75,6 @@ def get_test_data_from_db(test_case_id: int):
             "additional_info": row[7],
         }
         test_runs.append(test_run)
-
-    conn.close()
 
     # Return both test_steps and test_runs
     return {
