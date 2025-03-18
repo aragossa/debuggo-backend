@@ -45,6 +45,17 @@ class AIHelper:
 
         return logger
 
+    def read_img(self, file_path: str) -> Union[Image.Image, bool]:
+        try:
+            self.logger.debug({"message": f"Processed image: {file_path}"})
+            return Image.open(file_path)
+        except (IOError, OSError) as e:
+            self.logger.error({"error": f"Failed to process image: {str(e)}"})
+            return False
+        except Exception as e:
+            self.logger.error({"error": f"Unexpected error while processing image: {str(e)}"})
+            return False
+
     def get_analyze_img_promt(self):
         json_structure = """
            [
@@ -151,7 +162,7 @@ class AIHelper:
         )
         return text_prompt
 
-    def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str) -> str:
+    def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str, attached_screenshot: str = None) -> str:
         # Get test case ID from test name (assuming it's stored in the format "Test Case #123")
         try:
             test_case_id = int(''.join(filter(str.isdigit, test_name)))
@@ -186,7 +197,6 @@ You should recursively go through all test steps and on each step you should ass
 If current step will be final step, put to the next_step attribute the word 'Stop'.
 You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 {step_history}
-
 When performing assertions, consider the following validation patterns:
 - Verify presence and text content of error messages, success messages, or labels
 - Check if buttons or forms are enabled/disabled after certain actions
@@ -195,13 +205,14 @@ When performing assertions, consider the following validation patterns:
 - Verify selected state of checkboxes and radio buttons
 
 Analyze the provided HTML code of a web page to identify an element that possible to be used on this step.
+{'Also, consider the attached screenshot if available' if attached_screenshot is not None else ''}
 HTML Code:
 {html_code}
 
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
-    "element_locator": "CSS or XPath selector to locate the element",
-    "by_strategy": "Must be either 'css' or 'xpath' (no other values allowed)",
+    "element_locator": "XPath selector to locate the element",
+    "by_strategy": "xpath",
     "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST provide actual test data (e.g., 'test@' for invalid email)",
@@ -257,11 +268,12 @@ IMPORTANT REQUIREMENTS:
         
         self._wait_for_rate_limit()
         
+        # model = genai.GenerativeModel("gemini-2.0-flash-lite")
         model = genai.GenerativeModel("gemini-2.0-flash-exp")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5
-        base_delay = 2  # Start with 2 second delay
+        base_delay = 2  # Start with 2 seconds delay
         for attempt in range(max_retries):
             try:
                 # Wait for rate limit before each attempt
@@ -295,12 +307,9 @@ IMPORTANT REQUIREMENTS:
 
                     # If JSON parsing fails, check if it's in a code block
                     if "```json" in response_text:
-                        self.logger.info("Found ```json code block")
                         json_content = response_text.split("```json")[1].split("```")[0].strip()
-                        self.logger.info(f"Extracted JSON from code block:\n{json_content}")
                         try:
                             parsed_response = json.loads(json_content)
-                            self.logger.info("Successfully parsed JSON from code block")
                             self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
                             return parsed_response
                         except json.JSONDecodeError as e:
@@ -308,12 +317,10 @@ IMPORTANT REQUIREMENTS:
                             raise
                     elif "```" in response_text:
                         # Try extracting from any code block
-                        self.logger.info("Found generic code block")
                         json_content = response_text.split("```")[1].strip()
                         self.logger.info(f"Extracted content from code block:\n{json_content}")
                         try:
                             parsed_response = json.loads(json_content)
-                            self.logger.info("Successfully parsed JSON from generic code block")
                             self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
                             return parsed_response
                         except json.JSONDecodeError as e:

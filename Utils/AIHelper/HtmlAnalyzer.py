@@ -1,3 +1,5 @@
+import sys
+
 import psycopg2
 import threading
 from datetime import datetime
@@ -23,7 +25,7 @@ class HtmlAnalyzer(AIHelper):
         if not self._initialized:
             super().__init__()
             self.system = System()
-            self.logger = logging.getLogger(__name__)
+            self.logger = self._setup_logger()
             self._initialized = True
 
     @contextmanager
@@ -36,6 +38,22 @@ class HtmlAnalyzer(AIHelper):
         finally:
             if connection:
                 System._pool.putconn(connection)
+
+    def _setup_logger(self):
+        logger = logging.getLogger('HtmlAnalyzer')
+        logger.setLevel(logging.INFO)
+
+        # Remove any existing handlers to prevent duplicate logging
+        if logger.hasHandlers():
+            logger.handlers.clear()
+
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d  - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+        return logger
 
     def add_step_to_history(self, test_case_id: int, step_data: dict):
         """Add a step to the test case history."""
@@ -53,7 +71,7 @@ class HtmlAnalyzer(AIHelper):
             del self._step_history[test_case_id]
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
-                      next_prompt: str, prev_step_description: str) -> tuple[str, str, str, str, str, str]:
+                      next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         prompt = self.get_analyze_html_prompt(
             html_code=html_code,
@@ -61,13 +79,23 @@ class HtmlAnalyzer(AIHelper):
             test_description=test_description,
             step_order=step_order,
             next_prompt=next_prompt,
-            prev_step_description=prev_step_description
+            prev_step_description=prev_step_description,
+            attached_screenshot=screenshot_path
         )
-
+        self.logger.info(f"The screenshot path {prompt}")
+        self.logger.info(f"The screenshot path {screenshot_path}")
+        image = False
+        if screenshot_path:
+            self.logger.info(f"Reading the screenshot {screenshot_path}")
+            image = self.read_img(screenshot_path)
 
         if self.provider == "gemini":
-            self.logger.info("Sending request to Gemini")
-            response = self.send_request_to_gemini(prompt)
+            if image:
+                self.logger.info("Sending request to Gemini with image")
+                response = self.send_request_to_gemini(prompt, image)
+            else:
+                self.logger.info("Sending request to Gemini without image")
+                response = self.send_request_to_gemini(prompt)
             self.logger.info("=== HTML ANALYZER RESPONSE START ===")
 
             # Validate required keys

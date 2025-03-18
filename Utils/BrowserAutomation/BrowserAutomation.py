@@ -9,6 +9,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import logging
 import sys
 import os
+import tempfile
+import datetime
 
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
 
@@ -70,7 +72,7 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
 
-    def find_element(self, selector, by='css'):
+    def find_element(self, selector, by='xpath'):
         """
         Find an element using either CSS selector or XPath.
 
@@ -81,10 +83,10 @@ class BrowserAutomation:
         try:
             # Handle None or empty by parameter
             if not by:
-                by = 'css'  # Default to CSS if by is None or empty
+                by = 'xpath'  # Default to CSS if by is None or empty
             
             # Set the appropriate By strategy based on by parameter
-            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            by_strategy = By.XPATH if by.lower() == 'css' else By.CSS_SELECTOR
 
             element = WebDriverWait(self.driver, self.timeout).until(
                 EC.presence_of_element_located((by_strategy, selector))
@@ -98,7 +100,7 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Error finding element {selector}: {str(e)}")
             raise
 
-    def click(self, selector, by='css'):
+    def click(self, selector, by='xpath'):
         """
         Click an element using either CSS selector or XPath.
 
@@ -347,6 +349,32 @@ class BrowserAutomation:
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Error waiting for page changes: {str(e)}")
             return False
+
+    def take_screenshot(self):
+        """
+        Takes a screenshot of the current browser window and saves it to a temporary path.
+        
+        Returns:
+            str: The name of the saved screenshot file
+        """
+        try:
+            # Create a unique filename using timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            screenshot_name = f"screenshot_{timestamp}.png"
+            
+            # Get the system's temporary directory
+            temp_dir = tempfile.gettempdir()
+            screenshot_path = os.path.join(temp_dir, screenshot_name)
+            
+            # Take and save the screenshot
+            self.driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved: {screenshot_path}")
+            
+            return screenshot_path
+            
+        except WebDriverException as e:
+            self.logger.error(f"Failed to take screenshot: {str(e)}")
+            return None
 
     def close(self):
         """Close the browser and cleanup"""

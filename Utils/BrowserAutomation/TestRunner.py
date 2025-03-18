@@ -74,7 +74,7 @@ class TestRunner:
             self.logger.info(f"[PID:{self.pid}] HTML Analyzer initialized")
             # Initialize browser
             try:
-                self.browser = BrowserAutomation(headless=False)
+                self.browser = BrowserAutomation(headless=True)
                 self.logger.info(f"[PID:{self.pid}] Browser initialized")
             except Exception as e:
                 self.logger.error(f"[PID:{self.pid}] Failed to initialize browser: {str(e)}")
@@ -305,7 +305,7 @@ class TestRunner:
                 self._cleanup_browser()
                 
                 self.logger.info(f"[PID:{pid}] Creating new browser instance")
-                self.browser = BrowserAutomation(headless=False)
+                self.browser = BrowserAutomation(headless=True)
                 self.logger.info(f"[PID:{pid}] Browser started successfully")
 
                 # Get and execute test steps
@@ -356,7 +356,7 @@ class TestRunner:
             self._cleanup_browser()
             
             # Create new browser instance
-            self.browser = BrowserAutomation(headless=False)
+            self.browser = BrowserAutomation(headless=True)
             test_case_data = self._get_test_case(test_case_id=test_case_id)
             test_name = test_case_data[0]
             test_description = test_case_data[1]
@@ -366,6 +366,7 @@ class TestRunner:
             
             step_order = 0
             page_source = self.browser.get_page_source()
+            screenshot_path = self.browser.take_screenshot()
             prev_step_description = ''
             next_prompt = ''
             
@@ -380,6 +381,7 @@ class TestRunner:
                 retry_count = 0
                 while retry_count < max_retries:
                     try:
+                        self.logger.info(f"[PID:{pid}] Processing step {screenshot_path}")
                         self.logger.info(f"[PID:{pid}] Calling html_analyzer with step_order={step_order}, next_prompt={next_prompt}")
                         analyzer_response = html_analyzer.html_analyzer(
                             test_case_id=test_case_id,
@@ -389,9 +391,9 @@ class TestRunner:
                             step_order=step_order,
                             next_prompt=next_prompt,
                             prev_step_description=prev_step_description,
+                            screenshot_path=screenshot_path
                         )
                         self.logger.info(f"[PID:{pid}] Analyzer response: {analyzer_response}")
-                        self.logger.info(f"[PID:{pid}] Response type: {type(analyzer_response)}")
                         
                         # Handle tuple unpacking with defaults
                         if isinstance(analyzer_response, tuple):
@@ -448,8 +450,10 @@ class TestRunner:
                     if not self.browser.wait_for_page_changes():
                         self.logger.info(f"[PID:{pid}] No page changes detected, continuing...")
 
-                self.logger.info(f"[PID:{pid}] Step {step_order} completed - Purpose: {element_purpose}")
                 page_source = self.browser.get_page_source()
+                # Take a screenshot after getting page source
+                screenshot_path = self.browser.take_screenshot()
+                self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
                 step_order += 1
 
         except Exception as e:

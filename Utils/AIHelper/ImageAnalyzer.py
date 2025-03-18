@@ -24,17 +24,6 @@ class ImageAnalyzer(AIHelper):
             if connection:
                 System._pool.putconn(connection)
 
-    def read_img(self, file_path: str) -> Union[Image.Image, bool]:
-        try:
-            self.logger.debug({"message": f"Processed image: {file_path}"})
-            return Image.open(file_path)
-        except (IOError, OSError) as e:
-            self.logger.error({"error": f"Failed to process image: {str(e)}"})
-            return False
-        except Exception as e:
-            self.logger.error({"error": f"Unexpected error while processing image: {str(e)}"})
-            return False
-
     def check_test_case_exists(self, name, description):
         with self.get_db_connection() as connection:
             with connection.cursor() as cursor:

@@ -32,7 +32,7 @@ docker-build.sh
 docker-postgres.sh
 docker-run.sh
 Dockerfile
-swagger.json
+tests/swagger.json
 model/data/login_page.png
 model/data/dashboard_page.png
 testing-platform.iml
