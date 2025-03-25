@@ -281,13 +281,14 @@ IMPORTANT REQUIREMENTS:
                     self._wait_for_rate_limit()
                 
                 if image:
+                    self.logger.info(f"Sending prompt to Gemini with image")
                     response = model.generate_content([prompt, image])
                 else:
-                    self.logger.info(f"Sending prompt to Gemini: {prompt}")
+                    self.logger.info(f"Sending prompt to Gemini")
                     response = model.generate_content(prompt)
                 # Get the response text
                 response_text = response.text.strip()
-
+                
                 self.logger.info("=== RAW GEMINI RESPONSE START ===")
                 self.logger.info(f"Raw response text (first 1000 chars):\n{response_text[:1000]}")
                 if len(response_text) > 1000:
@@ -354,6 +355,8 @@ IMPORTANT REQUIREMENTS:
         if not response:
             raise ValueError("No response received from Gemini API after retries")
         
+        return response.text.strip()  # Return raw text if we couldn't parse JSON
+
     def send_message_to_claude(self, prompt: str, image: Union[Image.Image, None] = None):
         """Send a message to Claude API."""
         if not self.claude_api_key:
@@ -522,5 +525,3 @@ IMPORTANT REQUIREMENTS:
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 self.logger.error(f"Error details: {e.response.text}")
             raise RuntimeError(error_msg)
-
-

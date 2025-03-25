@@ -268,11 +268,32 @@ class TestRunner:
                 self.browser.assert_element(element_path, value, by_strategy)
             elif action == "hover":
                 self.browser.hover(element_path, by_strategy)
+            elif action == "select":
+                self.browser.select(element_path, value, by_strategy)
             else:
                 raise ValueError(f"Unsupported action: {action}")
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to execute step: {action} on {element_path}")
             self.logger.error(f"[PID:{self.pid}] Error details: {str(e)}")
+            # Log the actual selector strategy being used
+            if by_strategy:
+                self.logger.error(f"[PID:{self.pid}] Selector strategy: {by_strategy}")
+            # Log the stack trace for better debugging
+            import traceback
+            self.logger.error(f"[PID:{self.pid}] Stack trace: {traceback.format_exc()}")
+            
+            # Take a screenshot to help with debugging
+            try:
+                screenshot_path = self.browser.take_screenshot(f"error_{action}")
+                self.logger.error(f"[PID:{self.pid}] Error screenshot saved to: {screenshot_path}")
+                
+                # Log current page information
+                url = self.browser.driver.current_url
+                title = self.browser.driver.title
+                self.logger.error(f"[PID:{self.pid}] Page at time of error: {url} (Title: {title})")
+            except Exception as screenshot_error:
+                self.logger.error(f"[PID:{self.pid}] Failed to capture error screenshot: {str(screenshot_error)}")
+                
             raise
 
     @contextmanager

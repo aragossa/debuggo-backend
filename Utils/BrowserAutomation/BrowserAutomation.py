@@ -20,9 +20,9 @@ class BrowserAutomation:
         self.timeout = timeout
         self.driver = None
         self.logger = self._setup_logger()
+        self.pid = os.getpid()  # Initialize pid before setup_driver
         self.setup_driver(headless)
         self.env = EnvHelper()
-        self.pid = os.getpid()
 
     def _setup_logger(self):
         logger = logging.getLogger('BrowserAutomation')
@@ -78,15 +78,15 @@ class BrowserAutomation:
 
         Args:
             selector (str): Element selector
-            by (str): Selector type - 'xpath' or 'css' (default: 'css')
+            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
         try:
             # Handle None or empty by parameter
             if not by:
-                by = 'xpath'  # Default to CSS if by is None or empty
+                by = 'xpath'  # Default to xpath if by is None or empty
             
             # Set the appropriate By strategy based on by parameter
-            by_strategy = By.XPATH if by.lower() == 'css' else By.CSS_SELECTOR
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
 
             element = WebDriverWait(self.driver, self.timeout).until(
                 EC.presence_of_element_located((by_strategy, selector))
@@ -106,7 +106,7 @@ class BrowserAutomation:
 
         Args:
             selector (str): Element selector
-            by (str): Selector type - 'xpath' or 'css' (default: 'css')
+            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
@@ -117,7 +117,7 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to click element {selector}: {str(e)}")
             raise
 
-    def type_text(self, selector, text, by='css'):
+    def type_text(self, selector, text, by='xpath'):
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
             element = self.find_element(selector, by_strategy)
@@ -128,7 +128,7 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to type text into element {selector}: {str(e)}")
             raise
 
-    def press_key(self, selector, value, by='css'):
+    def press_key(self, selector, value, by='xpath'):
         # Define mapping of keys to Selenium Keys constants
         KEY_MAPPING = {
             'enter': Keys.ENTER,
@@ -165,7 +165,7 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to press {key.upper()} key on element {selector}: {str(e)}")
             raise
 
-    def get_text(self, selector, by='css'):
+    def get_text(self, selector, by='xpath'):
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
             element = self.find_element(selector, by_strategy)
@@ -174,13 +174,13 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to get text from element {selector}: {str(e)}")
             raise
 
-    def hover(self, selector, by='css'):
+    def hover(self, selector, by='xpath'):
         """
         Hover over an element using either CSS selector or XPath.
 
         Args:
             selector (str): Element selector
-            by (str): Selector type - 'xpath' or 'css' (default: 'css')
+            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
@@ -198,86 +198,55 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to hover over element {selector}: {str(e)}")
             raise
 
-    def wait_for_element(self, selector, by='css', timeout=None):
+    def wait_for_element(self, selector, by='xpath', timeout=None):
         timeout = timeout or self.timeout
         try:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            
+            # Log the exact selector and strategy being used for debugging
+            self.logger.info(f"[PID:{self.pid}] Waiting for element with selector: '{selector}' using strategy: {by_strategy}")
+            
+            # First, wait for the page to be loaded completely
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            
+            # Then wait for the specific element
             element = WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_element_located((by_strategy, selector))
             )
-            return element
-        except TimeoutException:
-            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element: {selector}")
-            raise
-
-    def assert_element(self, element_path: str, expected_value: str = None, by_strategy: str = None):
-        """
-        Assert various conditions about web elements.
-
-        Args:
-            element_path (str): The locator path to find the element
-            expected_value (str, optional): The expected value or condition to assert
-            by_strategy (str, optional): The strategy to locate the element (e.g., 'id', 'xpath', 'css')
-
-        Raises:
-            AssertionError: If the assertion fails
-            ValueError: If the assertion type is invalid
-        """
-        # Handle None or empty by_strategy
-        if not by_strategy:
-            by_strategy = 'css'  # Default to CSS if by_strategy is None or empty
             
-        element = self.find_element(element_path, by_strategy)
-
-        if not element:
-            raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
-
-        # If no expected value is provided, just assert element exists
-        if not expected_value:
-            return True
-
-        # Parse assertion type and expected value
-        if "=" in expected_value:
-            assertion_type, value = expected_value.split("=", 1)
-        else:
-            assertion_type = "text"
-            value = expected_value
-
-        assertion_type = assertion_type.strip().lower()
-
-        # Handle different types of assertions
-        if assertion_type == "text":
-            actual_text = element.text.strip()
-            if actual_text != value.strip():
-                raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
-
-        elif assertion_type == "value":
-            actual_value = element.get_attribute("value")
-            if actual_value != value:
-                raise AssertionError(f"[PID:{self.pid}] Expected value '{value}' but got '{actual_value}'")
-
-        elif assertion_type == "visible":
-            is_visible = element.is_displayed()
-            expected_visible = value.lower() == "true"
-            if is_visible != expected_visible:
-                raise AssertionError(f"[PID:{self.pid}] Expected visibility {expected_visible} but got {is_visible}")
-
-        elif assertion_type == "enabled":
-            is_enabled = element.is_enabled()
-            expected_enabled = value.lower() == "true"
-            if is_enabled != expected_enabled:
-                raise AssertionError(f"[PID:{self.pid}] Expected enabled {expected_enabled} but got {is_enabled}")
-
-        elif assertion_type == "selected":
-            is_selected = element.is_selected()
-            expected_selected = value.lower() == "true"
-            if is_selected != expected_selected:
-                raise AssertionError(f"[PID:{self.pid}] Expected selected {expected_selected} but got {is_selected}")
-
-        else:
-            raise ValueError(f"[PID:{self.pid}] Unsupported assertion type: {assertion_type}")
-
-        return True
+            self.logger.info(f"[PID:{self.pid}] Element found: '{selector}'")
+            return element
+            
+        except TimeoutException:
+            # Take a screenshot to debug the current page state
+            screenshot_path = self.take_screenshot()
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element: '{selector}'. Current page screenshot: {screenshot_path}")
+            
+            # Gather more information about the page for debugging
+            try:
+                page_url = self.driver.current_url
+                page_title = self.driver.title
+                self.logger.error(f"[PID:{self.pid}] Current page URL: {page_url}, Title: {page_title}")
+                
+                # Try to find all buttons on the page
+                all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                button_texts = [btn.text for btn in all_buttons if btn.text.strip()]
+                self.logger.error(f"[PID:{self.pid}] Available buttons on page: {button_texts}")
+                
+                # Extract and log a portion of the page source to help with debugging
+                page_source = self.driver.page_source
+                page_source_snippet = page_source[:1000] + "..." if len(page_source) > 1000 else page_source
+                self.logger.error(f"[PID:{self.pid}] Page source snippet: {page_source_snippet}")
+                
+            except Exception as page_ex:
+                self.logger.error(f"[PID:{self.pid}] Failed to gather debug info: {str(page_ex)}")
+                
+            raise
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error finding element {selector}: {str(e)}")
+            raise
 
     def get_page_source(self):
         """
@@ -350,31 +319,164 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Error waiting for page changes: {str(e)}")
             return False
 
-    def take_screenshot(self):
+    def take_screenshot(self, name=None):
         """
-        Takes a screenshot of the current browser window and saves it to a temporary path.
+        Takes a screenshot of the current browser window.
         
+        Args:
+            name (str, optional): A descriptive name for the screenshot. If not provided, a generic name will be used.
+            
         Returns:
-            str: The name of the saved screenshot file
+            str: The path to the saved screenshot file
         """
         try:
             # Create a unique filename using timestamp
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            screenshot_name = f"screenshot_{timestamp}.png"
+            screenshot_name = f"{name or 'screenshot'}_{timestamp}.png"
             
-            # Get the system's temporary directory
-            temp_dir = tempfile.gettempdir()
-            screenshot_path = os.path.join(temp_dir, screenshot_name)
+            # Use a dedicated screenshots directory instead of temp
+            screenshots_dir = os.path.join(os.getcwd(), 'screenshots')
+            
+            # Create the directory if it doesn't exist
+            if not os.path.exists(screenshots_dir):
+                os.makedirs(screenshots_dir)
+                
+            screenshot_path = os.path.join(screenshots_dir, screenshot_name)
             
             # Take and save the screenshot
             self.driver.save_screenshot(screenshot_path)
-            self.logger.info(f"Screenshot saved: {screenshot_path}")
+            self.logger.info(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
             
             return screenshot_path
             
         except WebDriverException as e:
-            self.logger.error(f"Failed to take screenshot: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to take screenshot: {str(e)}")
             return None
+
+    def select(self, selector, option_value, by='xpath'):
+        """
+        Select an option from a dropdown/select element.
+
+        Args:
+            selector (str): Element selector for the select element
+            option_value (str): Value of the option to select
+            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
+        """
+        try:
+            # Import Select for dropdown handling
+            from selenium.webdriver.support.ui import Select as WebDriverSelect
+            
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            element = self.find_element(selector, by_strategy)
+            
+            # Create a Select object and select by value
+            select = WebDriverSelect(element)
+            select.select_by_value(option_value)
+            
+            self.logger.info(f"[PID:{self.pid}] Selected option with value '{option_value}' from select element: {selector}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to select option from element {selector}: {str(e)}")
+            raise
+
+    def assert_element(self, element_path: str, expected_value: str = None, by_strategy: str = None):
+        """
+        Assert various conditions about web elements.
+
+        Args:
+            element_path (str): The locator path to find the element
+            expected_value (str, optional): The expected value or condition to assert
+            by_strategy (str, optional): The strategy to locate the element (e.g., 'id', 'xpath', 'css')
+
+        Raises:
+            AssertionError: If the assertion fails
+            ValueError: If the assertion type is invalid
+        """
+        # Handle None or empty by_strategy
+        if not by_strategy:
+            by_strategy = 'xpath'  # Default to xpath if by_strategy is None or empty
+        
+        self.logger.info(f"[PID:{self.pid}] Asserting on element with path: '{element_path}' using {by_strategy}")
+        
+        try:
+            element = self.find_element(element_path, by_strategy)
+
+            if not element:
+                raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
+
+            # If no expected value is provided, just assert element exists
+            if not expected_value:
+                self.logger.info(f"[PID:{self.pid}] Element exists assertion passed for: {element_path}")
+                return True
+
+            # Parse assertion type and expected value
+            if "=" in expected_value:
+                assertion_type, value = expected_value.split("=", 1)
+            else:
+                assertion_type = "text"
+                value = expected_value
+
+            assertion_type = assertion_type.strip().lower()
+            self.logger.info(f"[PID:{self.pid}] Checking {assertion_type} assertion with expected value: '{value}'")
+
+            # Handle different types of assertions
+            if assertion_type == "text":
+                actual_text = element.text.strip()
+                if actual_text != value.strip():
+                    raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
+
+            elif assertion_type == "value":
+                actual_value = element.get_attribute("value")
+                if actual_value != value:
+                    raise AssertionError(f"[PID:{self.pid}] Expected value '{value}' but got '{actual_value}'")
+
+            elif assertion_type == "visible":
+                is_visible = element.is_displayed()
+                expected_visible = value.lower() == "true"
+                if is_visible != expected_visible:
+                    raise AssertionError(f"[PID:{self.pid}] Expected visibility {expected_visible} but got {is_visible}")
+
+            elif assertion_type == "enabled":
+                is_enabled = element.is_enabled()
+                expected_enabled = value.lower() == "true"
+                if is_enabled != expected_enabled:
+                    raise AssertionError(f"[PID:{self.pid}] Expected enabled {expected_enabled} but got {is_enabled}")
+
+            elif assertion_type == "selected":
+                is_selected = element.is_selected()
+                expected_selected = value.lower() == "true"
+                if is_selected != expected_selected:
+                    raise AssertionError(f"[PID:{self.pid}] Expected selected {expected_selected} but got {is_selected}")
+
+            else:
+                raise ValueError(f"[PID:{self.pid}] Unsupported assertion type: {assertion_type}")
+
+            self.logger.info(f"[PID:{self.pid}] Assertion passed for element: {element_path}")
+            return True
+        
+        except TimeoutException as e:
+            # Take a screenshot for debugging
+            screenshot_path = self.take_screenshot()
+            
+            # Log additional debugging information
+            try:
+                page_url = self.driver.current_url
+                page_title = self.driver.title
+                
+                # Try to find all buttons on the page to help with debugging
+                all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                button_texts = [btn.text for btn in all_buttons if btn.text.strip()]
+                
+                error_msg = f"[PID:{self.pid}] Element not found: {element_path}\n"
+                error_msg += f"Current URL: {page_url}\n"
+                error_msg += f"Page title: {page_title}\n"
+                error_msg += f"Available buttons: {button_texts}\n"
+                error_msg += f"Screenshot saved at: {screenshot_path}"
+                
+                self.logger.error(error_msg)
+            except Exception as debug_ex:
+                self.logger.error(f"[PID:{self.pid}] Error gathering debug info: {str(debug_ex)}")
+            
+            raise
 
     def close(self):
         """Close the browser and cleanup"""

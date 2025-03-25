@@ -82,7 +82,6 @@ class HtmlAnalyzer(AIHelper):
             prev_step_description=prev_step_description,
             attached_screenshot=screenshot_path
         )
-        self.logger.info(f"The screenshot path {prompt}")
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
         if screenshot_path:
