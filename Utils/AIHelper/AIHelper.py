@@ -268,8 +268,7 @@ IMPORTANT REQUIREMENTS:
         
         self._wait_for_rate_limit()
         
-        # model = genai.GenerativeModel("gemini-2.0-flash-lite")
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        model = genai.GenerativeModel("gemini-2.5-pro-exp-03-25")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5

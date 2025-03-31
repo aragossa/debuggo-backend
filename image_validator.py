@@ -27,7 +27,7 @@ def is_relevant_content():
                     }
                     """)
 
-    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+    model = genai.GenerativeModel("gemini-2.5-pro-exp-03-25")
     for i in range(5):
         try:
             response = model.generate_content([text_prompt, image])

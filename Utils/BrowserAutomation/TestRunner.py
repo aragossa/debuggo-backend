@@ -307,17 +307,31 @@ class TestRunner:
             if connection:
                 System._pool.putconn(connection)
 
-    def run_test_case(self, test_case_id: int):
+    def run_test_case(self, test_case_id: int, environment_vars=None):
         """
         Run a complete test case
 
         Args:
             test_case_id: ID of the test case to run
+            environment_vars: Optional dictionary with environment variables (base_url, login, password)
         """
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting test case execution for ID: {test_case_id}")
         start_time = datetime.now()
         env = EnvHelper()
+        
+        # Override environment variables if provided
+        if environment_vars:
+            self.logger.info(f"[PID:{pid}] Using custom environment variables")
+            if 'base_url' in environment_vars and environment_vars['base_url']:
+                env.base_url = environment_vars['base_url']
+                self.logger.info(f"[PID:{pid}] Using custom base_url: {env.base_url}")
+            if 'login' in environment_vars and environment_vars['login']:
+                env.login = environment_vars['login']
+                self.logger.info(f"[PID:{pid}] Using custom login")
+            if 'password' in environment_vars and environment_vars['password']:
+                env.password = environment_vars['password']
+                self.logger.info(f"[PID:{pid}] Using custom password")
 
         with self._process_lock():
             try:
@@ -358,7 +372,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
                 self._cleanup_browser()
 
-    def generate_test_steps(self, test_case_id: int):
+    def generate_test_steps(self, test_case_id: int, environment_vars=None):
         """Generate test steps using AI analysis of page HTML."""
         pid = os.getpid()
         try:
@@ -372,6 +386,19 @@ class TestRunner:
             system = System()
             env = EnvHelper()
             html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
+            
+            # Override environment variables if provided
+            if environment_vars:
+                self.logger.info(f"[PID:{pid}] Using custom environment variables for test generation")
+                if 'base_url' in environment_vars and environment_vars['base_url']:
+                    env.base_url = environment_vars['base_url']
+                    self.logger.info(f"[PID:{pid}] Using custom base_url: {env.base_url}")
+                if 'login' in environment_vars and environment_vars['login']:
+                    env.login = environment_vars['login']
+                    self.logger.info(f"[PID:{pid}] Using custom login")
+                if 'password' in environment_vars and environment_vars['password']:
+                    env.password = environment_vars['password']
+                    self.logger.info(f"[PID:{pid}] Using custom password")
             
             # Clean up any existing browser instance
             self._cleanup_browser()

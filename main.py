@@ -461,22 +461,56 @@ async def get_test_cases(id: int, current_user: User = Depends(get_current_user)
         return_db_connection(conn)
 
 @app.post("/api/run_test_case/{id}", response_model=Dict)
-async def run_test_case(id: int, current_user: User = Depends(get_current_user)):
+async def run_test_case(
+    id: int, 
+    request_data: dict = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Endpoint to run test script.
+    If environment_id is provided, the test will use the environment variables.
     """
+    conn = None
     try:
         # Get the singleton instance of TestRunner
         runner = TestRunner()
         
+        environment_vars = {}
+        
+        # If environment_id is provided, fetch environment variables
+        if request_data and "environment_id" in request_data:
+            environment_id = request_data.get("environment_id")
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT e.base_url, e.login, e.password
+                    FROM environments e
+                    JOIN projects p ON e.project_id = p.id
+                    WHERE e.id = %s AND p.client_id = %s
+                    """,
+                    (environment_id, str(current_user.client_id))
+                )
+                env_data = cursor.fetchone()
+                
+                if env_data:
+                    environment_vars = {
+                        "base_url": env_data[0],
+                        "login": env_data[1],
+                        "password": env_data[2]
+                    }
+        
         # Run the test case in a blocking manner to prevent concurrent executions
-        result = await asyncio.to_thread(runner.run_test_case, id)
+        result = await asyncio.to_thread(runner.run_test_case, id, environment_vars)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to run test case: {str(e)}"
         )
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 @app.post("/api/generate_steps/{id}", response_model=Dict)
 async def generate_steps(
@@ -487,6 +521,7 @@ async def generate_steps(
     """
     Endpoint to generate test steps for a test case.
     If project_id is provided, the test case will be associated with that project.
+    If environment_id is provided, the test will use the environment variables.
     """
     conn = None
     try:
@@ -520,22 +555,49 @@ async def generate_steps(
         if conn:
             return_db_connection(conn)
 
-    # Send the request to Kafka
-    system = System()
-    BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
-    TOPIC = 'user_requests'
-    GROUP_ID = 'auroqa-group'
-
-    producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
-    request = {}
-
-    request['request_type'] = 'generate_test_steps'
-    request['test_case_id'] = f'{id}'
-    producer.send_message(request)
-    producer.close()
-
-    result = {'result': 'queued'}
-    return JSONResponse(content=result)
+    try:
+        # Get the singleton instance of TestRunner
+        runner = TestRunner()
+        
+        # Set up environment variables if environment_id is provided
+        environment_vars = {}
+        if request_data and request_data.environment_id:
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT e.base_url, e.login, e.password
+                        FROM environments e
+                        JOIN projects p ON e.project_id = p.id
+                        WHERE e.id = %s AND p.client_id = %s
+                        """,
+                        (request_data.environment_id, str(current_user.client_id))
+                    )
+                    env_data = cursor.fetchone()
+                    
+                    if env_data:
+                        environment_vars = {
+                            "base_url": env_data[0],
+                            "login": env_data[1],
+                            "password": env_data[2]
+                        }
+            finally:
+                if conn:
+                    return_db_connection(conn)
+        
+        # Start the test step generation in a separate thread
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars))
+        thread.daemon = True
+        thread.start()
+        
+        return {"status": "started"}
+    except Exception as e:
+        print(f"Error generating test steps: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate test steps: {str(e)}"
+        )
 
 @app.post("/api/confirm_generate_steps/{id}", response_model=Dict)
 async def confirm_generate_steps(
@@ -546,55 +608,90 @@ async def confirm_generate_steps(
     """
     Endpoint to confirm and regenerate test steps for a test case.
     If project_id is provided, the test case will be associated with that project.
+    If environment_id is provided, the test will use the environment variables.
     """
     conn = None
     try:
-        # If project_id is provided, update the test case's project_id
-        if request_data and request_data.project_id:
-            conn = get_db_connection()
-            with conn.cursor() as cursor:
-                # Verify the test case exists
-                cursor.execute(
-                    "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
-                    (id, str(current_user.client_id))
-                )
-                if not cursor.fetchone():
-                    raise HTTPException(status_code=404, detail="Test case not found")
-                
-                # Update the project_id
+        # First, delete existing steps
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify the test case exists and belongs to the user's client
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Test case not found")
+            
+            # Delete existing steps
+            cursor.execute(
+                "DELETE FROM test_steps WHERE test_case_id = %s",
+                (id,)
+            )
+            
+            # If project_id is provided, update the test case's project_id
+            if request_data and request_data.project_id:
                 cursor.execute(
                     "UPDATE test_cases SET project_id = %s WHERE id = %s",
                     (str(request_data.project_id), id)
                 )
-                conn.commit()
+            
+            conn.commit()
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating test case project: {e}")
+        print(f"Error deleting existing test steps: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to update test case project: {str(e)}"
+            detail=f"Failed to delete existing test steps: {str(e)}"
         )
     finally:
         if conn:
             return_db_connection(conn)
-
-    # Send the request to Kafka
-    system = System()
-    BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
-    TOPIC = 'user_requests'
-    GROUP_ID = 'auroqa-group'
-
-    producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
-    request = {}
-
-    request['request_type'] = 'confirm_generate_test_steps'
-    request['test_case_id'] = f'{id}'
-    producer.send_message(request)
-    producer.close()
-
-    result = {'result': 'queued'}
-    return JSONResponse(content=result)
+    
+    try:
+        # Get the singleton instance of TestRunner
+        runner = TestRunner()
+        
+        # Set up environment variables if environment_id is provided
+        environment_vars = {}
+        if request_data and request_data.environment_id:
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT e.base_url, e.login, e.password
+                        FROM environments e
+                        JOIN projects p ON e.project_id = p.id
+                        WHERE e.id = %s AND p.client_id = %s
+                        """,
+                        (request_data.environment_id, str(current_user.client_id))
+                    )
+                    env_data = cursor.fetchone()
+                    
+                    if env_data:
+                        environment_vars = {
+                            "base_url": env_data[0],
+                            "login": env_data[1],
+                            "password": env_data[2]
+                        }
+            finally:
+                if conn:
+                    return_db_connection(conn)
+        
+        # Start the test step generation in a separate thread
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars))
+        thread.daemon = True
+        thread.start()
+        
+        return {"status": "started"}
+    except Exception as e:
+        print(f"Error generating test steps: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate test steps: {str(e)}"
+        )
 
 @app.patch("/api/update_test_step/{id}")
 async def update_test_step(
@@ -1221,7 +1318,7 @@ async def get_project_environments(
             # Get all environments for this project
             cursor.execute(
                 """
-                SELECT id, name, base_url, username, password, created_at, updated_at
+                SELECT id, name, base_url, login, password, created_at, updated_at
                 FROM environments
                 WHERE project_id = %s
                 ORDER BY name
@@ -1235,7 +1332,7 @@ async def get_project_environments(
                     "id": environment[0],
                     "name": environment[1],
                     "base_url": environment[2],
-                    "username": environment[3],
+                    "login": environment[3],
                     "password": environment[4],
                     "created_at": environment[5].isoformat() if environment[5] else None,
                     "updated_at": environment[6].isoformat() if environment[6] else None
@@ -1247,6 +1344,199 @@ async def get_project_environments(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get project environments: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/projects/{project_id}/environments")
+async def create_environment(
+    project_id: str,
+    environment_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new environment for a specific project.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if project exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT id FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            # Create the environment
+            cursor.execute(
+                """
+                INSERT INTO environments (name, base_url, login, password, project_id)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, name, base_url, login, password, created_at, updated_at
+                """,
+                (
+                    environment_data.get("name"),
+                    environment_data.get("base_url"),
+                    environment_data.get("login"),
+                    environment_data.get("password"),
+                    project_id
+                )
+            )
+            environment = cursor.fetchone()
+            conn.commit()
+            
+            return {
+                "id": environment[0],
+                "name": environment[1],
+                "base_url": environment[2],
+                "login": environment[3],
+                "password": environment[4],
+                "created_at": environment[5].isoformat() if environment[5] else None,
+                "updated_at": environment[6].isoformat() if environment[6] else None
+            }
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error creating environment: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create environment: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.put("/api/environments/{environment_id}")
+async def update_environment(
+    environment_id: int,
+    environment_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update an existing environment.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if environment exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT e.id FROM environments e
+                JOIN projects p ON e.project_id = p.id
+                WHERE e.id = %s AND p.client_id = %s
+                """,
+                (environment_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Environment not found"
+                )
+            
+            # Update the environment
+            cursor.execute(
+                """
+                UPDATE environments
+                SET name = %s, base_url = %s, login = %s, password = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at
+                """,
+                (
+                    environment_data.get("name"),
+                    environment_data.get("base_url"),
+                    environment_data.get("login"),
+                    environment_data.get("password"),
+                    environment_id
+                )
+            )
+            environment = cursor.fetchone()
+            conn.commit()
+            
+            return {
+                "id": environment[0],
+                "name": environment[1],
+                "base_url": environment[2],
+                "login": environment[3],
+                "password": environment[4],
+                "project_id": environment[5],
+                "created_at": environment[6].isoformat() if environment[6] else None,
+                "updated_at": environment[7].isoformat() if environment[7] else None
+            }
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error updating environment: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update environment: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.delete("/api/environments/{environment_id}")
+async def delete_environment(
+    environment_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete an environment.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if environment exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT e.id FROM environments e
+                JOIN projects p ON e.project_id = p.id
+                WHERE e.id = %s AND p.client_id = %s
+                """,
+                (environment_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Environment not found"
+                )
+            
+            # Delete the environment
+            cursor.execute(
+                """
+                DELETE FROM environments
+                WHERE id = %s
+                RETURNING id
+                """,
+                (environment_id,)
+            )
+            deleted = cursor.fetchone()
+            conn.commit()
+            
+            if not deleted:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Environment not found"
+                )
+            
+            return {"message": "Environment deleted successfully"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error deleting environment: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete environment: {str(e)}"
         )
     finally:
         if conn:
