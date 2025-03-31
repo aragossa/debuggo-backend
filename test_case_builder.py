@@ -57,9 +57,14 @@ def fetch_tree_data(client_id):
     return nodes
 
 # Main function to generate the JSON object
-def get_tests_tree(client_id):
-    # Fetch the flat test case data from the database
-    nodes = fetch_tree_data(client_id)
+def get_tests_tree(client_id_or_test_cases):
+    # Check if we received a list of test cases or a client_id
+    if isinstance(client_id_or_test_cases, list):
+        # We received a list of test cases, use it directly
+        nodes = client_id_or_test_cases
+    else:
+        # We received a client_id, fetch the test cases from the database
+        nodes = fetch_tree_data(client_id_or_test_cases)
 
     # Build the hierarchical tree structure
     tree_data = build_tree(nodes)

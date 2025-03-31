@@ -2,18 +2,34 @@ import os
 import uuid
 from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Optional
-from threading import Thread
-from pydantic import BaseModel
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import JSONResponse
+from typing import Dict, List, Optional
+from pydantic import BaseModel, UUID4
+from datetime import datetime
+import json
+import psycopg2
+import psycopg2.extras
 from psycopg2.pool import SimpleConnectionPool
+import jwt
+from kafka import KafkaProducer, KafkaConsumer
+import threading
+from threading import Thread
+import time
+import sys
+import logging
+import traceback
+from pathlib import Path
+import requests
+from models.user import User, UserCreate, UserLogin, Token
+from models.client import Client, ClientCreate
+from models.test import GenerateStepsRequest
+from Utils.System import System
 from Utils.BrowserAutomation.TestRunner import TestRunner
 from Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
 from Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
-from Utils.System import System
 from Utils.auth import (
     create_access_token,
     get_password_hash,
@@ -22,8 +38,6 @@ from Utils.auth import (
     ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
-from models.user import UserCreate, User, Token
-from models.client import ClientCreate, Client
 from models.crud import create_user, get_user_by_email, get_client_test_cases
 from fetch_test_steps import get_test_data_from_db_helper
 from test_case_builder import get_tests_tree
@@ -241,6 +255,7 @@ async def get_users(current_user: User = Depends(get_current_user)):
 
 @app.post("/api/generate_test_cases_from_data", response_model=Dict)
 async def generate_test_cases(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user)
 ):
@@ -248,6 +263,16 @@ async def generate_test_cases(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not associated with any client"
+        )
+    
+    # Get form data
+    form = await request.form()
+    project_id = form.get("project_id")
+        
+    if not project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project ID is required"
         )
 
     file_path = None
@@ -270,7 +295,8 @@ async def generate_test_cases(
             'file_name': file.filename,
             'attachment_type': 'image' if file.filename.endswith('.png') else 'text',
             'request_type': 'generate_test_cases',
-            'client_id': str(current_user.client_id)  # Add client_id to the message
+            'client_id': str(current_user.client_id),
+            'project_id': project_id  # Add project_id to the message
         }
         producer.send_message(message)
         producer.close()
@@ -453,10 +479,48 @@ async def run_test_case(id: int, current_user: User = Depends(get_current_user))
         )
 
 @app.post("/api/generate_steps/{id}", response_model=Dict)
-async def run_test_case(id: int, current_user: User = Depends(get_current_user)):
+async def generate_steps(
+    id: int, 
+    request_data: GenerateStepsRequest = None,
+    current_user: User = Depends(get_current_user)
+):
     """
-    Endpoint to run test script.
+    Endpoint to generate test steps for a test case.
+    If project_id is provided, the test case will be associated with that project.
     """
+    conn = None
+    try:
+        # If project_id is provided, update the test case's project_id
+        if request_data and request_data.project_id:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                # Verify the test case exists
+                cursor.execute(
+                    "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                    (id, str(current_user.client_id))
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail="Test case not found")
+                
+                # Update the project_id
+                cursor.execute(
+                    "UPDATE test_cases SET project_id = %s WHERE id = %s",
+                    (str(request_data.project_id), id)
+                )
+                conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error updating test case project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update test case project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+    # Send the request to Kafka
     system = System()
     BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
     TOPIC = 'user_requests'
@@ -466,6 +530,65 @@ async def run_test_case(id: int, current_user: User = Depends(get_current_user))
     request = {}
 
     request['request_type'] = 'generate_test_steps'
+    request['test_case_id'] = f'{id}'
+    producer.send_message(request)
+    producer.close()
+
+    result = {'result': 'queued'}
+    return JSONResponse(content=result)
+
+@app.post("/api/confirm_generate_steps/{id}", response_model=Dict)
+async def confirm_generate_steps(
+    id: int, 
+    request_data: GenerateStepsRequest = None,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Endpoint to confirm and regenerate test steps for a test case.
+    If project_id is provided, the test case will be associated with that project.
+    """
+    conn = None
+    try:
+        # If project_id is provided, update the test case's project_id
+        if request_data and request_data.project_id:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                # Verify the test case exists
+                cursor.execute(
+                    "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                    (id, str(current_user.client_id))
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail="Test case not found")
+                
+                # Update the project_id
+                cursor.execute(
+                    "UPDATE test_cases SET project_id = %s WHERE id = %s",
+                    (str(request_data.project_id), id)
+                )
+                conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error updating test case project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update test case project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+    # Send the request to Kafka
+    system = System()
+    BOOTSTRAP_SERVERS = f"{system.kafka_host}:{system.kafka_port}"
+    TOPIC = 'user_requests'
+    GROUP_ID = 'auroqa-group'
+
+    producer = KafkaMessageProducer(BOOTSTRAP_SERVERS, TOPIC)
+    request = {}
+
+    request['request_type'] = 'confirm_generate_test_steps'
     request['test_case_id'] = f'{id}'
     producer.send_message(request)
     producer.close()
@@ -731,6 +854,403 @@ async def update_user_client(
             return {"message": "User's client updated successfully"}
     finally:
         return_db_connection(conn)
+
+@app.get("/api/projects")
+async def list_projects(current_user: User = Depends(get_current_user)):
+    """
+    List all projects for the current user's client.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, description, created_at, updated_at
+                FROM projects
+                WHERE client_id = %s
+                ORDER BY name
+                """,
+                (str(current_user.client_id),)
+            )
+            projects = cursor.fetchall()
+            
+            return [
+                {
+                    "id": str(project[0]),  # Convert UUID to string
+                    "name": project[1],
+                    "description": project[2],
+                    "created_at": project[3].isoformat() if project[3] else None,
+                    "updated_at": project[4].isoformat() if project[4] else None
+                }
+                for project in projects
+            ]
+    except Exception as e:
+        print(f"Error listing projects: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list projects: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/projects")
+async def create_project(
+    project_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new project for the current user's client.
+    """
+    if not project_data.get("name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Project name is required"
+        )
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO projects (name, description, client_id)
+                VALUES (%s, %s, %s)
+                RETURNING id, name, description, client_id, created_at, updated_at
+                """,
+                (
+                    project_data.get("name"),
+                    project_data.get("description"),
+                    str(current_user.client_id)
+                )
+            )
+            project = cursor.fetchone()
+            conn.commit()
+            
+            return {
+                "id": str(project[0]),  # Convert UUID to string
+                "name": project[1],
+                "description": project[2],
+                "client_id": str(project[3]) if project[3] else None,
+                "created_at": project[4].isoformat() if project[4] else None,
+                "updated_at": project[5].isoformat() if project[5] else None
+            }
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error creating project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/projects/{project_id}")
+async def get_project(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get a specific project by ID.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, description, client_id, created_at, updated_at
+                FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            project = cursor.fetchone()
+            
+            if not project:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            return {
+                "id": str(project[0]),  # Convert UUID to string
+                "name": project[1],
+                "description": project[2],
+                "client_id": str(project[3]) if project[3] else None,
+                "created_at": project[4].isoformat() if project[4] else None,
+                "updated_at": project[5].isoformat() if project[5] else None
+            }
+    except Exception as e:
+        print(f"Error getting project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.put("/api/projects/{project_id}")
+async def update_project(
+    project_id: str,
+    project_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update a specific project by ID.
+    """
+    if not project_data.get("name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Project name is required"
+        )
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if project exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT id FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            # Update project
+            cursor.execute(
+                """
+                UPDATE projects
+                SET name = %s, description = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, name, description, client_id, created_at, updated_at
+                """,
+                (
+                    project_data.get("name"),
+                    project_data.get("description"),
+                    project_id
+                )
+            )
+            project = cursor.fetchone()
+            conn.commit()
+            
+            return {
+                "id": str(project[0]),  # Convert UUID to string
+                "name": project[1],
+                "description": project[2],
+                "client_id": str(project[3]) if project[3] else None,
+                "created_at": project[4].isoformat() if project[4] else None,
+                "updated_at": project[5].isoformat() if project[5] else None
+            }
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error updating project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a specific project by ID.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if project exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT id FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            # Delete project
+            cursor.execute(
+                """
+                DELETE FROM projects
+                WHERE id = %s
+                """,
+                (project_id,)
+            )
+            conn.commit()
+            
+            return {"message": "Project deleted successfully"}
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error deleting project: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete project: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/projects/{project_id}/test_tree")
+async def get_project_test_tree(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the test case tree for a specific project.
+    """
+    # Helper function to build tree structure
+    def build_tree(nodes, parent_id=None):
+        tree = []
+        for node in nodes:
+            if node['parent_id'] == parent_id:
+                children = build_tree(nodes, node['id'])
+                if children:
+                    node['children'] = children
+                else:
+                    node['children'] = []
+                tree.append(node)
+        return tree
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if project exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT id FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            # Get all test cases for this project
+            cursor.execute(
+                """
+                SELECT id, name, description, parent_id, type, "order", created_at, updated_at
+                FROM test_cases
+                WHERE client_id = %s AND project_id = %s
+                ORDER BY "order"
+                """,
+                (str(current_user.client_id), project_id)
+            )
+            test_cases = cursor.fetchall()
+            
+            # Convert to a list of dictionaries
+            test_cases_list = [
+                {
+                    "id": test_case[0],
+                    "name": test_case[1],
+                    "description": test_case[2],
+                    "parent_id": test_case[3],
+                    "type": test_case[4],
+                    "order": test_case[5],
+                    "created_at": test_case[6].isoformat() if test_case[6] else None,
+                    "updated_at": test_case[7].isoformat() if test_case[7] else None
+                }
+                for test_case in test_cases
+            ]
+            
+            # Build the tree structure directly
+            tree_data = build_tree(test_cases_list)
+            return tree_data
+    except Exception as e:
+        print(f"Error getting project test tree: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get project test tree: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/projects/{project_id}/environments")
+async def get_project_environments(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all environments for a specific project.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if project exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT id FROM projects
+                WHERE id = %s AND client_id = %s
+                """,
+                (project_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Project not found"
+                )
+            
+            # Get all environments for this project
+            cursor.execute(
+                """
+                SELECT id, name, base_url, username, password, created_at, updated_at
+                FROM environments
+                WHERE project_id = %s
+                ORDER BY name
+                """,
+                (project_id,)
+            )
+            environments = cursor.fetchall()
+            
+            return [
+                {
+                    "id": environment[0],
+                    "name": environment[1],
+                    "base_url": environment[2],
+                    "username": environment[3],
+                    "password": environment[4],
+                    "created_at": environment[5].isoformat() if environment[5] else None,
+                    "updated_at": environment[6].isoformat() if environment[6] else None
+                }
+                for environment in environments
+            ]
+    except Exception as e:
+        print(f"Error getting project environments: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get project environments: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 if __name__ == "__main__":
     import uvicorn

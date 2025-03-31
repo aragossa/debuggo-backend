@@ -42,7 +42,7 @@ class TextAnalyzer(AIHelper):
                 result = cursor.fetchone()[0]
                 return result if result else 1  # Return 0 if no test_case_id exists
 
-    def insert_test_case(self, name, description, parent_id, type_, order_, test_case_id=None, client_id=None):
+    def insert_test_case(self, name, description, parent_id, type_, order_, test_case_id=None, client_id=None, project_id=None):
         """Insert a test case and return its ID."""
         # Set parent_id to None if it is 0 (indicating no parent)
         if parent_id == 0:
@@ -65,14 +65,14 @@ class TextAnalyzer(AIHelper):
 
                 self.logger.info('Inserting test case')
                 cursor.execute('''
-                    INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id, client_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
-                ''', (name, description, parent_id, type_, order_, test_case_id, client_id))
+                    INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id, client_id, project_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                ''', (name, description, parent_id, type_, order_, test_case_id, client_id, project_id))
 
                 connection.commit()  # Explicitly commit the transaction
                 return cursor.fetchone()[0]
 
-    def save_test_cases(self, test_cases, parent_id=None, type_='root', client_id=None):
+    def save_test_cases(self, test_cases, parent_id=None, type_='root', client_id=None, project_id=None):
         """Recursively save test cases and their children."""
         if not isinstance(test_cases, list):
             self.logger.error(f"Expected list of test cases, got {type(test_cases)}")
@@ -91,7 +91,8 @@ class TextAnalyzer(AIHelper):
                     parent_id=parent_id,
                     type_=test_type,
                     order_=idx,
-                    client_id=client_id
+                    client_id=client_id,
+                    project_id=project_id
                 )
 
                 if new_id is None:
@@ -100,14 +101,14 @@ class TextAnalyzer(AIHelper):
 
                 # Recursively handle children only if new_id is valid
                 if new_id and 'children' in test_case and test_case['children']:
-                    self.save_test_cases(test_case['children'], new_id, test_type, client_id)
+                    self.save_test_cases(test_case['children'], new_id, test_type, client_id, project_id)
 
             except Exception as e:
                 self.logger.error(f"Error processing test case: {str(e)}")
                 continue
 
-    def analyze_txt(self, file_content: bytes, client_id: int = None) -> bool:
-        text_content = file_content.decode('utf-8')
-        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_txt_promt(text_content=text_content))
-        self.save_test_cases(genai_response, client_id=client_id)
+    def analyze_txt(self, file_content: bytes, client_id: int = None, project_id: str = None):
+        text = file_content.decode('utf-8')
+        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_txt_promt(), text=text)
+        self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True

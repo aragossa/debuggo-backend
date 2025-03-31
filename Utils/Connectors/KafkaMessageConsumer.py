@@ -66,6 +66,7 @@ class KafkaMessageConsumer:
             file_name = message.get('file_name')
             attachment_type = message.get('attachment_type')
             client_id = message.get('client_id')
+            project_id = message.get('project_id')  
 
             if not file_path or not file_name or not attachment_type:
                 self.logger.error("Missing required fields in message")
@@ -73,12 +74,12 @@ class KafkaMessageConsumer:
 
             if attachment_type == 'image':
                 analyzer = ImageAnalyzer()
-                analyzer.analyze_img(file_path=file_path, client_id=client_id)
+                analyzer.analyze_img(file_path=file_path, client_id=client_id, project_id=project_id)
             else:
                 analyzer = TextAnalyzer()
                 with open(file_path, 'rb') as file:
                     file_content = file.read()
-                    analyzer.analyze_txt(file_content=file_content, client_id=client_id)
+                    analyzer.analyze_txt(file_content=file_content, client_id=client_id, project_id=project_id)
 
             self.logger.info(f"Successfully processed {file_name}")
 
