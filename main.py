@@ -135,9 +135,16 @@ async def lifespan(app: FastAPI):
 
     # Initialize Kafka consumer
     kafka_bootstrap_servers = f"{system.kafka_host}:{system.kafka_port}"
-    kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'auroqa-group')
-    consumer_thread = Thread(target=kafka_consumer.consume_messages, daemon=True)
-    consumer_thread.start()
+    try:
+        kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'auroqa-group')
+        consumer_thread = Thread(target=kafka_consumer.consume_messages, daemon=True)
+        consumer_thread.start()
+        print(f"Kafka consumer initialized and connected to {kafka_bootstrap_servers}")
+    except Exception as e:
+        print(f"Warning: Failed to initialize Kafka consumer: {e}")
+        print("Application will continue without Kafka integration")
+        kafka_consumer = None
+        consumer_thread = None
     
     # Initialize TestRunner singleton
     try:

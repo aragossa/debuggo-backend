@@ -318,21 +318,16 @@ class TestRunner:
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting test case execution for ID: {test_case_id}")
         start_time = datetime.now()
-        env = EnvHelper()
         
-        # Override environment variables if provided
+        # Initialize environment helper with provided variables
+        env = EnvHelper(environment_vars)
+        
+        # Log environment variables for debugging
         if environment_vars:
-            self.logger.info(f"[PID:{pid}] Using custom environment variables")
-            if 'base_url' in environment_vars and environment_vars['base_url']:
-                env.base_url = environment_vars['base_url']
-                self.logger.info(f"[PID:{pid}] Using custom base_url: {env.base_url}")
-            if 'login' in environment_vars and environment_vars['login']:
-                env.login = environment_vars['login']
-                self.logger.info(f"[PID:{pid}] Using custom login")
-            if 'password' in environment_vars and environment_vars['password']:
-                env.password = environment_vars['password']
-                self.logger.info(f"[PID:{pid}] Using custom password")
-
+            self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
+        else:
+            self.logger.warning(f"[PID:{pid}] No environment variables provided")
+        
         with self._process_lock():
             try:
                 # Initialize browser
@@ -384,21 +379,16 @@ class TestRunner:
             
             # Initialize components
             system = System()
-            env = EnvHelper()
-            html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
+            # Initialize environment helper with provided variables
+            env = EnvHelper(environment_vars)
             
-            # Override environment variables if provided
+            # Log environment variables for debugging
             if environment_vars:
-                self.logger.info(f"[PID:{pid}] Using custom environment variables for test generation")
-                if 'base_url' in environment_vars and environment_vars['base_url']:
-                    env.base_url = environment_vars['base_url']
-                    self.logger.info(f"[PID:{pid}] Using custom base_url: {env.base_url}")
-                if 'login' in environment_vars and environment_vars['login']:
-                    env.login = environment_vars['login']
-                    self.logger.info(f"[PID:{pid}] Using custom login")
-                if 'password' in environment_vars and environment_vars['password']:
-                    env.password = environment_vars['password']
-                    self.logger.info(f"[PID:{pid}] Using custom password")
+                self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
+            else:
+                self.logger.warning(f"[PID:{pid}] No environment variables provided")
+                
+            html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
             
             # Clean up any existing browser instance
             self._cleanup_browser()
