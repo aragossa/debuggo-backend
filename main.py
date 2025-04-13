@@ -95,6 +95,12 @@ class MoveTestCaseRequest(BaseModel):
     test_case_id: int
     target_group_id: int
 
+class CreateTestCaseRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parent_id: Optional[int] = None
+    project_id: Optional[UUID4] = None
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
@@ -2125,6 +2131,83 @@ async def delete_test_group(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete test group: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
+
+@app.post("/api/test_cases", status_code=status.HTTP_201_CREATED)
+async def create_test_case(
+    request_data: CreateTestCaseRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new test case manually.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the parent exists and is a valid group or root
+            if request_data.parent_id:
+                cur.execute(
+                    "SELECT type FROM test_cases WHERE id = %s",
+                    (request_data.parent_id,)
+                )
+                parent = cur.fetchone()
+                if not parent:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Parent group not found"
+                    )
+                if parent[0] != 'group' and parent[0] != 'root':
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Parent must be a group or root"
+                    )
+            
+            # Convert UUID to string for database storage
+            project_id_str = str(request_data.project_id) if request_data.project_id else None
+            client_id_str = str(current_user.client_id) if current_user.client_id else None
+            
+            print(f"Debug - Project ID: {project_id_str}")
+            print(f"Debug - Client ID: {client_id_str}")
+            
+            # Insert the new test case
+            cur.execute(
+                """
+                INSERT INTO test_cases (name, description, parent_id, type, "order", client_id, project_id)
+                VALUES (%s, %s, %s, 'test', 1, %s, %s)
+                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                """,
+                (
+                    request_data.name,
+                    request_data.description,
+                    request_data.parent_id,
+                    client_id_str,
+                    project_id_str
+                )
+            )
+            test_case = cur.fetchone()
+            conn.commit()
+            
+            # Format the response
+            return {
+                "id": test_case[0],
+                "name": test_case[1],
+                "description": test_case[2],
+                "parent_id": test_case[3],
+                "type": test_case[4],
+                "order": test_case[5],
+                "created_at": test_case[6].isoformat() if test_case[6] else None,
+                "updated_at": test_case[7].isoformat() if test_case[7] else None,
+                "project_id": test_case[8]
+            }
+    except Exception as e:
+        conn.rollback()
+        print(f"Error creating test case: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create test case: {str(e)}"
         )
     finally:
         return_db_connection(conn)
