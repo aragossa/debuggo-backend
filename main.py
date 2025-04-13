@@ -28,6 +28,7 @@ from models.client import Client, ClientCreate
 from models.test import GenerateStepsRequest
 from Utils.System import System
 from Utils.BrowserAutomation.TestRunner import TestRunner
+from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
 from Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
 from Utils.auth import (
@@ -1762,21 +1763,24 @@ async def test_element_locator(
             login = environment.get('login')
             password = environment.get('password')
             
-            # Initialize the browser and navigate to the base URL
-            test_runner.init_browser()
-            test_runner.navigate_to(base_url)
+            # Clean up any existing browser instance and create a new one
+            test_runner._cleanup_browser()
+            test_runner.browser = BrowserAutomation(headless=True)
+            
+            # Navigate to the base URL
+            test_runner.browser.navigate(base_url)
             
             # Try to find the element using the provided locator
             try:
-                element = test_runner.find_element(request_data.element_path)
+                element = test_runner.browser.find_element(request_data.element_path)
                 is_valid = element is not None
                 message = "Element found successfully" if is_valid else "Element not found"
             except Exception as e:
                 is_valid = False
                 message = f"Error finding element: {str(e)}"
-            
-            # Close the browser
-            test_runner.close_browser()
+            finally:
+                # Always clean up the browser
+                test_runner._cleanup_browser()
             
             return_db_connection(conn)
             return {
