@@ -420,9 +420,33 @@ class BrowserAutomation:
 
             # Handle different types of assertions
             if assertion_type == "text":
-                actual_text = element.text.strip()
-                if actual_text != value.strip():
-                    raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
+                # Special case for visibility-related assertions
+                visibility_terms = ["is_displayed", "visible", "displayed", "visibility"]
+                if value.strip().lower() in visibility_terms:
+                    is_visible = element.is_displayed()
+                    if not is_visible:
+                        raise AssertionError(f"[PID:{self.pid}] Element is not visible")
+                    self.logger.info(f"[PID:{self.pid}] Element is visible as expected")
+                # Check for placeholder text in input elements
+                elif element.tag_name.lower() in ["input", "textarea"] and value.strip():
+                    # First check if this might be a placeholder assertion
+                    placeholder = element.get_attribute("placeholder")
+                    if placeholder and placeholder.strip() == value.strip():
+                        self.logger.info(f"[PID:{self.pid}] Placeholder text '{value}' matches as expected")
+                        return True
+                    
+                    # If not a placeholder or placeholder doesn't match, check text content
+                    actual_text = element.text.strip()
+                    if actual_text != value.strip():
+                        # If text doesn't match and we have a placeholder, show that in the error
+                        if placeholder:
+                            raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'. Element has placeholder='{placeholder}'")
+                        else:
+                            raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
+                else:
+                    actual_text = element.text.strip()
+                    if actual_text != value.strip():
+                        raise AssertionError(f"[PID:{self.pid}] Expected text '{value}' but got '{actual_text}'")
 
             elif assertion_type == "value":
                 actual_value = element.get_attribute("value")
@@ -446,6 +470,37 @@ class BrowserAutomation:
                 expected_selected = value.lower() == "true"
                 if is_selected != expected_selected:
                     raise AssertionError(f"[PID:{self.pid}] Expected selected {expected_selected} but got {is_selected}")
+
+            elif assertion_type == "type":
+                # Handle type attribute assertions specifically for input fields
+                actual_type = element.get_attribute("type")
+                expected_type = value.strip()
+                self.logger.info(f"[PID:{self.pid}] Checking input type: expected '{expected_type}', actual '{actual_type}'")
+                
+                if actual_type != expected_type:
+                    raise AssertionError(f"[PID:{self.pid}] Expected input type '{expected_type}' but got '{actual_type}'")
+                self.logger.info(f"[PID:{self.pid}] Input type assertion passed: type='{actual_type}'")
+
+            elif assertion_type == "attribute":
+                # Handle attribute assertions
+                if "," in value:
+                    attr_name, expected_attr_value = value.split(",", 1)
+                    attr_name = attr_name.strip()
+                    expected_attr_value = expected_attr_value.strip()
+                    if expected_attr_value.startswith("expected_value="):
+                        expected_attr_value = expected_attr_value.replace("expected_value=", "").strip()
+                else:
+                    # If no expected value is provided, just check if attribute exists
+                    attr_name = value.strip()
+                    expected_attr_value = None
+                
+                self.logger.info(f"[PID:{self.pid}] Checking attribute '{attr_name}' with expected value: '{expected_attr_value}'")
+                actual_attr_value = element.get_attribute(attr_name)
+                
+                if expected_attr_value is not None and actual_attr_value != expected_attr_value:
+                    raise AssertionError(f"[PID:{self.pid}] Expected attribute '{attr_name}' to be '{expected_attr_value}' but got '{actual_attr_value}'")
+                elif expected_attr_value is None and actual_attr_value is None:
+                    raise AssertionError(f"[PID:{self.pid}] Attribute '{attr_name}' does not exist on element")
 
             else:
                 raise ValueError(f"[PID:{self.pid}] Unsupported assertion type: {assertion_type}")

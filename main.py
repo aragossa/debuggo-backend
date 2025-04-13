@@ -59,6 +59,7 @@ def return_db_connection(conn):
 class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
     value: Optional[str] = None
+    element_path: Optional[str] = None
 
 class StepOrderUpdate(BaseModel):
     test_case_id: int
@@ -66,6 +67,11 @@ class StepOrderUpdate(BaseModel):
 
 class UserClientUpdate(BaseModel):
     client_id: Optional[str] = None
+
+class TestElementLocatorRequest(BaseModel):
+    element_path: str
+    environment_id: Optional[str] = None
+    test_case_id: Optional[int] = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
@@ -724,6 +730,9 @@ async def update_test_step(
             if update_data.value is not None:
                 update_fields.append("value = %s")
                 params.append(update_data.value)
+            if update_data.element_path is not None:
+                update_fields.append("element_path = %s")
+                params.append(update_data.element_path)
             
             if not update_fields:
                 raise HTTPException(status_code=400, detail="No fields to update")
@@ -1701,6 +1710,97 @@ async def delete_test_case(
         raise HTTPException(status_code=500, detail=error_detail)
     finally:
         return_db_connection(conn)
+
+@app.post("/api/test_element_locator")
+async def test_element_locator(
+    request_data: TestElementLocatorRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Test if an element locator is valid by attempting to find the element on the page.
+    Returns whether the element was found and any relevant messages.
+    """
+    try:
+        conn = get_db_connection()
+        
+        # Get environment details if provided
+        environment = None
+        if request_data.environment_id:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cursor.execute(
+                "SELECT * FROM environments WHERE id = %s",
+                (request_data.environment_id,)
+            )
+            environment = cursor.fetchone()
+            cursor.close()
+            
+            if not environment:
+                return_db_connection(conn)
+                raise HTTPException(status_code=404, detail="Environment not found")
+        
+        # Get test case details if provided
+        test_case = None
+        if request_data.test_case_id:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cursor.execute(
+                "SELECT * FROM test_cases WHERE id = %s",
+                (request_data.test_case_id,)
+            )
+            test_case = cursor.fetchone()
+            cursor.close()
+            
+            if not test_case:
+                return_db_connection(conn)
+                raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Initialize the test runner
+        test_runner = TestRunner()
+        
+        # Set up the environment variables if an environment was provided
+        if environment:
+            base_url = environment['base_url']
+            login = environment.get('login')
+            password = environment.get('password')
+            
+            # Initialize the browser and navigate to the base URL
+            test_runner.init_browser()
+            test_runner.navigate_to(base_url)
+            
+            # Try to find the element using the provided locator
+            try:
+                element = test_runner.find_element(request_data.element_path)
+                is_valid = element is not None
+                message = "Element found successfully" if is_valid else "Element not found"
+            except Exception as e:
+                is_valid = False
+                message = f"Error finding element: {str(e)}"
+            
+            # Close the browser
+            test_runner.close_browser()
+            
+            return_db_connection(conn)
+            return {
+                "valid": is_valid,
+                "message": message
+            }
+        else:
+            # If no environment was provided, we can't test the locator
+            return_db_connection(conn)
+            return {
+                "valid": False,
+                "message": "No environment selected. Please select an environment to test the locator."
+            }
+    
+    except Exception as e:
+        # Log the exception for debugging
+        logging.error(f"Error testing element locator: {str(e)}")
+        logging.error(traceback.format_exc())
+        
+        # Return an error response
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error testing element locator: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
