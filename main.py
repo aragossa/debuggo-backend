@@ -41,7 +41,7 @@ from Utils.auth import (
 )
 from models.crud import create_user, get_user_by_email, get_client_test_cases
 from fetch_test_steps import get_test_data_from_db_helper
-from test_case_builder import get_tests_tree
+from test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 
@@ -82,6 +82,18 @@ class CreateTestStepRequest(BaseModel):
     value: Optional[str] = None
     path_type: Optional[str] = "xpath"
     expected_result: Optional[str] = None
+
+class CreateTestGroupRequest(BaseModel):
+    name: str
+    parent_id: Optional[int] = None
+    project_id: Optional[UUID4] = None
+
+class UpdateTestGroupRequest(BaseModel):
+    name: str
+
+class MoveTestCaseRequest(BaseModel):
+    test_case_id: int
+    target_group_id: int
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
@@ -344,126 +356,97 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
             if current_user.role == 'admin':
                 cur.execute(
                     """
-                    WITH RECURSIVE test_tree AS (
-                        -- Root level test cases (parent_id is null)
-                        SELECT 
-                            tc.id,
-                            tc.name,
-                            tc.description,
-                            tc.type,
-                            tc.parent_id,
-                            tc.client_id,
-                            1 as level
-                        FROM test_cases tc
-                        WHERE tc.parent_id IS NULL
+                    WITH RECURSIVE TestCaseHierarchy AS (
+                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at
+                        FROM test_cases
+                        WHERE parent_id IS NULL
                         
                         UNION ALL
                         
-                        -- Child test cases
-                        SELECT 
-                            tc.id,
-                            tc.name,
-                            tc.description,
-                            tc.type,
-                            tc.parent_id,
-                            tc.client_id,
-                            tt.level + 1
+                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at
                         FROM test_cases tc
-                        JOIN test_tree tt ON tc.parent_id = tt.id
+                        JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                     )
                     SELECT 
-                        tt.id,
-                        tt.name,
-                        tt.description,
-                        tt.type,
-                        tt.parent_id,
-                        tt.level,
+                        t.id,
+                        t.name,
+                        t.description,
+                        t.parent_id,
+                        t.type,
+                        t."order",
+                        t.created_at,
+                        t.updated_at,
                         c.id as client_id,
-                        c.name as client_name
-                    FROM test_tree tt
-                    JOIN clients c ON tt.client_id = c.id
-                    ORDER BY tt.level, tt.name
+                        c.name as client_name,
+                        t.project_id
+                    FROM TestCaseHierarchy t
+                    JOIN clients c ON t.client_id = c.id
+                    ORDER BY t.parent_id NULLS FIRST, t."order"
                     """
                 )
             else:
                 cur.execute(
                     """
-                    WITH RECURSIVE test_tree AS (
-                        -- Root level test cases (parent_id is null)
-                        SELECT 
-                            tc.id,
-                            tc.name,
-                            tc.description,
-                            tc.type,
-                            tc.parent_id,
-                            tc.client_id,
-                            1 as level
-                        FROM test_cases tc
-                        WHERE tc.parent_id IS NULL
+                    WITH RECURSIVE TestCaseHierarchy AS (
+                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at
+                        FROM test_cases
+                        WHERE parent_id IS NULL AND client_id = %s
                         
                         UNION ALL
                         
-                        -- Child test cases
-                        SELECT 
-                            tc.id,
-                            tc.name,
-                            tc.description,
-                            tc.type,
-                            tc.parent_id,
-                            tc.client_id,
-                            tt.level + 1
+                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at
                         FROM test_cases tc
-                        JOIN test_tree tt ON tc.parent_id = tt.id
+                        JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                     )
                     SELECT 
-                        tt.id,
-                        tt.name,
-                        tt.description,
-                        tt.type,
-                        tt.parent_id,
-                        tt.level,
+                        t.id,
+                        t.name,
+                        t.description,
+                        t.parent_id,
+                        t.type,
+                        t."order",
+                        t.created_at,
+                        t.updated_at,
                         c.id as client_id,
-                        c.name as client_name
-                    FROM test_tree tt
-                    JOIN clients c ON tt.client_id = c.id
+                        c.name as client_name,
+                        t.project_id
+                    FROM TestCaseHierarchy t
+                    JOIN clients c ON t.client_id = c.id
                     WHERE c.id = %s
-                    ORDER BY tt.level, tt.name
+                    ORDER BY t.parent_id NULLS FIRST, t."order"
                     """,
-                    (client_id,)
+                    (client_id, client_id)
                 )
 
             rows = cur.fetchall()
+            
+            # Convert rows to list of dictionaries for build_tree function
+            test_cases_list = []
+            for row in rows:
+                test_cases_list.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'description': row[2],
+                    'parent_id': row[3],
+                    'type': row[4],
+                    'order': row[5],
+                    'created_at': row[6].isoformat() if row[6] else None,
+                    'updated_at': row[7].isoformat() if row[7] else None,
+                    'client_id': row[8],
+                    'client_name': row[9],
+                    'project_id': row[10]
+                })
+            
+            # Use the build_tree function from test_case_builder
+            tree_data = build_tree(test_cases_list)
             
             # Create root node
             root = {
                 'id': 'root',
                 'name': 'Test Cases',
                 'type': 'root',
-                'children': []
+                'children': tree_data
             }
-            
-            # Create lookup dictionaries for each level
-            nodes_by_id = {'root': root}
-            
-            # First pass: create all nodes
-            for row in rows:
-                node = {
-                    'id': str(row[0]),
-                    'name': row[1],
-                    'description': row[2],
-                    'type': 'test' if row[3] == 'test' else row[3],  # Ensure we use 'test' instead of 'test_case'
-                    'children': []
-                }
-                nodes_by_id[node['id']] = node
-            
-            # Second pass: build the tree structure
-            for row in rows:
-                node_id = str(row[0])
-                parent_id = str(row[4]) if row[4] else 'root'
-                
-                if parent_id in nodes_by_id:
-                    parent = nodes_by_id[parent_id]
-                    parent['children'].append(nodes_by_id[node_id])
             
             return [root]
     finally:
@@ -638,7 +621,7 @@ async def confirm_generate_steps(
         # First, delete existing steps
         conn = get_db_connection()
         with conn.cursor() as cursor:
-            # Verify the test case exists and belongs to the user's client
+            # Verify the test case exists
             cursor.execute(
                 "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
                 (id, str(current_user.client_id))
@@ -1322,19 +1305,6 @@ async def get_project_test_tree(
     """
     Get the test case tree for a specific project.
     """
-    # Helper function to build tree structure
-    def build_tree(nodes, parent_id=None):
-        tree = []
-        for node in nodes:
-            if node['parent_id'] == parent_id:
-                children = build_tree(nodes, node['id'])
-                if children:
-                    node['children'] = children
-                else:
-                    node['children'] = []
-                tree.append(node)
-        return tree
-    
     conn = None
     try:
         conn = get_db_connection()
@@ -1353,13 +1323,21 @@ async def get_project_test_tree(
                     detail="Project not found"
                 )
             
-            # Get all test cases for this project
+            # Use a recursive query to get all test cases for this project with proper hierarchy
             cursor.execute(
                 """
+                WITH RECURSIVE TestCaseHierarchy AS (
+                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at, client_id, project_id
+                    FROM test_cases
+                    WHERE parent_id IS NULL AND client_id = %s AND project_id = %s
+                    UNION ALL
+                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at, tc.client_id, tc.project_id
+                    FROM test_cases tc
+                    JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
+                )
                 SELECT id, name, description, parent_id, type, "order", created_at, updated_at
-                FROM test_cases
-                WHERE client_id = %s AND project_id = %s
-                ORDER BY "order"
+                FROM TestCaseHierarchy
+                ORDER BY parent_id NULLS FIRST, "order";
                 """,
                 (str(current_user.client_id), project_id)
             )
@@ -1380,7 +1358,7 @@ async def get_project_test_tree(
                 for test_case in test_cases
             ]
             
-            # Build the tree structure directly
+            # Build the tree structure
             tree_data = build_tree(test_cases_list)
             return tree_data
     except Exception as e:
@@ -1844,7 +1822,7 @@ async def test_element_locator(
         # Initialize the test runner
         test_runner = TestRunner()
         
-        # Set up the environment variables if an environment was provided
+        # Set up environment variables if an environment was provided
         if environment:
             base_url = environment['base_url']
             login = environment.get('login')
@@ -1892,6 +1870,378 @@ async def test_element_locator(
             status_code=500,
             detail=f"Error testing element locator: {str(e)}"
         )
+
+@app.post("/api/test_groups", status_code=status.HTTP_201_CREATED)
+async def create_test_group(
+    request_data: CreateTestGroupRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new test group.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the parent exists and is a valid group or root
+            if request_data.parent_id:
+                cur.execute(
+                    "SELECT type FROM test_cases WHERE id = %s",
+                    (request_data.parent_id,)
+                )
+                parent = cur.fetchone()
+                if not parent:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Parent group not found"
+                    )
+                if parent[0] != 'group' and parent[0] != 'root':
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Parent must be a group or root"
+                    )
+            
+            # Convert UUID to string for database storage
+            project_id_str = str(request_data.project_id) if request_data.project_id else None
+            client_id_str = str(current_user.client_id) if current_user.client_id else None
+            
+            print(f"Debug - Request data: {request_data}")
+            print(f"Debug - Project ID (raw): {request_data.project_id}, type: {type(request_data.project_id)}")
+            print(f"Debug - Project ID (string): {project_id_str}")
+            print(f"Debug - Client ID: {client_id_str}")
+            
+            # Insert the new group
+            cur.execute(
+                """
+                INSERT INTO test_cases (name, parent_id, type, "order", client_id, project_id)
+                VALUES (%s, %s, 'group', 1, %s, %s)
+                RETURNING id, name, parent_id, type, "order", created_at, updated_at, project_id
+                """,
+                (
+                    request_data.name,
+                    request_data.parent_id,
+                    client_id_str,
+                    project_id_str
+                )
+            )
+            group = cur.fetchone()
+            conn.commit()
+            
+            # Log the created group
+            print(f"Debug - Created group: {group}")
+            print(f"Debug - Group project_id: {group[7]}")
+            
+            # Format the response
+            return {
+                "id": group[0],
+                "name": group[1],
+                "parent_id": group[2],
+                "type": group[3],
+                "order": group[4],
+                "created_at": group[5].isoformat() if group[5] else None,
+                "updated_at": group[6].isoformat() if group[6] else None,
+                "project_id": group[7]
+            }
+    except Exception as e:
+        conn.rollback()
+        print(f"Error creating test group: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create test group: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
+
+@app.put("/api/test_groups/{group_id}")
+async def update_test_group(
+    group_id: int,
+    request_data: UpdateTestGroupRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update a test group's name.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the group exists and belongs to the user's client
+            cur.execute(
+                """
+                SELECT id, type, client_id 
+                FROM test_cases 
+                WHERE id = %s
+                """,
+                (group_id,)
+            )
+            group = cur.fetchone()
+            
+            if not group:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test group not found"
+                )
+            
+            if group[1] != 'group':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The specified ID is not a test group"
+                )
+            
+            # Convert client_id to string for comparison
+            group_client_id = str(group[2]) if group[2] else None
+            user_client_id = str(current_user.client_id) if current_user.client_id else None
+            
+            print(f"Debug - Group client_id: {group_client_id}")
+            print(f"Debug - User client_id: {user_client_id}")
+            
+            # Skip permission check if client_id is None (for development/testing)
+            if group_client_id and user_client_id and group_client_id != user_client_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have permission to update this group"
+                )
+            
+            # Update the group name
+            cur.execute(
+                """
+                UPDATE test_cases
+                SET name = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, name, parent_id, type, "order", created_at, updated_at
+                """,
+                (request_data.name, group_id)
+            )
+            updated_group = cur.fetchone()
+            conn.commit()
+            
+            # Format the response
+            return {
+                "id": updated_group[0],
+                "name": updated_group[1],
+                "parent_id": updated_group[2],
+                "type": updated_group[3],
+                "order": updated_group[4],
+                "created_at": updated_group[5].isoformat() if updated_group[5] else None,
+                "updated_at": updated_group[6].isoformat() if updated_group[6] else None
+            }
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update test group: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
+
+@app.delete("/api/test_groups/{group_id}")
+async def delete_test_group(
+    group_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a test group if it has no test cases.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the group exists and belongs to the user's client
+            cur.execute(
+                """
+                SELECT id, type, client_id 
+                FROM test_cases 
+                WHERE id = %s
+                """,
+                (group_id,)
+            )
+            group = cur.fetchone()
+            
+            if not group:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test group not found"
+                )
+            
+            if group[1] != 'group':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The specified ID is not a test group"
+                )
+            
+            # Convert client_id to string for comparison
+            group_client_id = str(group[2]) if group[2] else None
+            user_client_id = str(current_user.client_id) if current_user.client_id else None
+            
+            print(f"Debug - Group client_id: {group_client_id}")
+            print(f"Debug - User client_id: {user_client_id}")
+            
+            # Skip permission check if client_id is None (for development/testing)
+            if group_client_id and user_client_id and group_client_id != user_client_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have permission to delete this group"
+                )
+            
+            # Check if the group has any test cases or subgroups
+            cur.execute(
+                """
+                SELECT COUNT(*) 
+                FROM test_cases 
+                WHERE parent_id = %s
+                """,
+                (group_id,)
+            )
+            count = cur.fetchone()[0]
+            
+            if count > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot delete a group that contains test cases or subgroups"
+                )
+            
+            # Delete the group
+            cur.execute(
+                """
+                DELETE FROM test_cases
+                WHERE id = %s
+                """,
+                (group_id,)
+            )
+            conn.commit()
+            
+            return {"message": "Test group deleted successfully"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete test group: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
+
+@app.post("/api/test_cases/move")
+async def move_test_case(
+    request_data: MoveTestCaseRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Move a test case to a different group.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the test case exists and belongs to the user's client
+            cur.execute(
+                """
+                SELECT id, client_id 
+                FROM test_cases 
+                WHERE id = %s
+                """,
+                (request_data.test_case_id,)
+            )
+            test_case = cur.fetchone()
+            
+            if not test_case:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test case not found"
+                )
+            
+            # Convert client_id to string for comparison
+            test_case_client_id = str(test_case[1]) if test_case[1] else None
+            user_client_id = str(current_user.client_id) if current_user.client_id else None
+            
+            print(f"Debug - Test case client_id: {test_case_client_id}")
+            print(f"Debug - User client_id: {user_client_id}")
+            
+            # Skip permission check if client_id is None (for development/testing)
+            if test_case_client_id and user_client_id and test_case_client_id != user_client_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have permission to move this test case"
+                )
+            
+            # Check if the target group exists and is a valid group
+            cur.execute(
+                """
+                SELECT id, type, client_id 
+                FROM test_cases 
+                WHERE id = %s
+                """,
+                (request_data.target_group_id,)
+            )
+            target_group = cur.fetchone()
+            
+            if not target_group:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Target group not found"
+                )
+            
+            if target_group[1] != 'group' and target_group[1] != 'root':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Target must be a group or root"
+                )
+            
+            # Convert target group client_id to string for comparison
+            target_group_client_id = str(target_group[2]) if target_group[2] else None
+            
+            print(f"Debug - Target group client_id: {target_group_client_id}")
+            
+            # Skip permission check if client_id is None (for development/testing)
+            if target_group_client_id and user_client_id and target_group_client_id != user_client_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have permission to move to this group"
+                )
+            
+            # Update the test case's parent_id
+            try:
+                cur.execute(
+                    """
+                    UPDATE test_cases
+                    SET parent_id = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING id, name, parent_id, type, "order"
+                    """,
+                    (request_data.target_group_id, request_data.test_case_id)
+                )
+                updated_test_case = cur.fetchone()
+                conn.commit()
+                
+                if not updated_test_case:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Failed to update test case"
+                    )
+                
+                # Return a simplified response without datetime fields
+                return {
+                    "id": updated_test_case[0],
+                    "name": updated_test_case[1],
+                    "parent_id": updated_test_case[2],
+                    "type": updated_test_case[3],
+                    "order": updated_test_case[4],
+                    "message": "Test case moved successfully"
+                }
+            except Exception as sql_error:
+                conn.rollback()
+                print(f"SQL Error: {str(sql_error)}")
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Database error: {str(sql_error)}"
+                )
+    except Exception as e:
+        conn.rollback()
+        print(f"Error in move_test_case: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to move test case: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
 
 if __name__ == "__main__":
     import uvicorn

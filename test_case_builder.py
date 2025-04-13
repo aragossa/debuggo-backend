@@ -24,16 +24,16 @@ def fetch_tree_data(client_id):
     # Execute the recursive query
     cursor.execute('''
         WITH RECURSIVE TestCaseHierarchy AS (
-            SELECT id, name, parent_id, type, "order", curl, test_case_id
+            SELECT id, name, parent_id, type, "order", curl, test_case_id, client_id, project_id
             FROM test_cases
             WHERE parent_id IS NULL AND client_id = ?  -- Start with root nodes
             UNION ALL
-            SELECT tc.id, tc.name, tc.parent_id, tc.type, tc."order", tc.curl, tc.test_case_id
+            SELECT tc.id, tc.name, tc.parent_id, tc.type, tc."order", tc.curl, tc.test_case_id, tc.client_id, tc.project_id
             FROM test_cases tc
-            INNER JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
+            JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
         )
         SELECT * FROM TestCaseHierarchy
-        ORDER BY "order";
+        ORDER BY parent_id NULLS FIRST, "order";
     ''', (client_id,))
 
     # Fetch all results
@@ -45,13 +45,16 @@ def fetch_tree_data(client_id):
     # Convert the result into a list of dictionaries
     nodes = []
     for row in result:
-
         nodes.append({
             'id': row[0],
             'name': row[1],
             'parent_id': row[2],
+            'type': row[3],
+            'order': row[4],
             'curl': row[5] if row[5] is not None else None,
-            'test_case_id': row[6] if row[6] is not None else None
+            'test_case_id': row[6] if row[6] is not None else None,
+            'client_id': row[7],
+            'project_id': row[8]
         })
 
     return nodes
