@@ -1549,6 +1549,159 @@ async def delete_environment(
         if conn:
             return_db_connection(conn)
 
+@app.delete("/api/delete_test_step/{id}")
+async def delete_test_step(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a specific test step by ID.
+    """
+    conn = get_db_connection()
+    try:
+        # First, check if the test step exists and belongs to the user's client
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Get the client_id of the current user
+        client_id = current_user.client_id
+        
+        # Check if the test step exists and belongs to the user's client
+        cur.execute(
+            """
+            SELECT ts.id, tc.client_id, ts.test_case_id, ts.step_order
+            FROM test_steps ts
+            JOIN test_cases tc ON ts.test_case_id = tc.id
+            WHERE ts.id = %s
+            """,
+            (id,)
+        )
+        
+        step = cur.fetchone()
+        
+        if not step:
+            raise HTTPException(status_code=404, detail="Test step not found")
+        
+        # Debug print statements to understand the values
+        print(f"Test step client_id: {step['client_id']}, type: {type(step['client_id'])}")
+        print(f"User client_id: {client_id}, type: {type(client_id)}")
+        
+        # Convert both to string for comparison if they're not already strings
+        test_step_client_id = str(step['client_id'])
+        user_client_id = str(client_id)
+        
+        print(f"Comparing: '{test_step_client_id}' == '{user_client_id}'")
+        
+        # Check if the user has permission to delete this test step
+        if test_step_client_id != user_client_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this test step")
+        
+        # Get the step_order and test_case_id before deleting
+        deleted_step_order = step['step_order']
+        test_case_id = step['test_case_id']
+        
+        # Delete the test step
+        cur.execute(
+            """
+            DELETE FROM test_steps
+            WHERE id = %s
+            """,
+            (id,)
+        )
+        
+        # Reorder the remaining steps - decrement step_order for all steps with higher order
+        if test_case_id is not None and deleted_step_order is not None:
+            cur.execute(
+                """
+                UPDATE test_steps
+                SET step_order = step_order - 1
+                WHERE test_case_id = %s AND step_order > %s
+                """,
+                (test_case_id, deleted_step_order)
+            )
+        
+        conn.commit()
+        
+        return {"status": "success", "message": "Test step deleted successfully"}
+    
+    except Exception as e:
+        conn.rollback()
+        # Include more detailed error information for debugging
+        error_detail = f"Failed to delete test step: {str(e)}"
+        print(f"Error in delete_test_step: {error_detail}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_detail)
+    finally:
+        return_db_connection(conn)
+
+@app.delete("/api/delete_test_case/{id}")
+async def delete_test_case(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a specific test case by ID.
+    """
+    conn = get_db_connection()
+    try:
+        # First, check if the test case exists and belongs to the user's client
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Get the client_id of the current user
+        client_id = current_user.client_id
+        
+        # Check if the test case exists and belongs to the user's client
+        cur.execute(
+            """
+            SELECT id, client_id
+            FROM test_cases
+            WHERE id = %s
+            """,
+            (id,)
+        )
+        
+        test_case = cur.fetchone()
+        
+        if not test_case:
+            raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Debug print statements to understand the values
+        print(f"Test case client_id: {test_case['client_id']}, type: {type(test_case['client_id'])}")
+        print(f"User client_id: {client_id}, type: {type(client_id)}")
+        
+        # Convert both to string for comparison if they're not already strings
+        test_case_client_id = str(test_case['client_id'])
+        user_client_id = str(client_id)
+        
+        print(f"Comparing: '{test_case_client_id}' == '{user_client_id}'")
+        
+        # Check if the user has permission to delete this test case
+        if test_case_client_id != user_client_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this test case")
+        
+        # Delete the test case - the ON DELETE CASCADE constraints will automatically
+        # delete associated test_steps and test_runs
+        cur.execute(
+            """
+            DELETE FROM test_cases
+            WHERE id = %s
+            """,
+            (id,)
+        )
+        
+        conn.commit()
+        
+        return {"status": "success", "message": "Test case deleted successfully"}
+    
+    except Exception as e:
+        conn.rollback()
+        # Include more detailed error information for debugging
+        error_detail = f"Failed to delete test case: {str(e)}"
+        print(f"Error in delete_test_case: {error_detail}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_detail)
+    finally:
+        return_db_connection(conn)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
