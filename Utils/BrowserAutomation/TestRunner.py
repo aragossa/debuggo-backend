@@ -232,7 +232,7 @@ class TestRunner:
             self.logger.error(f"Unexpected error while saving test step: {str(e)}")
             raise
 
-    def execute_step(self, action: str, element_path: str = None, value: str = None, by_strategy: str = None):
+    def execute_step(self, action: str, element_path: str = None, value: str = None, by_strategy: str = None, env_helper=None):
         """
         Execute a test step with the given action.
         
@@ -241,8 +241,16 @@ class TestRunner:
             element_path (str): The path to the element to interact with
             value (str): The value to use for the action (e.g., text to type)
             by_strategy (str): The strategy to locate elements (xpath or css)
+            env_helper (EnvHelper): Optional environment helper for variable processing
         """
         try:
+            # Process environment variables in element_path and value if env_helper is provided
+            if env_helper:
+                if element_path:
+                    element_path = env_helper.process_variables(element_path)
+                if value:
+                    value = env_helper.process_variables(value)
+            
             # Handle None or empty by_strategy
             if not by_strategy:
                 # Try to auto-detect the strategy
@@ -336,7 +344,7 @@ class TestRunner:
                 
                 self.logger.info(f"[PID:{pid}] Creating new browser instance")
                 self.browser = BrowserAutomation(headless=True)
-                self.logger.info(f"[PID:{pid}] Browser started successfully")
+                self.logger.info(f"[PID:{self.pid}] Browser started successfully")
 
                 # Get and execute test steps
                 self.logger.info(f"[PID:{pid}] Retrieving test steps")
@@ -349,7 +357,7 @@ class TestRunner:
                 for step in steps:
                     step_id, action, element_path, description, expected_result, value, path_type = step
                     self.logger.info(f"[PID:{pid}] Executing step {step_id}: {action}")
-                    self.execute_step(action, element_path, value, path_type)
+                    self.execute_step(action, element_path, value, path_type, env)
 
                 # Calculate duration and log success
                 duration = (datetime.now() - start_time).total_seconds()
@@ -475,7 +483,7 @@ class TestRunner:
                 if action and element_locator:
                     self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
 
-                    self.execute_step(action, element_locator, value, by_strategy)
+                    self.execute_step(action, element_locator, value, by_strategy, env)
                     self._save_step(test_case_id=test_case_id,
                                     step_order=step_order,
                                     element_purpose=element_purpose,

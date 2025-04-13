@@ -91,3 +91,50 @@ class EnvHelper:
         self._base_url = None
         self._login = None
         self._password = None
+        
+    def process_variables(self, text: str) -> str:
+        """
+        Process environment variables in a text string.
+        
+        Replaces {{variable_name}} with the actual value from environment variables.
+        
+        Args:
+            text (str): The text containing environment variable placeholders
+            
+        Returns:
+            str: The text with environment variables replaced with their values
+        """
+        if not text:
+            return text
+            
+        import re
+        
+        # Find all {{variable}} patterns in the text
+        pattern = r'\{\{([^}]+)\}\}'
+        matches = re.findall(pattern, text)
+        
+        # Replace each variable with its value
+        result = text
+        for var_name in matches:
+            var_name = var_name.strip()
+            try:
+                if var_name == 'base_url':
+                    value = self.base_url
+                elif var_name == 'login':
+                    value = self.login
+                elif var_name == 'password':
+                    value = self.password
+                else:
+                    # For custom variables, we could add support here
+                    # For now, leave the placeholder if variable not found
+                    continue
+                    
+                # Replace the placeholder with the actual value
+                placeholder = f'{{{{{var_name}}}}}'
+                result = result.replace(placeholder, value)
+                
+            except ValueError:
+                # If the variable doesn't exist, leave the placeholder
+                continue
+                
+        return result
