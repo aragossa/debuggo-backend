@@ -74,6 +74,15 @@ class TestElementLocatorRequest(BaseModel):
     environment_id: Optional[str] = None
     test_case_id: Optional[int] = None
 
+class CreateTestStepRequest(BaseModel):
+    test_case_id: int
+    description: str
+    action: str
+    element_path: Optional[str] = None
+    value: Optional[str] = None
+    path_type: Optional[str] = "xpath"
+    expected_result: Optional[str] = None
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
@@ -795,6 +804,84 @@ async def update_step_orders(
             status_code=500,
             content={"error": f"Failed to update step orders: {str(e)}"}
         )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/create_test_step")
+async def create_test_step(
+    request_data: CreateTestStepRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new test step manually.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        
+        # Verify test case exists and belongs to the user's client
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s",
+                (request_data.test_case_id,)
+            )
+            test_case = cursor.fetchone()
+            if not test_case:
+                raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Get the current highest step order
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(MAX(step_order), 0) FROM test_steps WHERE test_case_id = %s",
+                (request_data.test_case_id,)
+            )
+            max_order = cursor.fetchone()[0]
+            new_order = max_order + 1
+        
+        # Insert the new test step
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO test_steps (
+                    test_case_id, step_order, description, action, 
+                    element_path, value, path_type, expected_result,
+                    created_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                ) RETURNING id
+            """, (
+                request_data.test_case_id,
+                new_order,
+                request_data.description,
+                request_data.action,
+                request_data.element_path,
+                request_data.value,
+                request_data.path_type,
+                request_data.expected_result,
+                datetime.now(),
+                datetime.now()
+            ))
+            new_step_id = cursor.fetchone()[0]
+            conn.commit()
+        
+        # Fetch the newly created step to return
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("""
+                SELECT id, test_case_id, step_order, description, action, 
+                       element_path, value, path_type, expected_result
+                FROM test_steps
+                WHERE id = %s
+            """, (new_step_id,))
+            new_step = cursor.fetchone()
+        
+        return dict(new_step)
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Error creating test step: {str(e)}")
+        logging.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to create test step: {str(e)}")
     finally:
         if conn:
             return_db_connection(conn)
