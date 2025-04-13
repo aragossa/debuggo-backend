@@ -1,5 +1,6 @@
 import os
 import uuid
+import json
 from datetime import timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status, Request
@@ -9,7 +10,6 @@ from fastapi.responses import JSONResponse
 from typing import Dict, List, Optional
 from pydantic import BaseModel, UUID4
 from datetime import datetime
-import json
 import psycopg2
 import psycopg2.extras
 from psycopg2.pool import SimpleConnectionPool
@@ -1400,7 +1400,7 @@ async def get_project_environments(
             # Get all environments for this project
             cursor.execute(
                 """
-                SELECT id, name, base_url, login, password, created_at, updated_at
+                SELECT id, name, base_url, login, password, created_at, updated_at, custom_variables
                 FROM environments
                 WHERE project_id = %s
                 ORDER BY name
@@ -1417,7 +1417,8 @@ async def get_project_environments(
                     "login": environment[3],
                     "password": environment[4],
                     "created_at": environment[5].isoformat() if environment[5] else None,
-                    "updated_at": environment[6].isoformat() if environment[6] else None
+                    "updated_at": environment[6].isoformat() if environment[6] else None,
+                    "custom_variables": environment[7] if environment[7] else []
                 }
                 for environment in environments
             ]
@@ -1458,19 +1459,23 @@ async def create_environment(
                     detail="Project not found"
                 )
             
+            # Extract custom variables if provided
+            custom_variables = environment_data.get("custom_variables", {})
+            
             # Create the environment
             cursor.execute(
                 """
-                INSERT INTO environments (name, base_url, login, password, project_id)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id, name, base_url, login, password, created_at, updated_at
+                INSERT INTO environments (name, base_url, login, password, project_id, custom_variables)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id, name, base_url, login, password, created_at, updated_at, custom_variables
                 """,
                 (
                     environment_data.get("name"),
                     environment_data.get("base_url"),
                     environment_data.get("login"),
                     environment_data.get("password"),
-                    project_id
+                    project_id,
+                    json.dumps(custom_variables)
                 )
             )
             environment = cursor.fetchone()
@@ -1483,7 +1488,8 @@ async def create_environment(
                 "login": environment[3],
                 "password": environment[4],
                 "created_at": environment[5].isoformat() if environment[5] else None,
-                "updated_at": environment[6].isoformat() if environment[6] else None
+                "updated_at": environment[6].isoformat() if environment[6] else None,
+                "custom_variables": environment[7]
             }
     except Exception as e:
         if conn:
@@ -1525,19 +1531,23 @@ async def update_environment(
                     detail="Environment not found"
                 )
             
+            # Extract custom variables if provided
+            custom_variables = environment_data.get("custom_variables", {})
+            
             # Update the environment
             cursor.execute(
                 """
                 UPDATE environments
-                SET name = %s, base_url = %s, login = %s, password = %s, updated_at = CURRENT_TIMESTAMP
+                SET name = %s, base_url = %s, login = %s, password = %s, custom_variables = %s, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at
+                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at, custom_variables
                 """,
                 (
                     environment_data.get("name"),
                     environment_data.get("base_url"),
                     environment_data.get("login"),
                     environment_data.get("password"),
+                    json.dumps(custom_variables),
                     environment_id
                 )
             )
@@ -1552,7 +1562,8 @@ async def update_environment(
                 "password": environment[4],
                 "project_id": environment[5],
                 "created_at": environment[6].isoformat() if environment[6] else None,
-                "updated_at": environment[7].isoformat() if environment[7] else None
+                "updated_at": environment[7].isoformat() if environment[7] else None,
+                "custom_variables": environment[8]
             }
     except Exception as e:
         if conn:
@@ -2097,7 +2108,7 @@ async def delete_test_group(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Cannot delete a group that contains test cases or subgroups"
                 )
-            
+
             # Delete the group
             cur.execute(
                 """
