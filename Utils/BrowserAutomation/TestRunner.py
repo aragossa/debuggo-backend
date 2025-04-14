@@ -173,6 +173,15 @@ class TestRunner:
                 return cursor.fetchall()
 
     def _get_test_case(self, test_case_id: int):
+        """
+        Get test case details from database.
+        
+        Args:
+            test_case_id: ID of the test case
+            
+        Returns:
+            Tuple containing (name, description) of the test case
+        """
         with self.get_db_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute("""
@@ -180,7 +189,11 @@ class TestRunner:
                     FROM test_cases
                     WHERE id = %s
                 """, (test_case_id,))
-                return cursor.fetchone()
+                result = cursor.fetchone()
+                if not result:
+                    self.logger.error(f"Test case with ID {test_case_id} not found")
+                    return ("Unknown Test Case", "No description available")
+                return result
 
     def _save_step(self, test_case_id: int, step_order: int, element_purpose: str, action: str, element_locator: str, value: str, by_strategy: str) -> int:
         try:
@@ -376,136 +389,220 @@ class TestRunner:
                 self._cleanup_browser()
 
     def generate_test_steps(self, test_case_id: int, environment_vars=None):
-        """Generate test steps using AI analysis of page HTML."""
+        """
+        Generate test steps using AI analysis of page HTML.
+        
+        Args:
+            test_case_id: ID of the test case
+            environment_vars: Optional dictionary with environment variables (base_url, login, password)
+        """
         pid = os.getpid()
         try:
             # Acquire process lock
-            if not self._process_lock():
-                raise Exception("Could not acquire lock for test step generation")
+            with self._process_lock():
+                self.logger.info(f"[PID:{pid}] Starting test step generation for ID: {test_case_id}")
+                
+                # Initialize components
+                system = System()
+                # Initialize environment helper with provided variables
+                env = EnvHelper(environment_vars)
+                
+                # Log environment variables for debugging
+                if environment_vars:
+                    self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
+                else:
+                    self.logger.warning(f"[PID:{pid}] No environment variables provided")
+                    
+                html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
+                
+                # Clean up any existing browser instance
+                self._cleanup_browser()
+                
+                # Create new browser instance
+                self.browser = BrowserAutomation(headless=True)
+                
+                # Get test case details - name and description
+                test_case_data = self._get_test_case(test_case_id=test_case_id)
+                test_name = test_case_data[0]
+                test_description = test_case_data[1] or ""  # Use empty string if description is None
+                
+                self.logger.info(f"[PID:{pid}] Test case: {test_name}")
+                self.logger.info(f"[PID:{pid}] Description: {test_description}")
 
-            self.logger.info(f"[PID:{pid}] Starting test step generation for ID: {test_case_id}")
-            
-            # Initialize components
-            system = System()
-            # Initialize environment helper with provided variables
-            env = EnvHelper(environment_vars)
-            
-            # Log environment variables for debugging
-            if environment_vars:
-                self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
-            else:
-                self.logger.warning(f"[PID:{pid}] No environment variables provided")
+                # Ensure we have a base URL to navigate to
+                if not env.base_url:
+                    self.logger.warning(f"[PID:{pid}] No base_url provided in environment variables")
+                    # Use a default or fallback URL if needed
+                    if 'http' not in test_description.lower():
+                        self.logger.warning(f"[PID:{pid}] Using a default URL since none was provided")
+                        env.base_url = "http://localhost"  # Default fallback
                 
-            html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
-            
-            # Clean up any existing browser instance
-            self._cleanup_browser()
-            
-            # Create new browser instance
-            self.browser = BrowserAutomation(headless=True)
-            test_case_data = self._get_test_case(test_case_id=test_case_id)
-            test_name = test_case_data[0]
-            test_description = test_case_data[1]
-
-            self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
-            self.browser.navigate(url=env.base_url)
-            
-            step_order = 0
-            page_source = self.browser.get_page_source()
-            screenshot_path = self.browser.take_screenshot()
-            prev_step_description = ''
-            next_prompt = ''
-            
-            # Track previous steps to avoid duplicates
-            previous_steps = set()
-            max_retries = 3
-            retry_delay = 2  # seconds
-            
-            while next_prompt != 'Stop':
-                self.logger.info(f"[PID:{pid}] Processing step {step_order}, next_prompt: {next_prompt}")
+                self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
+                self.browser.navigate(url=env.base_url)
                 
-                retry_count = 0
-                while retry_count < max_retries:
-                    try:
-                        self.logger.info(f"[PID:{pid}] Processing step {screenshot_path}")
-                        self.logger.info(f"[PID:{pid}] Calling html_analyzer with step_order={step_order}, next_prompt={next_prompt}")
-                        analyzer_response = html_analyzer.html_analyzer(
-                            test_case_id=test_case_id,
-                            html_code=page_source,
-                            test_name=test_name,
-                            test_description=test_description,
-                            step_order=step_order,
-                            next_prompt=next_prompt,
-                            prev_step_description=prev_step_description,
-                            screenshot_path=screenshot_path
-                        )
-                        self.logger.info(f"[PID:{pid}] Analyzer response: {analyzer_response}")
-                        
-                        # Handle tuple unpacking with defaults
-                        if isinstance(analyzer_response, tuple):
-                            self.logger.info(f"[PID:{pid}] Response length: {len(analyzer_response)}")
-                            if len(analyzer_response) == 5:
-                                # If we got a 5-tuple, add an empty value
-                                next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
-                                value = ""  # Default empty value
-                            else:
-                                next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
-                        else:
-                            raise ValueError(f"Expected tuple response, got {type(analyzer_response)}")
-                            
-                        self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
-                        break
-                    except Exception as e:
-                        retry_count += 1
-                        self.logger.error(f"[PID:{pid}] Error in attempt {retry_count}: {str(e)}")
-                        if retry_count == max_retries:
-                            raise
-                        if "429" in str(e):  # Rate limit error
-                            self.logger.warning(f"[PID:{pid}] Rate limit hit, waiting {retry_delay} seconds...")
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        else:
-                            raise
-                
-                next_prompt = next_step
-                prev_step_description = test_description
-                
-                # Create a unique key for this step
-                step_key = f"{action}:{element_locator}:{element_purpose}"
-                
-                # Skip if we've seen this exact step before
-                if step_key in previous_steps:
-                    self.logger.info(f"[PID:{pid}] Skipping duplicate step: {element_purpose}")
-                    continue
-                
-                previous_steps.add(step_key)
-                
-                if action and element_locator:
-                    self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
-
-                    self.execute_step(action, element_locator, value, by_strategy, env)
-                    self._save_step(test_case_id=test_case_id,
-                                    step_order=step_order,
-                                    element_purpose=element_purpose,
-                                    action=action,
-                                    element_locator=element_locator,
-                                    value=value,
-                                    by_strategy=by_strategy)
-
-                    self.logger.info(f"[PID:{pid}] Waiting for page changes...")
-                    if not self.browser.wait_for_page_changes():
-                        self.logger.info(f"[PID:{pid}] No page changes detected, continuing...")
-
+                step_order = 0
                 page_source = self.browser.get_page_source()
-                # Take a screenshot after getting page source
                 screenshot_path = self.browser.take_screenshot()
-                self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
-                step_order += 1
+                prev_step_description = ''
+                next_prompt = ''
+                
+                # Track previous steps to avoid duplicates
+                previous_steps = set()
+                max_retries = 3
+                retry_delay = 2  # seconds
+                
+                try:
+                    while next_prompt != 'Stop':
+                        self.logger.info(f"[PID:{pid}] Processing step {step_order}, next_prompt: {next_prompt}")
+                        
+                        retry_count = 0
+                        while retry_count < max_retries:
+                            try:
+                                self.logger.info(f"[PID:{pid}] Processing step {screenshot_path}")
+                                self.logger.info(f"[PID:{pid}] Calling html_analyzer with step_order={step_order}, next_prompt={next_prompt}")
+                                analyzer_response = html_analyzer.html_analyzer(
+                                    test_case_id=test_case_id,
+                                    html_code=page_source,
+                                    test_name=test_name,
+                                    test_description=test_description,
+                                    step_order=step_order,
+                                    next_prompt=next_prompt,
+                                    prev_step_description=prev_step_description,
+                                    screenshot_path=screenshot_path
+                                )
+                                self.logger.info(f"[PID:{pid}] Analyzer response: {analyzer_response}")
+                                
+                                # Handle tuple unpacking with defaults
+                                if isinstance(analyzer_response, tuple):
+                                    self.logger.info(f"[PID:{pid}] Response length: {len(analyzer_response)}")
+                                    if len(analyzer_response) == 5:
+                                        # If we got a 5-tuple, add an empty value
+                                        next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
+                                        value = ""  # Default empty value
+                                    else:
+                                        next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                else:
+                                    raise ValueError(f"Expected tuple response, got {type(analyzer_response)}")
+                                    
+                                self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                break
+                            except Exception as e:
+                                retry_count += 1
+                                self.logger.error(f"[PID:{pid}] Error in attempt {retry_count}: {str(e)}")
+                                if retry_count == max_retries:
+                                    raise
+                                if "429" in str(e):  # Rate limit error
+                                    self.logger.warning(f"[PID:{pid}] Rate limit hit, waiting {retry_delay} seconds...")
+                                    time.sleep(retry_delay)
+                                    retry_delay *= 2  # Exponential backoff
+                                else:
+                                    raise
+                        
+                        next_prompt = next_step
+                        prev_step_description = element_purpose
+                        
+                        # Process environment variables in values
+                        if value:
+                            value = env.process_variables(value)
+                        
+                        if element_locator:
+                            element_locator = env.process_variables(element_locator)
+                        
+                        # Create a unique key for this step
+                        step_key = f"{action}:{element_locator}:{element_purpose}"
+                        
+                        # Skip if we've seen this exact step before
+                        if step_key in previous_steps:
+                            self.logger.info(f"[PID:{pid}] Skipping duplicate step: {element_purpose}")
+                            continue
+                        
+                        previous_steps.add(step_key)
+                        
+                        if action and element_locator:
+                            self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
+
+                            # Save the step to the database first
+                            step_id = self._save_step(
+                                test_case_id=test_case_id,
+                                step_order=step_order,
+                                element_purpose=element_purpose,
+                                action=action,
+                                element_locator=element_locator,
+                                value=value,
+                                by_strategy=by_strategy
+                            )
+                            
+                            # Now execute the step - if it fails, we'll still have the step in the database
+                            # but we'll stop generating more steps
+                            try:
+                                self.execute_step(action, element_locator, value, by_strategy, env)
+                                
+                                # If this was a login step, verify login success
+                                if (action == "type" and ("login" in element_purpose.lower() or "username" in element_purpose.lower() or 
+                                                        "email" in element_purpose.lower() or "password" in element_purpose.lower())) or \
+                                   (action == "click" and ("login" in element_purpose.lower() or "sign in" in element_purpose.lower())):
+                                    self.logger.info(f"[PID:{pid}] Login step detected, waiting for login completion...")
+                                    # Wait a bit longer for login to complete
+                                    time.sleep(2)
+                                
+                                self.logger.info(f"[PID:{pid}] Waiting for page changes...")
+                                if not self.browser.wait_for_page_changes():
+                                    self.logger.info(f"[PID:{pid}] No page changes detected, continuing...")
+                            except Exception as e:
+                                # Log the error with detailed information
+                                self.logger.error(f"[PID:{pid}] Step execution failed: {str(e)}")
+                                self.logger.error(f"[PID:{pid}] Failed step details: Action={action}, Element={element_locator}, Strategy={by_strategy}")
+                                
+                                # Take a screenshot of the failure state
+                                try:
+                                    failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
+                                    self.logger.error(f"[PID:{pid}] Failure screenshot saved to: {failure_screenshot}")
+                                except Exception as screenshot_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
+                                
+                                # Log the current page URL and title
+                                try:
+                                    current_url = self.browser.driver.current_url
+                                    current_title = self.browser.driver.title
+                                    self.logger.error(f"[PID:{pid}] Page at failure: URL={current_url}, Title={current_title}")
+                                except Exception as page_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to get page details: {str(page_error)}")
+                                
+                                # Update the step in the database to mark it as failed
+                                try:
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                UPDATE test_steps 
+                                                SET error_message = %s
+                                                WHERE id = %s
+                                                """,
+                                                (str(e), step_id)
+                                            )
+                                            connection.commit()
+                                except Exception as db_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
+                                
+                                # Stop test generation - don't continue with fake steps
+                                self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
+                                return
+
+                        page_source = self.browser.get_page_source()
+                        # Take a screenshot after getting page source
+                        screenshot_path = self.browser.take_screenshot()
+                        self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
+                        step_order += 1
+                except Exception as step_gen_error:
+                    self.logger.error(f"[PID:{pid}] Error during step generation: {str(step_gen_error)}")
+                    import traceback
+                    self.logger.error(f"[PID:{pid}] Traceback: {traceback.format_exc()}")
+                    raise
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
             raise
-
+        
         finally:
             # Always clean up resources
             self._cleanup_browser()

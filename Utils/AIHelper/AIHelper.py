@@ -192,11 +192,25 @@ class AIHelper:
         if step_order == 0:
             skip_start_navigate = ". Skip the step with navigating to the first page.\n"
 
-        return f"""Act as an experienced QA engineer, you are creating {test_name} {test_description} {next_prompt if next_prompt is not None else ''}.
+        # Enhanced prompt with stronger focus on test description and login handling
+        return f"""Act as an experienced QA engineer, you are creating a test case: "{test_name}".
+
+TEST DESCRIPTION: {test_description}
+
 You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
 If current step will be final step, put to the next_step attribute the word 'Stop'.
 You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 {step_history}
+
+IMPORTANT GUIDELINES:
+1. FOLLOW THE TEST DESCRIPTION PRECISELY - The test steps must implement exactly what is described in the test description.
+2. LOGIN HANDLING - If login is required, use environment variables:
+   - Use {{{{base_url}}}} for the base URL
+   - Use {{{{login}}}} for the username/email
+   - Use {{{{password}}}} for the password
+   - ENSURE login is successful before proceeding with any subsequent steps
+3. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
+
 When performing assertions, consider the following validation patterns:
 - Verify presence and text content of error messages, success messages, or labels
 - Check if buttons or forms are enabled/disabled after certain actions
@@ -215,19 +229,20 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "by_strategy": "xpath",
     "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
-    "value": "For type actions: MUST provide actual test data (e.g., 'test@' for invalid email)",
+    "value": "For type actions: MUST provide actual test data (e.g., '{{{{login}}}}' for login field)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
 }}
 
 IMPORTANT REQUIREMENTS:
 1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
 2. Action Types: For any type of actions, ensure that the value field is non-empty and includes appropriate test data.
-3. Invalid Email Formats: When testing email fields, use invalid formats such as: test@, @domain.com, invalid.email
+3. Environment Variables: Use {{{{base_url}}}}, {{{{login}}}}, and {{{{password}}}} for environment-specific values.
 4. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
 5. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
 6. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
 7. No Explanations: Do not include any explanation text. Only the required JSON object should be output.
-8. Assertion: If applicable, specify an assertion to validate expected behavior. 
+8. Assertion: If applicable, specify an assertion to validate expected behavior.
+9. Login Verification: After login steps, include a verification step to confirm successful login before proceeding.
 """
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
