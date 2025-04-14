@@ -101,6 +101,10 @@ class CreateTestCaseRequest(BaseModel):
     parent_id: Optional[int] = None
     project_id: Optional[UUID4] = None
 
+class UpdateTestCaseRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
@@ -566,7 +570,7 @@ async def generate_steps(
     finally:
         if conn:
             return_db_connection(conn)
-
+    
     try:
         # Get the singleton instance of TestRunner
         runner = TestRunner()
@@ -1718,7 +1722,7 @@ async def delete_test_step(
     except Exception as e:
         conn.rollback()
         # Include more detailed error information for debugging
-        error_detail = f"Failed to delete test step: {str(e)}"
+        error_detail = f"Failed to delete test step: {e}"
         print(f"Error in delete_test_step: {error_detail}")
         print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
@@ -1787,7 +1791,7 @@ async def delete_test_case(
     except Exception as e:
         conn.rollback()
         # Include more detailed error information for debugging
-        error_detail = f"Failed to delete test case: {str(e)}"
+        error_detail = f"Failed to delete test case: {e}"
         print(f"Error in delete_test_case: {error_detail}")
         print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
@@ -2333,6 +2337,70 @@ async def move_test_case(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to move test case: {str(e)}"
+        )
+    finally:
+        return_db_connection(conn)
+
+@app.put("/api/test_cases/{id}")
+async def update_test_case(
+    id: int,
+    request_data: UpdateTestCaseRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update an existing test case's name and description.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # Check if the test case exists and belongs to the user's client
+            cur.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (id, str(current_user.client_id))
+            )
+            test_case = cur.fetchone()
+            if not test_case:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Test case not found"
+                )
+            
+            # Update the test case
+            cur.execute(
+                """
+                UPDATE test_cases 
+                SET name = %s, description = %s, updated_at = NOW()
+                WHERE id = %s
+                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                """,
+                (
+                    request_data.name,
+                    request_data.description,
+                    id
+                )
+            )
+            updated_test_case = cur.fetchone()
+            conn.commit()
+            
+            # Format the response
+            return {
+                "id": updated_test_case[0],
+                "name": updated_test_case[1],
+                "description": updated_test_case[2],
+                "parent_id": updated_test_case[3],
+                "type": updated_test_case[4],
+                "order": updated_test_case[5],
+                "created_at": updated_test_case[6].isoformat() if updated_test_case[6] else None,
+                "updated_at": updated_test_case[7].isoformat() if updated_test_case[7] else None,
+                "project_id": updated_test_case[8]
+            }
+    except Exception as e:
+        conn.rollback()
+        print(f"Error updating test case: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update test case: {str(e)}"
         )
     finally:
         return_db_connection(conn)
