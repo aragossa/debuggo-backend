@@ -3,7 +3,6 @@ from contextlib import contextmanager
 from datetime import datetime
 import logging
 import os
-
 import psycopg2
 import redis
 from redis.lock import Lock as RedisLock
@@ -11,6 +10,8 @@ from threading import Lock
 import time
 import multiprocessing
 from datetime import timedelta
+import base64
+import os.path
 from Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
 from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
@@ -209,9 +210,10 @@ class TestRunner:
                             value,
                             path_type,
                             created_at,
-                            updated_at
+                            updated_at,
+                            screenshot_path
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         ) RETURNING id;
                     """
 
@@ -228,7 +230,8 @@ class TestRunner:
                             value,
                             by_strategy,
                             current_timestamp,
-                            current_timestamp
+                            current_timestamp,
+                            None  # Initially set screenshot_path to None, will be updated later
                         )
                     )
 
@@ -277,7 +280,15 @@ class TestRunner:
             if action == "click":
                 self.browser.click(element_path, by_strategy)
             elif action == 'navigate':
-                self.browser.navigate(element_path)
+                # For navigate action, if element_path is 'N/A', use the value field instead
+                if element_path == 'N/A' or not element_path:
+                    if value:
+                        self.logger.info(f"[PID:{self.pid}] Navigating to URL from value field: {value}")
+                        self.browser.navigate(value)
+                    else:
+                        raise ValueError("Navigate action requires either a valid element_path or value containing the URL")
+                else:
+                    self.browser.navigate(element_path)
             elif action == "type":
                 self.logger.info(f"[PID:{self.pid}] with value {value}")
                 self.browser.type_text(element_path, value, by_strategy)
@@ -516,6 +527,53 @@ class TestRunner:
                             self.logger.info(f"[PID:{pid}] Skipping duplicate step: {element_purpose}")
                             continue
                         
+                        # Validate that the step matches the expected next_prompt
+                        # This helps ensure we don't skip important steps like "Click the login button"
+                        if next_prompt and not any(keyword in element_purpose.lower() for keyword in next_prompt.lower().split()):
+                            self.logger.warning(f"[PID:{pid}] Step purpose '{element_purpose}' doesn't match expected next_prompt '{next_prompt}'")
+                            self.logger.warning(f"[PID:{pid}] Requesting a new step that matches '{next_prompt}'")
+                            
+                            # Try to get a new step that matches the expected next_prompt
+                            retry_count = 0
+                            while retry_count < 3:  # Maximum 3 retries
+                                try:
+                                    self.logger.info(f"[PID:{pid}] Retrying with explicit next_prompt: {next_prompt}")
+                                    analyzer_response = html_analyzer.html_analyzer(
+                                        test_case_id=test_case_id,
+                                        html_code=page_source,
+                                        test_name=test_name,
+                                        test_description=test_description,
+                                        step_order=step_order,
+                                        next_prompt=f"Please specifically {next_prompt}",
+                                        prev_step_description=prev_step_description,
+                                        screenshot_path=screenshot_path
+                                    )
+                                    
+                                    if isinstance(analyzer_response, tuple):
+                                        if len(analyzer_response) == 5:
+                                            next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
+                                            value = ""
+                                        else:
+                                            next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                            
+                                        # Check if the new step matches the expected next_prompt
+                                        if any(keyword in element_purpose.lower() for keyword in next_prompt.lower().split()):
+                                            self.logger.info(f"[PID:{pid}] Got a matching step: {element_purpose}")
+                                            break
+                                        else:
+                                            self.logger.warning(f"[PID:{pid}] Retry {retry_count+1}: Still got non-matching step: {element_purpose}")
+                                    
+                                    retry_count += 1
+                                    if retry_count >= 3:
+                                        self.logger.warning(f"[PID:{pid}] Failed to get a matching step after 3 retries, proceeding with: {element_purpose}")
+                                except Exception as e:
+                                    self.logger.error(f"[PID:{pid}] Error during retry: {str(e)}")
+                                    retry_count += 1
+                                    if retry_count >= 3:
+                                        self.logger.warning(f"[PID:{pid}] Failed to get a matching step after 3 retries due to errors, proceeding with original step")
+                                        break
+                                    time.sleep(1)
+                        
                         previous_steps.add(step_key)
                         
                         if action and element_locator:
@@ -556,7 +614,28 @@ class TestRunner:
                                 # Take a screenshot of the failure state
                                 try:
                                     failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
-                                    self.logger.error(f"[PID:{pid}] Failure screenshot saved to: {failure_screenshot}")
+                                    self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
+                                    
+                                    # Update the screenshot_path in the test_steps table
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute("""
+                                                UPDATE test_steps 
+                                                SET screenshot_path = %s
+                                                WHERE id = %s
+                                            """, (failure_screenshot, step_id))
+                                            connection.commit()
+                                    
+                                    # Save the screenshot to the database
+                                    with open(failure_screenshot, "rb") as image_file:
+                                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute("""
+                                                INSERT INTO screenshots (test_step_id, screenshot, description)
+                                                VALUES (%s, %s, %s)
+                                            """, (step_id, encoded_string, f"Error screenshot for step {step_order}"))
+                                            connection.commit()
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
                                 
@@ -592,6 +671,27 @@ class TestRunner:
                         # Take a screenshot after getting page source
                         screenshot_path = self.browser.take_screenshot()
                         self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
+                        
+                        # Update the screenshot_path in the test_steps table
+                        with self.get_db_connection() as connection:
+                            with connection.cursor() as cursor:
+                                cursor.execute("""
+                                    UPDATE test_steps 
+                                    SET screenshot_path = %s
+                                    WHERE id = %s
+                                """, (screenshot_path, step_id))
+                                connection.commit()
+                        
+                        # Save the screenshot to the database
+                        with open(screenshot_path, "rb") as image_file:
+                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                        with self.get_db_connection() as connection:
+                            with connection.cursor() as cursor:
+                                cursor.execute("""
+                                    INSERT INTO screenshots (test_step_id, screenshot, description)
+                                    VALUES (%s, %s, %s)
+                                """, (step_id, encoded_string, f"Screenshot for step {step_order}"))
+                                connection.commit()
                         step_order += 1
                 except Exception as step_gen_error:
                     self.logger.error(f"[PID:{pid}] Error during step generation: {str(step_gen_error)}")

@@ -1353,7 +1353,7 @@ async def get_project_test_tree(
             )
             test_cases = cursor.fetchall()
             
-            # Convert to a list of dictionaries
+            # Convert to a list of dictionaries for build_tree function
             test_cases_list = [
                 {
                     "id": test_case[0],
@@ -2404,6 +2404,77 @@ async def update_test_case(
         )
     finally:
         return_db_connection(conn)
+
+@app.get("/api/test_step_screenshot/{step_id}")
+async def get_test_step_screenshot(
+    step_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Retrieve the screenshot for a specific test step.
+    Returns the screenshot as a base64 encoded string.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # First verify that the test step belongs to the current user's client
+            cursor.execute(
+                """
+                SELECT ts.id 
+                FROM test_steps ts
+                JOIN test_cases tc ON ts.test_case_id = tc.id
+                WHERE ts.id = %s AND tc.client_id = %s
+                """,
+                (step_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Test step not found or you don't have permission to access it"
+                )
+            
+            # Get the screenshot
+            cursor.execute(
+                """
+                SELECT screenshot, description
+                FROM screenshots
+                WHERE test_step_id = %s
+                LIMIT 1
+                """,
+                (step_id,)
+            )
+            result = cursor.fetchone()
+            
+            if not result:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No screenshot found for this test step"
+                )
+            
+            # Convert the result to a dictionary
+            screenshot_data = result[0]
+            if isinstance(screenshot_data, memoryview):
+                screenshot_data = bytes(screenshot_data)
+            
+            if isinstance(screenshot_data, bytes):
+                screenshot_data = screenshot_data.decode('utf-8')
+            
+            screenshot_dict = {
+                "screenshot": screenshot_data,
+                "description": result[1] if result[1] is not None else "Screenshot"
+            }
+            
+            # Return the dictionary directly
+            return JSONResponse(content=screenshot_dict)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve screenshot: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 if __name__ == "__main__":
     import uvicorn
