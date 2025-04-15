@@ -205,11 +205,23 @@ You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 IMPORTANT GUIDELINES:
 1. FOLLOW THE TEST DESCRIPTION PRECISELY - The test steps must implement exactly what is described in the test description.
 2. LOGIN HANDLING - If login is required, use environment variables:
-   - Use {{{{base_url}}}} for the base URL
-   - Use {{{{login}}}} for the username/email
-   - Use {{{{password}}}} for the password
+  - Use {{base_url}} for the base URL
+   - First locate and interact with the username/email field, using {{login}} as the value
+   - Then locate and interact with the password field, using {{password}} as the value
+   - Only after both fields are filled, locate and click the login/submit button
    - ENSURE login is successful before proceeding with any subsequent steps
+   - NEVER skip the password field even if it appears to be optional
 3. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
+
+FORM COMPLETION REQUIREMENTS:
+1. When filling out forms, ALWAYS complete ALL available fields before submission
+2. For login forms specifically:
+   - FIRST step: Locate and fill the username/email field with {{login}}
+   - SECOND step: Locate and fill the password field with {{password}}
+   - THIRD step: Click the login/submit button
+   - These steps MUST be performed as separate actions in this exact sequence
+3. NEVER combine multiple form field actions into a single step
+4. NEVER skip form fields, especially password fields
 
 When performing assertions, consider the following validation patterns:
 - Verify presence and text content of error messages, success messages, or labels
@@ -243,6 +255,7 @@ IMPORTANT REQUIREMENTS:
 7. No Explanations: Do not include any explanation text. Only the required JSON object should be output.
 8. Assertion: If applicable, specify an assertion to validate expected behavior.
 9. Login Verification: After login steps, include a verification step to confirm successful login before proceeding.
+10. Password Field Handling: When dealing with login forms, ALWAYS include a separate step for entering the password in the password field before clicking the login button. This is mandatory even if the form appears to function without it.
 """
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
