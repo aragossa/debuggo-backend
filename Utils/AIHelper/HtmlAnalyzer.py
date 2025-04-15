@@ -141,3 +141,80 @@ class HtmlAnalyzer(AIHelper):
             return "Stop", "Mock purpose", "click", "#mock", "css", ""
         else:
             raise ValueError(f"Unsupported AI provider: {self.provider}")
+
+    def analyze_error(self, test_case_id: int, html_code: str, test_name: str, test_description: str, 
+                     step_history: list, failed_step: dict, error_message: str, 
+                     previous_attempts: list = None, screenshot_path: str = None) -> tuple[str, str, str, str, str, str]:
+        """
+        Analyze a test step failure and suggest a fix.
+        
+        Args:
+            test_case_id: ID of the test case
+            html_code: The HTML of the page when the error occurred
+            test_name: The name of the test case
+            test_description: The description of the test case
+            step_history: List of previously executed steps
+            failed_step: The step that failed
+            error_message: The error message from the failed step
+            previous_attempts: List of previous recovery attempts and their errors
+            screenshot_path: Path to the screenshot of the failure state
+            
+        Returns:
+            A tuple containing (next_step, element_purpose, action, element_locator, by_strategy, value)
+        """
+        self.logger.info("Sending request to AI provider for error analysis.")
+        prompt = self.get_error_analysis_prompt(
+            html_code=html_code,
+            error_message=error_message,
+            test_name=test_name,
+            test_description=test_description,
+            step_history=step_history,
+            failed_step=failed_step,
+            previous_attempts=previous_attempts,
+            screenshot_path=screenshot_path
+        )
+        
+        image = False
+        if screenshot_path:
+            self.logger.info(f"Reading the error screenshot {screenshot_path}")
+            image = self.read_img(screenshot_path)
+        
+        if self.provider == "gemini":
+            if image:
+                self.logger.info("Sending error analysis request to Gemini with image")
+                response = self.send_request_to_gemini(prompt, image)
+            else:
+                self.logger.info("Sending error analysis request to Gemini without image")
+                response = self.send_request_to_gemini(prompt)
+            
+            self.logger.info("=== ERROR ANALYSIS RESPONSE START ===")
+            
+            # Validate required keys
+            required_keys = ['analysis', 'element_locator', 'by_strategy', 'action', 'element_purpose', 'value', 'next_step']
+            missing_keys = [k for k in required_keys if k not in response]
+            if missing_keys:
+                self.logger.warning(f"Missing required keys in error analysis response: {missing_keys}")
+                # Set default values for missing keys
+                for key in missing_keys:
+                    response[key] = ''
+            
+            # Normalize by_strategy to match database constraints
+            if response['by_strategy'].lower() not in ['css', 'xpath']:
+                response['by_strategy'] = 'xpath'  # Default to xpath if invalid
+            else:
+                response['by_strategy'] = response['by_strategy'].lower()
+            
+            # Log the analysis
+            self.logger.info(f"Error analysis: {response['analysis']}")
+            
+            # Return tuple in the expected order
+            return (
+                response['next_step'],
+                response['element_purpose'],
+                response['action'],
+                response['element_locator'],
+                response['by_strategy'],
+                response['value']
+            )
+        else:
+            raise ValueError(f"Unsupported AI provider for error analysis: {self.provider}")

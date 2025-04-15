@@ -195,7 +195,8 @@ class AIHelper:
         # Enhanced prompt with stronger focus on test description and login handling
         return f"""Act as an experienced QA engineer, you are creating a test case: "{test_name}".
 
-TEST DESCRIPTION: {test_description}
+This is the suggested test description, some steps might be missing, if you see that executing this step will not help you to complete the test, suggest next step:
+{test_description}
 
 You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
 If current step will be final step, put to the next_step attribute the word 'Stop'.
@@ -203,15 +204,23 @@ You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 {step_history}
 
 IMPORTANT GUIDELINES:
-1. FOLLOW THE TEST DESCRIPTION PRECISELY - The test steps must implement exactly what is described in the test description.
-2. LOGIN HANDLING - If login is required, use environment variables:
-  - Use {{base_url}} for the base URL
+1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE
+2. MENU NAVIGATION - For dropdown or expandable menus:
+   - If a menu item appears to be hidden or requires expanding a parent menu first:
+     a. FIRST step: Locate and click/hover on the parent menu item to expand it
+     b. SECOND step: Only after the submenu is visible, interact with the submenu item
+   - NEVER try to directly click on hidden submenu items
+   - Check for CSS classes like 'hidden', 'collapsed', or attributes like 'aria-expanded="false"' to identify hidden elements
+   - Look for elements with 'dropdown', 'submenu', or similar classes to identify dropdown menus
+   - For multi-level menus, handle ONE LEVEL AT A TIME (hover/click parent → click child)
+3. LOGIN HANDLING - If login is required, use environment variables:
+   - Use {{base_url}} for the base URL
    - First locate and interact with the username/email field, using {{login}} as the value
    - Then locate and interact with the password field, using {{password}} as the value
    - Only after both fields are filled, locate and click the login/submit button
    - ENSURE login is successful before proceeding with any subsequent steps
    - NEVER skip the password field even if it appears to be optional
-3. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
+4. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
 
 FORM COMPLETION REQUIREMENTS:
 1. When filling out forms, ALWAYS complete ALL available fields before submission
@@ -222,6 +231,43 @@ FORM COMPLETION REQUIREMENTS:
    - These steps MUST be performed as separate actions in this exact sequence
 3. NEVER combine multiple form field actions into a single step
 4. NEVER skip form fields, especially password fields
+
+ELEMENT VISIBILITY REQUIREMENTS:
+1. ALWAYS check if an element is visible and interactable before suggesting it
+2. For navigation menus:
+   - Check if the menu item requires a parent menu to be expanded first
+   - If a menu is collapsed/hidden, first expand it before trying to click items within it
+   - Look for parent elements with classes like 'dropdown', 'menu', 'nav', etc.
+   - Check for elements with 'display: none', visibility: hidden', or opacity: 0' styles
+   - For flyout/hover menus, use 'hover' action on parent before clicking child items
+3. For dynamic elements:
+   - Ensure the element is in the viewport and not obscured by other elements
+   - Consider using 'scroll' action to bring elements into view if needed
+   - Use 'hover' action for elements that require mouse hover to be accessible
+
+STEP SEQUENCING REQUIREMENTS:
+1. FOLLOW THE LOGICAL FLOW of the application - don't skip steps or jump ahead
+2. If the next_prompt suggests clicking on a menu item, FIRST check if that menu item is visible
+3. If a menu item is hidden inside a dropdown/expandable menu:
+   - FIRST step must be to expand/hover the parent menu
+   - NEXT step must be to click the specific menu item
+4. For any action that leads to a new page or significant UI change:
+   - Wait for the page to load completely before proceeding to the next step
+   - Verify the new page/state is loaded correctly before interacting with elements
+
+NAVIGATION FLOW ENFORCEMENT:
+1. If the next_prompt is to click a specific button or link (e.g., "Click the 'Recipients' link"), you MUST:
+   - First verify the button/link exists in the current page
+   - If it exists, create a step to click it
+   - If it doesn't exist, check if navigation to another page is required first
+2. For form interactions:
+   - First click the form element
+   - Then type or select the appropriate value
+   - Never skip directly to form submission without completing all fields
+3. For multi-page workflows:
+   - Complete all actions on the current page before proceeding to the next page
+   - Verify page transitions before interacting with elements on the new page
+4. If a url is provided, navigate to instead of trying to click on a link
 
 When performing assertions, consider the following validation patterns:
 - Verify presence and text content of error messages, success messages, or labels
@@ -256,6 +302,108 @@ IMPORTANT REQUIREMENTS:
 8. Assertion: If applicable, specify an assertion to validate expected behavior.
 9. Login Verification: After login steps, include a verification step to confirm successful login before proceeding.
 10. Password Field Handling: When dealing with login forms, ALWAYS include a separate step for entering the password in the password field before clicking the login button. This is mandatory even if the form appears to function without it.
+11. Hidden Menus: NEVER try to click on hidden submenu items directly. Always expand parent menus first before interacting with their child elements.
+12. FOLLOW THE EXACT NEXT STEP: If the next_prompt specifies an action like "Click the 'Recipients' link", make sure to perform exactly that action, not skip ahead to subsequent steps.
+13. STRICT SEQUENCE ADHERENCE: You MUST follow the exact sequence of steps. If the next_prompt is "Click the 'New group' button", you MUST create a step that clicks that button, even if you can see form fields that will need to be filled afterward.
+14. NEVER ASSUME COMPLETION: Never assume a step has already been completed. If the next_prompt indicates an action, that action must be performed as the current step.
+15. ONE ACTION PER STEP: Each step should perform exactly one action (click, type, etc.). Do not combine multiple actions into a single step.
+"""
+
+    def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
+                                 step_history: list, failed_step: dict, previous_attempts: list = None, 
+                                 screenshot_path: str = None) -> str:
+        """
+        Generate a prompt for Gemini to analyze a test step failure and suggest a fix.
+        
+        Args:
+            html_code: The HTML of the page when the error occurred
+            error_message: The error message from the failed step
+            test_name: The name of the test case
+            test_description: The description of the test case
+            step_history: List of previously executed steps
+            failed_step: The step that failed
+            previous_attempts: List of previous recovery attempts and their errors
+            screenshot_path: Path to the screenshot of the failure state
+            
+        Returns:
+            A prompt for Gemini to analyze the error and suggest a fix
+        """
+        # Format step history for readability
+        formatted_history = ""
+        for idx, step in enumerate(step_history):
+            formatted_history += (
+                f"Step {idx}: {step['element_purpose']}\n"
+                f"- Action: {step['action']}\n"
+                f"- Element: {step['element_locator']} (using {step['by_strategy']})\n"
+                f"- Value: {step['value']}\n"
+            )
+        
+        # Format failed step
+        failed_step_info = (
+            f"Failed Step: {failed_step['element_purpose']}\n"
+            f"- Action: {failed_step['action']}\n"
+            f"- Element: {failed_step['element_locator']} (using {failed_step['by_strategy']})\n"
+            f"- Value: {failed_step['value']}\n"
+            f"- Error: {error_message}\n"
+        )
+        
+        # Format previous attempts if available
+        previous_attempts_info = ""
+        if previous_attempts and len(previous_attempts) > 0:
+            previous_attempts_info = "PREVIOUS RECOVERY ATTEMPTS (THESE DID NOT WORK):\n"
+            for idx, attempt in enumerate(previous_attempts):
+                previous_attempts_info += (
+                    f"Attempt {idx+1}:\n"
+                    f"- Action: {attempt['action']}\n"
+                    f"- Element: {attempt['element_locator']} (using {attempt['by_strategy']})\n"
+                    f"- Value: {attempt['value']}\n"
+                    f"- Error: {attempt['error']}\n\n"
+                )
+        
+        return f"""Act as an experienced QA automation expert. You are debugging a failed test step in test case: "{test_name}".
+
+TEST DESCRIPTION: {test_description}
+
+EXECUTED STEPS:
+{formatted_history}
+
+FAILED STEP:
+{failed_step_info}
+
+{previous_attempts_info}
+
+ERROR ANALYSIS TASK:
+Analyze the error and the current page state to determine why the step failed and how to fix it.
+The most common issues are:
+1. Element not found - The locator might be incorrect or the element might not be visible/present
+2. Element not interactable - The element might be hidden, disabled, or covered by another element
+3. Navigation issues - The test might be on the wrong page or a previous step might have failed
+4. Timing issues - The page might not have loaded completely
+
+CURRENT PAGE HTML:
+{html_code}
+
+{'SCREENSHOT OF FAILURE STATE: A screenshot of the page at the time of failure is attached.' if screenshot_path else ''}
+
+Your response MUST be a valid JSON object with ALL of the following required fields:
+{{
+    "analysis": "Brief analysis of why the step failed",
+    "element_locator": "Corrected XPath or CSS selector that should work",
+    "by_strategy": "xpath or css",
+    "action": "Same or corrected action (click, type, etc.)",
+    "element_purpose": "Description of what this step does",
+    "value": "Same or corrected value if applicable",
+    "next_step": "Description of what to do next"
+}}
+
+IMPORTANT:
+1. Focus on fixing the CURRENT step, not skipping ahead
+2. If the element truly doesn't exist, suggest an alternative approach
+3. Consider if a parent menu needs to be expanded first
+4. For hidden elements, consider using hover actions or JavaScript execution
+5. If timing is the issue, suggest adding a wait step
+6. Ensure your solution follows the logical flow of the application
+7. DO NOT suggest solutions that have already been tried in the previous attempts
 """
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
@@ -296,7 +444,7 @@ IMPORTANT REQUIREMENTS:
         
         self._wait_for_rate_limit()
         
-        model = genai.GenerativeModel("gemini-2.5-pro-exp-03-25")
+        model = genai.GenerativeModel("gemini-2.5-pro-preview-03-25")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5
@@ -372,8 +520,9 @@ IMPORTANT REQUIREMENTS:
                 self.logger.warning(f"Rate limit hit (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     # Use exponential backoff in addition to rate limiting
-                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    delay = base_delay * (10 ** attempt)  # Exponential backoff
                     self.logger.warning(f"Additional backoff: {delay} seconds")
+                    self.logger.error(e)
                     time.sleep(delay)
             except Exception as e:
                 self.logger.error(f"Unexpected error: {str(e)}")

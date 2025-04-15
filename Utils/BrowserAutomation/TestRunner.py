@@ -91,25 +91,55 @@ class TestRunner:
 
     @contextmanager
     def _process_lock(self):
-        """Process-safe lock using Redis"""
+        """Process-safe lock using Redis or threading lock as fallback"""
         pid = os.getpid()
         acquired = False
+        redis_error = None
+        
         try:
-            self.logger.info(f"[PID:{pid}] Attempting to acquire Redis lock")
-            # Try to acquire lock with blocking
-            acquired = self._redis_lock.acquire()
-            if not acquired:
-                self.logger.error(f"[PID:{pid}] Failed to acquire Redis lock after timeout")
-                raise TimeoutError("Could not acquire lock for test execution")
-            self.logger.info(f"[PID:{pid}] Successfully acquired Redis lock")
+            self.logger.info(f"[PID:{pid}] Attempting to acquire lock")
+            
+            # First try Redis lock if available
+            if hasattr(self, '_redis_lock') and self._redis_lock:
+                try:
+                    self.logger.info(f"[PID:{pid}] Trying Redis lock")
+                    acquired = self._redis_lock.acquire(blocking=True, blocking_timeout=5)
+                    if acquired:
+                        self.logger.info(f"[PID:{pid}] Successfully acquired Redis lock")
+                        redis_error = None
+                    else:
+                        self.logger.warning(f"[PID:{pid}] Failed to acquire Redis lock, falling back to threading lock")
+                        redis_error = "Failed to acquire Redis lock after timeout"
+                except Exception as e:
+                    self.logger.warning(f"[PID:{pid}] Redis error: {str(e)}, falling back to threading lock")
+                    redis_error = str(e)
+            else:
+                self.logger.info(f"[PID:{pid}] Redis lock not available")
+                redis_error = "Redis lock not initialized"
+            
+            # If Redis failed, use threading lock
+            if redis_error:
+                try:
+                    self._lock.acquire()
+                    acquired = True
+                    self.logger.info(f"[PID:{pid}] Successfully acquired threading lock")
+                except Exception as e:
+                    self.logger.error(f"[PID:{pid}] Failed to acquire threading lock: {str(e)}")
+                    raise TimeoutError(f"Could not acquire any lock for test execution: {str(e)}")
+            
             yield
         finally:
             if acquired:
                 try:
-                    self._redis_lock.release()
-                    self.logger.info(f"[PID:{pid}] Released Redis lock")
+                    # Release the appropriate lock
+                    if redis_error is None and hasattr(self, '_redis_lock') and self._redis_lock:
+                        self._redis_lock.release()
+                        self.logger.info(f"[PID:{pid}] Released Redis lock")
+                    else:
+                        self._lock.release()
+                        self.logger.info(f"[PID:{pid}] Released threading lock")
                 except Exception as e:
-                    self.logger.error(f"[PID:{pid}] Error releasing Redis lock: {e}")
+                    self.logger.error(f"[PID:{pid}] Error releasing lock: {str(e)}")
             else:
                 self.logger.warning(f"[PID:{pid}] No lock to release")
 
@@ -260,12 +290,8 @@ class TestRunner:
             env_helper (EnvHelper): Optional environment helper for variable processing
         """
         try:
-            # Process environment variables in element_path and value if env_helper is provided
-            if env_helper:
-                if element_path:
-                    element_path = env_helper.process_variables(element_path)
-                if value:
-                    value = env_helper.process_variables(value)
+            # We're no longer processing variables here since they should already be processed
+            # when passed to this method from generate_test_steps
             
             # Handle None or empty by_strategy
             if not by_strategy:
@@ -304,6 +330,17 @@ class TestRunner:
                 self.browser.select(element_path, value, by_strategy)
             else:
                 raise ValueError(f"Unsupported action: {action}")
+                
+            # Only add a 5-second wait if the page has been reloaded
+            if action in ['click', 'navigate', 'submit']:
+                # Check if the page has been reloaded
+                self.logger.info(f"[PID:{self.pid}] Checking if page has been reloaded after {action}")
+                if self.browser.wait_for_page_changes():
+                    self.logger.info(f"[PID:{self.pid}] Page was reloaded, waiting 5 seconds for it to stabilize")
+                    time.sleep(5)
+                else:
+                    self.logger.info(f"[PID:{self.pid}] No page reload detected after {action}")
+            
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to execute step: {action} on {element_path}")
             self.logger.error(f"[PID:{self.pid}] Error details: {str(e)}")
@@ -492,11 +529,9 @@ class TestRunner:
                                         value = ""  # Default empty value
                                     else:
                                         next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
-                                else:
-                                    raise ValueError(f"Expected tuple response, got {type(analyzer_response)}")
-                                    
-                                self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
-                                break
+                                            
+                                    self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                    break
                             except Exception as e:
                                 retry_count += 1
                                 self.logger.error(f"[PID:{pid}] Error in attempt {retry_count}: {str(e)}")
@@ -512,12 +547,20 @@ class TestRunner:
                         next_prompt = next_step
                         prev_step_description = element_purpose
                         
-                        # Process environment variables in values
+                        # Store original values with variable placeholders
+                        original_value = value
+                        original_element_locator = element_locator
+                        
+                        # Process environment variables in values only for execution, not for storage
                         if value:
-                            value = env.process_variables(value)
+                            processed_value = env.process_variables(value)
+                        else:
+                            processed_value = value
                         
                         if element_locator:
-                            element_locator = env.process_variables(element_locator)
+                            processed_element_locator = env.process_variables(element_locator)
+                        else:
+                            processed_element_locator = element_locator
                         
                         # Create a unique key for this step
                         step_key = f"{action}:{element_locator}:{element_purpose}"
@@ -527,90 +570,203 @@ class TestRunner:
                             self.logger.info(f"[PID:{pid}] Skipping duplicate step: {element_purpose}")
                             continue
                         
-                        # Validate that the step matches the expected next_prompt
-                        # This helps ensure we don't skip important steps like "Click the login button"
-                        if next_prompt and not any(keyword in element_purpose.lower() for keyword in next_prompt.lower().split()):
-                            self.logger.warning(f"[PID:{pid}] Step purpose '{element_purpose}' doesn't match expected next_prompt '{next_prompt}'")
-                            self.logger.warning(f"[PID:{pid}] Requesting a new step that matches '{next_prompt}'")
+                        previous_steps.add(step_key)
+                        
+                        # Special handling for navigate action which might have None as element_locator but has value
+                        if action == "navigate" and value and not element_locator:
+                            self.logger.info(f"[PID:{pid}] Executing navigate step to: {value}")
                             
-                            # Try to get a new step that matches the expected next_prompt
-                            retry_count = 0
-                            while retry_count < 3:  # Maximum 3 retries
+                            # Save the step to the database first - use original values with placeholders
+                            step_id = self._save_step(
+                                test_case_id=test_case_id,
+                                step_order=step_order,
+                                element_purpose=element_purpose,
+                                action=action,
+                                element_locator=original_element_locator,
+                                value=original_value,
+                                by_strategy=by_strategy
+                            )
+                            
+                            try:
+                                self.execute_step(action, "N/A", processed_value, by_strategy, env)
+                                
+
+                            except Exception as e:
+
+                                # Take a screenshot of the failure state
                                 try:
-                                    self.logger.info(f"[PID:{pid}] Retrying with explicit next_prompt: {next_prompt}")
-                                    analyzer_response = html_analyzer.html_analyzer(
-                                        test_case_id=test_case_id,
-                                        html_code=page_source,
-                                        test_name=test_name,
-                                        test_description=test_description,
-                                        step_order=step_order,
-                                        next_prompt=f"Please specifically {next_prompt}",
-                                        prev_step_description=prev_step_description,
-                                        screenshot_path=screenshot_path
-                                    )
+                                    failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
+                                    self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
                                     
-                                    if isinstance(analyzer_response, tuple):
+                                    # Update the screenshot_path in the test_steps table
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute("""
+                                                UPDATE test_steps 
+                                                SET screenshot_path = %s
+                                                WHERE id = %s
+                                            """, (failure_screenshot, step_id))
+                                            connection.commit()
+                                    
+                                    # Save the screenshot to the database
+                                    with open(failure_screenshot, "rb") as image_file:
+                                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute("""
+                                                INSERT INTO screenshots (test_step_id, screenshot, description)
+                                                VALUES (%s, %s, %s)
+                                            """, (step_id, encoded_string, f"Error screenshot for step {step_order}"))
+                                            connection.commit()
+                                except Exception as screenshot_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
+                                
+                                # Update the step in the database to mark it as failed
+                                try:
+                                    with self.get_db_connection() as connection:
+                                        with connection.cursor() as cursor:
+                                            cursor.execute(
+                                                """
+                                                UPDATE test_steps 
+                                                SET error_message = %s
+                                                WHERE id = %s
+                                                """,
+                                                (str(e), step_id)
+                                            )
+                                            connection.commit()
+                                except Exception as db_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
+                                
+                                # Try to recover from the error using AI
+                                max_recovery_attempts = 5
+                                recovery_attempt = 0
+                                
+                                # Create a step history for error analysis
+                                step_history = self._get_step_history(test_case_id)
+                                
+                                # Create a failed step dictionary
+                                failed_step = {
+                                    'element_purpose': element_purpose,
+                                    'action': action,
+                                    'element_locator': original_element_locator,
+                                    'by_strategy': by_strategy,
+                                    'value': original_value
+                                }
+                                
+                                # Track previous recovery attempts
+                                previous_attempts = []
+                                
+                                while recovery_attempt < max_recovery_attempts:
+                                    recovery_attempt += 1
+                                    self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
+                                    
+                                    try:
+                                        # Get current page source for error analysis
+                                        page_source = self.browser.get_page_source()
+                                        
+                                        # Debug the page structure if the error is related to element not found
+                                        if "Element not found" in str(e) or "TimeoutException" in str(e):
+                                            self.logger.info(f"[PID:{pid}] Element location issue detected, debugging page structure...")
+                                            if "btn_recipientsGroup_newGroup" in str(failed_step['element_locator']):
+                                                # Debug specific selectors for the New Group button
+                                                self.browser.debug_page_structure("//a[contains(text(), 'New Group')]")
+                                                self.browser.debug_page_structure("//button[contains(text(), 'New Group')]")
+                                                self.browser.debug_page_structure("//a[contains(@class, 'new')]", "xpath")
+                                            else:
+                                                # Debug the specific failed selector
+                                                self.browser.debug_page_structure(failed_step['element_locator'], failed_step['by_strategy'])
+                                        
+                                        # Use AI to analyze the error and suggest a fix
+                                        analyzer_response = html_analyzer.analyze_error(
+                                            test_case_id=test_case_id,
+                                            html_code=page_source,
+                                            test_name=test_name,
+                                            test_description=test_description,
+                                            step_history=step_history,
+                                            failed_step=failed_step,
+                                            error_message=str(e),
+                                            previous_attempts=previous_attempts,
+                                            screenshot_path=failure_screenshot
+                                        )
+                                        
+                                        # Unpack the response
                                         if len(analyzer_response) == 5:
                                             next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
                                             value = ""
                                         else:
                                             next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
                                             
-                                        # Check if the new step matches the expected next_prompt
-                                        if any(keyword in element_purpose.lower() for keyword in next_prompt.lower().split()):
-                                            self.logger.info(f"[PID:{pid}] Got a matching step: {element_purpose}")
-                                            break
+                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                        
+                                        # Process environment variables for execution
+                                        if value:
+                                            processed_value = env.process_variables(value)
                                         else:
-                                            self.logger.warning(f"[PID:{pid}] Retry {retry_count+1}: Still got non-matching step: {element_purpose}")
-                                    
-                                    retry_count += 1
-                                    if retry_count >= 3:
-                                        self.logger.warning(f"[PID:{pid}] Failed to get a matching step after 3 retries, proceeding with: {element_purpose}")
-                                except Exception as e:
-                                    self.logger.error(f"[PID:{pid}] Error during retry: {str(e)}")
-                                    retry_count += 1
-                                    if retry_count >= 3:
-                                        self.logger.warning(f"[PID:{pid}] Failed to get a matching step after 3 retries due to errors, proceeding with original step")
+                                            processed_value = value
+                                            
+                                        if element_locator:
+                                            processed_element_locator = env.process_variables(element_locator)
+                                        else:
+                                            processed_element_locator = element_locator
+                                        
+                                        # Save the corrected step to the database
+                                        corrected_step_id = self._save_step(
+                                            test_case_id=test_case_id,
+                                            step_order=step_order,
+                                            element_purpose=f"[CORRECTED] {element_purpose}",
+                                            action=action,
+                                            element_locator=element_locator,
+                                            value=value,
+                                            by_strategy=by_strategy
+                                        )
+                                        
+                                        # Try to execute the corrected step
+                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
+                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
+                                        
+                                        # If successful, update next_prompt and continue
+                                        self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
+                                        next_prompt = next_step
                                         break
-                                    time.sleep(1)
-                        
-                        previous_steps.add(step_key)
-                        
-                        if action and element_locator:
+                                        
+                                    except Exception as recovery_error:
+                                        self.logger.error(f"[PID:{pid}] Error recovery attempt {recovery_attempt} failed: {str(recovery_error)}")
+                                        
+                                        # Add this failed attempt to the history
+                                        previous_attempts.append({
+                                            'action': action,
+                                            'element_locator': element_locator,
+                                            'by_strategy': by_strategy,
+                                            'value': value,
+                                            'error': str(recovery_error)
+                                        })
+                                        
+                                        # If this was the last attempt, give up
+                                        if recovery_attempt >= max_recovery_attempts:
+                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, stopping test generation")
+                                            return
+                                    
+                                    # If we've exhausted all recovery attempts, stop test generation
+                                    if recovery_attempt >= max_recovery_attempts and next_prompt != next_step:
+                                        self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
+                                        return
+                        elif action and element_locator:
                             self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
 
-                            # Save the step to the database first
+                            # Save the step to the database first - use original values with placeholders
                             step_id = self._save_step(
                                 test_case_id=test_case_id,
                                 step_order=step_order,
                                 element_purpose=element_purpose,
                                 action=action,
-                                element_locator=element_locator,
-                                value=value,
+                                element_locator=original_element_locator,
+                                value=original_value,
                                 by_strategy=by_strategy
                             )
                             
-                            # Now execute the step - if it fails, we'll still have the step in the database
-                            # but we'll stop generating more steps
                             try:
-                                self.execute_step(action, element_locator, value, by_strategy, env)
-                                
-                                # If this was a login step, verify login success
-                                if (action == "type" and ("login" in element_purpose.lower() or "username" in element_purpose.lower() or 
-                                                        "email" in element_purpose.lower() or "password" in element_purpose.lower())) or \
-                                   (action == "click" and ("login" in element_purpose.lower() or "sign in" in element_purpose.lower())):
-                                    self.logger.info(f"[PID:{pid}] Login step detected, waiting for login completion...")
-                                    # Wait a bit longer for login to complete
-                                    time.sleep(2)
-                                
-                                self.logger.info(f"[PID:{pid}] Waiting for page changes...")
-                                if not self.browser.wait_for_page_changes():
-                                    self.logger.info(f"[PID:{pid}] No page changes detected, continuing...")
+                                self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
                             except Exception as e:
-                                # Log the error with detailed information
-                                self.logger.error(f"[PID:{pid}] Step execution failed: {str(e)}")
-                                self.logger.error(f"[PID:{pid}] Failed step details: Action={action}, Element={element_locator}, Strategy={by_strategy}")
-                                
                                 # Take a screenshot of the failure state
                                 try:
                                     failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
@@ -663,9 +819,119 @@ class TestRunner:
                                 except Exception as db_error:
                                     self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
                                 
-                                # Stop test generation - don't continue with fake steps
-                                self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
-                                return
+                                # Try to recover from the error using AI
+                                max_recovery_attempts = 5
+                                recovery_attempt = 0
+                                
+                                # Create a step history for error analysis
+                                step_history = self._get_step_history(test_case_id)
+                                
+                                # Create a failed step dictionary
+                                failed_step = {
+                                    'element_purpose': element_purpose,
+                                    'action': action,
+                                    'element_locator': original_element_locator,
+                                    'by_strategy': by_strategy,
+                                    'value': original_value
+                                }
+                                
+                                # Track previous recovery attempts
+                                previous_attempts = []
+                                
+                                while recovery_attempt < max_recovery_attempts:
+                                    recovery_attempt += 1
+                                    self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
+                                    
+                                    try:
+                                        # Get current page source for error analysis
+                                        page_source = self.browser.get_page_source()
+                                        
+                                        # Debug the page structure if the error is related to element not found
+                                        if "Element not found" in str(e) or "TimeoutException" in str(e):
+                                            self.logger.info(f"[PID:{pid}] Element location issue detected, debugging page structure...")
+                                            if "btn_recipientsGroup_newGroup" in str(failed_step['element_locator']):
+                                                # Debug specific selectors for the New Group button
+                                                self.browser.debug_page_structure("//a[contains(text(), 'New Group')]")
+                                                self.browser.debug_page_structure("//button[contains(text(), 'New Group')]")
+                                                self.browser.debug_page_structure("//a[contains(@class, 'new')]", "xpath")
+                                            else:
+                                                # Debug the specific failed selector
+                                                self.browser.debug_page_structure(failed_step['element_locator'], failed_step['by_strategy'])
+                                        
+                                        # Use AI to analyze the error and suggest a fix
+                                        analyzer_response = html_analyzer.analyze_error(
+                                            test_case_id=test_case_id,
+                                            html_code=page_source,
+                                            test_name=test_name,
+                                            test_description=test_description,
+                                            step_history=step_history,
+                                            failed_step=failed_step,
+                                            error_message=str(e),
+                                            previous_attempts=previous_attempts,
+                                            screenshot_path=failure_screenshot
+                                        )
+                                        
+                                        # Unpack the response
+                                        if len(analyzer_response) == 5:
+                                            next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
+                                            value = ""
+                                        else:
+                                            next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                            
+                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                        
+                                        # Process environment variables for execution
+                                        if value:
+                                            processed_value = env.process_variables(value)
+                                        else:
+                                            processed_value = value
+                                            
+                                        if element_locator:
+                                            processed_element_locator = env.process_variables(element_locator)
+                                        else:
+                                            processed_element_locator = element_locator
+                                        
+                                        # Save the corrected step to the database
+                                        corrected_step_id = self._save_step(
+                                            test_case_id=test_case_id,
+                                            step_order=step_order,
+                                            element_purpose=f"[CORRECTED] {element_purpose}",
+                                            action=action,
+                                            element_locator=element_locator,
+                                            value=value,
+                                            by_strategy=by_strategy
+                                        )
+                                        
+                                        # Try to execute the corrected step
+                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
+                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
+                                        
+                                        # If successful, update next_prompt and continue
+                                        self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
+                                        next_prompt = next_step
+                                        break
+                                        
+                                    except Exception as recovery_error:
+                                        self.logger.error(f"[PID:{pid}] Error recovery attempt {recovery_attempt} failed: {str(recovery_error)}")
+                                        
+                                        # Add this failed attempt to the history
+                                        previous_attempts.append({
+                                            'action': action,
+                                            'element_locator': element_locator,
+                                            'by_strategy': by_strategy,
+                                            'value': value,
+                                            'error': str(recovery_error)
+                                        })
+                                        
+                                        # If this was the last attempt, give up
+                                        if recovery_attempt >= max_recovery_attempts:
+                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, stopping test generation")
+                                            return
+                                    
+                                    # If we've exhausted all recovery attempts, stop test generation
+                                    if recovery_attempt >= max_recovery_attempts and next_prompt != next_step:
+                                        self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
+                                        return
 
                         page_source = self.browser.get_page_source()
                         # Take a screenshot after getting page source
@@ -707,3 +973,43 @@ class TestRunner:
             # Always clean up resources
             self._cleanup_browser()
             self.logger.info(f"[PID:{pid}] Test step generation completed")
+
+    def _get_step_history(self, test_case_id: int) -> list:
+        """
+        Get the history of executed steps for a test case.
+        
+        Args:
+            test_case_id: ID of the test case
+            
+        Returns:
+            List of dictionaries containing step information
+        """
+        try:
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, step_order, description, action, element_path, value, path_type
+                        FROM test_steps
+                        WHERE test_case_id = %s
+                        ORDER BY step_order
+                    """, (test_case_id,))
+                    
+                    steps = cursor.fetchall()
+                    
+                    # Convert to list of dictionaries
+                    step_history = []
+                    for step in steps:
+                        step_id, step_order, description, action, element_path, value, path_type = step
+                        step_history.append({
+                            'element_purpose': description,
+                            'action': action,
+                            'element_locator': element_path,
+                            'by_strategy': path_type,
+                            'value': value if value else ''
+                        })
+                    
+                    return step_history
+                    
+        except Exception as e:
+            self.logger.error(f"Error getting step history: {str(e)}")
+            return []

@@ -11,12 +11,14 @@ import sys
 import os
 import tempfile
 import datetime
+import time
+import re
 
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
 
 
 class BrowserAutomation:
-    def __init__(self, headless=False, timeout=10):
+    def __init__(self, headless=True, timeout=10):
         self.timeout = timeout
         self.driver = None
         self.logger = self._setup_logger()
@@ -39,7 +41,7 @@ class BrowserAutomation:
 
         return logger
 
-    def setup_driver(self, headless=False):
+    def setup_driver(self, headless=True):
         try:
             chrome_options = Options()
             if headless:
@@ -88,10 +90,95 @@ class BrowserAutomation:
             # Set the appropriate By strategy based on by parameter
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
 
-            element = WebDriverWait(self.driver, self.timeout).until(
-                EC.presence_of_element_located((by_strategy, selector))
-            )
-            return element
+            # First try to find the element with presence_of_element_located
+            try:
+                element = WebDriverWait(self.driver, self.timeout).until(
+                    EC.presence_of_element_located((by_strategy, selector))
+                )
+                return element
+            except TimeoutException:
+                # If element not found, try to check if we need to switch to an iframe
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                if iframes:
+                    self.logger.info(f"[PID:{self.pid}] Element not found in main frame. Checking {len(iframes)} iframes...")
+                    
+                    # Store the current context to switch back later
+                    current_context = self.driver
+                    
+                    # Try each iframe
+                    for i, iframe in enumerate(iframes):
+                        try:
+                            self.driver.switch_to.frame(iframe)
+                            self.logger.info(f"[PID:{self.pid}] Switched to iframe {i+1}")
+                            
+                            # Try to find the element in this iframe
+                            element = WebDriverWait(self.driver, 2).until(
+                                EC.presence_of_element_located((by_strategy, selector))
+                            )
+                            self.logger.info(f"[PID:{self.pid}] Found element in iframe {i+1}")
+                            return element
+                        except:
+                            # Element not in this iframe, switch back to main content and try next
+                            self.driver.switch_to.default_content()
+                    
+                    # If we've checked all iframes and still haven't found it, switch back to original context
+                    self.driver.switch_to.default_content()
+                    
+                    # Try one more time with a different wait condition
+                    try:
+                        self.logger.info(f"[PID:{self.pid}] Trying with element_to_be_clickable...")
+                        element = WebDriverWait(self.driver, self.timeout).until(
+                            EC.element_to_be_clickable((by_strategy, selector))
+                        )
+                        return element
+                    except:
+                        # Last resort: try with JavaScript
+                        self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
+                        if by.lower() == 'xpath':
+                            # For XPath, we need to use document.evaluate
+                            js_script = """
+                            var result = document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                            return result.singleNodeValue;
+                            """
+                        else:
+                            # For CSS, we can use querySelector
+                            js_script = "return document.querySelector(arguments[0]);"
+                        
+                        element = self.driver.execute_script(js_script, selector)
+                        if element:
+                            self.logger.info(f"[PID:{self.pid}] Found element using JavaScript")
+                            return element
+                        else:
+                            self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
+                            raise TimeoutException(f"Element not found: {selector}")
+                else:
+                    # Try one more time with a different wait condition
+                    try:
+                        self.logger.info(f"[PID:{self.pid}] Trying with element_to_be_clickable...")
+                        element = WebDriverWait(self.driver, self.timeout).until(
+                            EC.element_to_be_clickable((by_strategy, selector))
+                        )
+                        return element
+                    except:
+                        # Last resort: try with JavaScript
+                        self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
+                        if by.lower() == 'xpath':
+                            # For XPath, we need to use document.evaluate
+                            js_script = """
+                            var result = document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                            return result.singleNodeValue;
+                            """
+                        else:
+                            # For CSS, we can use querySelector
+                            js_script = "return document.querySelector(arguments[0]);"
+                        
+                        element = self.driver.execute_script(js_script, selector)
+                        if element:
+                            self.logger.info(f"[PID:{self.pid}] Found element using JavaScript")
+                            return element
+                        else:
+                            self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
+                            raise TimeoutException(f"Element not found: {selector}")
 
         except TimeoutException:
             self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
@@ -109,13 +196,52 @@ class BrowserAutomation:
             by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
         try:
-            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
-            element = self.find_element(selector, by_strategy)
-            element.click()
-            self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
+            # First try to find the element using our enhanced find_element method
+            element = self.find_element(selector, by)
+            
+            # Try standard click first
+            try:
+                element.click()
+                self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
+                return
+            except Exception as e:
+                self.logger.warning(f"[PID:{self.pid}] Standard click failed, trying alternative methods: {str(e)}")
+            
+            # If standard click fails, try JavaScript click
+            try:
+                self.logger.info(f"[PID:{self.pid}] Trying JavaScript click...")
+                self.driver.execute_script("arguments[0].click();", element)
+                self.logger.info(f"[PID:{self.pid}] Clicked element with JavaScript: {selector}")
+                return
+            except Exception as js_error:
+                self.logger.warning(f"[PID:{self.pid}] JavaScript click failed: {str(js_error)}")
+            
+            # If JavaScript click fails, try Actions
+            try:
+                self.logger.info(f"[PID:{self.pid}] Trying Actions click...")
+                from selenium.webdriver.common.action_chains import ActionChains
+                actions = ActionChains(self.driver)
+                actions.move_to_element(element).click().perform()
+                self.logger.info(f"[PID:{self.pid}] Clicked element with Actions: {selector}")
+                return
+            except Exception as actions_error:
+                self.logger.warning(f"[PID:{self.pid}] Actions click failed: {str(actions_error)}")
+            
+            # If all methods fail, try to scroll to the element and then click
+            try:
+                self.logger.info(f"[PID:{self.pid}] Trying scroll and click...")
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                time.sleep(0.5)  # Give time for the page to settle after scrolling
+                element.click()
+                self.logger.info(f"[PID:{self.pid}] Clicked element after scrolling: {selector}")
+                return
+            except Exception as scroll_error:
+                self.logger.error(f"[PID:{self.pid}] All click methods failed: {str(scroll_error)}")
+                raise
+                
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to click element {selector}: {str(e)}")
-            raise
+      
 
     def type_text(self, selector, text, by='xpath'):
         try:
@@ -532,6 +658,135 @@ class BrowserAutomation:
                 self.logger.error(f"[PID:{self.pid}] Error gathering debug info: {str(debug_ex)}")
             
             raise
+
+    def debug_page_structure(self, selector=None, by='xpath'):
+        """
+        Logs detailed information about the page structure to help debug element locator issues.
+        
+        Args:
+            selector (str, optional): Specific element selector to debug
+            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
+        """
+        self.logger.info(f"[PID:{self.pid}] === DEBUG PAGE STRUCTURE ===")
+        self.logger.info(f"[PID:{self.pid}] Current URL: {self.driver.current_url}")
+        self.logger.info(f"[PID:{self.pid}] Page Title: {self.driver.title}")
+        
+        # Log all buttons and links on the page
+        self.logger.info(f"[PID:{self.pid}] === BUTTONS AND LINKS ===")
+        buttons = self.driver.find_elements(By.TAG_NAME, "button")
+        links = self.driver.find_elements(By.TAG_NAME, "a")
+        
+        for i, button in enumerate(buttons):
+            try:
+                text = button.text.strip() if button.text else "[No text]"
+                id_attr = button.get_attribute("id") or "[No ID]"
+                class_attr = button.get_attribute("class") or "[No class]"
+                data_test = button.get_attribute("data-test-id") or button.get_attribute("lucy-test-id") or "[No test ID]"
+                is_visible = button.is_displayed()
+                is_enabled = button.is_enabled()
+                
+                self.logger.info(f"[PID:{self.pid}] Button {i+1}: Text='{text}', ID='{id_attr}', Class='{class_attr}', TestID='{data_test}', Visible={is_visible}, Enabled={is_enabled}")
+            except:
+                self.logger.info(f"[PID:{self.pid}] Button {i+1}: [Error getting attributes]")
+        
+        for i, link in enumerate(links):
+            try:
+                text = link.text.strip() if link.text else "[No text]"
+                href = link.get_attribute("href") or "[No href]"
+                id_attr = link.get_attribute("id") or "[No ID]"
+                class_attr = link.get_attribute("class") or "[No class]"
+                data_test = link.get_attribute("data-test-id") or link.get_attribute("lucy-test-id") or "[No test ID]"
+                is_visible = link.is_displayed()
+                
+                self.logger.info(f"[PID:{self.pid}] Link {i+1}: Text='{text}', Href='{href}', ID='{id_attr}', Class='{class_attr}', TestID='{data_test}', Visible={is_visible}")
+            except:
+                self.logger.info(f"[PID:{self.pid}] Link {i+1}: [Error getting attributes]")
+        
+        # If a specific selector was provided, try to find it and log details
+        if selector:
+            self.logger.info(f"[PID:{self.pid}] === DEBUGGING SPECIFIC SELECTOR: {selector} ===")
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            
+            # Try to find all matching elements
+            try:
+                elements = self.driver.find_elements(by_strategy, selector)
+                self.logger.info(f"[PID:{self.pid}] Found {len(elements)} matching elements")
+                
+                for i, element in enumerate(elements):
+                    try:
+                        tag_name = element.tag_name
+                        text = element.text.strip() if element.text else "[No text]"
+                        is_visible = element.is_displayed()
+                        is_enabled = element.is_enabled()
+                        
+                        self.logger.info(f"[PID:{self.pid}] Match {i+1}: Tag='{tag_name}', Text='{text}', Visible={is_visible}, Enabled={is_enabled}")
+                        
+                        # Log all attributes
+                        attributes = self.driver.execute_script(
+                            'var items = {}; for (index = 0; index < arguments[0].attributes.length; ++index) { items[arguments[0].attributes[index].name] = arguments[0].attributes[index].value }; return items;',
+                            element
+                        )
+                        self.logger.info(f"[PID:{self.pid}] Attributes: {attributes}")
+                        
+                        # Check if element is covered by another element
+                        is_covered = self.driver.execute_script("""
+                            var elem = arguments[0];
+                            var rect = elem.getBoundingClientRect();
+                            var cx = rect.left + rect.width / 2;
+                            var cy = rect.top + rect.height / 2;
+                            var el = document.elementFromPoint(cx, cy);
+                            return el !== elem && !elem.contains(el);
+                        """, element)
+                        
+                        if is_covered:
+                            self.logger.info(f"[PID:{self.pid}] Element is covered by another element")
+                            
+                            # Try to identify the covering element
+                            covering_element = self.driver.execute_script("""
+                                var elem = arguments[0];
+                                var rect = elem.getBoundingClientRect();
+                                var cx = rect.left + rect.width / 2;
+                                var cy = rect.top + rect.height / 2;
+                                return document.elementFromPoint(cx, cy);
+                            """, element)
+                            
+                            if covering_element:
+                                covering_tag = covering_element.tag_name
+                                covering_text = covering_element.text.strip() if covering_element.text else "[No text]"
+                                self.logger.info(f"[PID:{self.pid}] Covered by: Tag='{covering_tag}', Text='{covering_text}'")
+                        
+                    except Exception as e:
+                        self.logger.info(f"[PID:{self.pid}] Error getting element details: {str(e)}")
+            except Exception as e:
+                self.logger.info(f"[PID:{self.pid}] Error finding elements with selector {selector}: {str(e)}")
+        
+        # Check for iframes
+        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+        if iframes:
+            self.logger.info(f"[PID:{self.pid}] === IFRAMES ({len(iframes)}) ===")
+            
+            for i, iframe in enumerate(iframes):
+                try:
+                    iframe_id = iframe.get_attribute("id") or "[No ID]"
+                    iframe_name = iframe.get_attribute("name") or "[No name]"
+                    iframe_src = iframe.get_attribute("src") or "[No src]"
+                    
+                    self.logger.info(f"[PID:{self.pid}] Iframe {i+1}: ID='{iframe_id}', Name='{iframe_name}', Src='{iframe_src}'")
+                    
+                    # Try to switch to this iframe and look for the element
+                    if selector:
+                        try:
+                            self.driver.switch_to.frame(iframe)
+                            iframe_elements = self.driver.find_elements(by_strategy, selector)
+                            self.logger.info(f"[PID:{self.pid}] Found {len(iframe_elements)} matching elements in iframe {i+1}")
+                            self.driver.switch_to.default_content()
+                        except:
+                            self.logger.info(f"[PID:{self.pid}] Error searching in iframe {i+1}")
+                            self.driver.switch_to.default_content()
+                except:
+                    self.logger.info(f"[PID:{self.pid}] Iframe {i+1}: [Error getting attributes]")
+        
+        self.logger.info(f"[PID:{self.pid}] === END DEBUG PAGE STRUCTURE ===")
 
     def close(self):
         """Close the browser and cleanup"""
