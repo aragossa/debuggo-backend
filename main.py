@@ -3,7 +3,7 @@ import uuid
 import json
 from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, status, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Form, File, UploadFile, BackgroundTasks, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
@@ -912,6 +912,35 @@ async def list_clients(current_user: User = Depends(get_current_user)):
     finally:
         return_db_connection(conn)
 
+@app.get("/api/clients/for-user-management")
+async def list_clients_for_user_management(current_user: User = Depends(get_current_user)):
+    """
+    List all clients for user management purposes.
+    This endpoint is accessible to all authenticated users.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, created_at, updated_at
+                FROM clients
+                ORDER BY name
+                """
+            )
+            clients = cur.fetchall()
+            return [
+                {
+                    "id": str(client[0]),
+                    "name": client[1],
+                    "created_at": client[2].isoformat() if client[2] else None,
+                    "updated_at": client[3].isoformat() if client[3] else None
+                }
+                for client in clients
+            ]
+    finally:
+        return_db_connection(conn)
+
 @app.post("/api/clients", response_model=Client)
 async def create_client(
     client_data: ClientCreate,
@@ -1058,6 +1087,14 @@ async def list_projects(current_user: User = Depends(get_current_user)):
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
+            # Check if user has a client_id
+            if current_user.client_id is None:
+                # If no client_id, return empty list or handle as appropriate
+                return []
+            
+            # Convert UUID to string for database query
+            client_id_str = str(current_user.client_id)
+            
             cursor.execute(
                 """
                 SELECT id, name, description, created_at, updated_at
@@ -1065,7 +1102,7 @@ async def list_projects(current_user: User = Depends(get_current_user)):
                 WHERE client_id = %s
                 ORDER BY name
                 """,
-                (str(current_user.client_id),)
+                (client_id_str,)
             )
             projects = cursor.fetchall()
             
@@ -1317,15 +1354,23 @@ async def get_project_test_tree(
     """
     conn = None
     try:
+        # Check if user has a client_id
+        if current_user.client_id is None:
+            # Return empty result or appropriate response for users without a client
+            return []
+            
         conn = get_db_connection()
         with conn.cursor() as cursor:
+            # Convert client_id to string for database query
+            client_id_str = str(current_user.client_id)
+            
             # Check if project exists and belongs to user's client
             cursor.execute(
                 """
                 SELECT id FROM projects
                 WHERE id = %s AND client_id = %s
                 """,
-                (project_id, str(current_user.client_id))
+                (project_id, client_id_str)
             )
             if not cursor.fetchone():
                 raise HTTPException(
@@ -1347,30 +1392,39 @@ async def get_project_test_tree(
                 )
                 SELECT id, name, description, parent_id, type, "order", created_at, updated_at
                 FROM TestCaseHierarchy
-                ORDER BY parent_id NULLS FIRST, "order";
+                ORDER BY "order", name
                 """,
-                (str(current_user.client_id), project_id)
+                (client_id_str, project_id)
             )
             test_cases = cursor.fetchall()
             
-            # Convert to a list of dictionaries for build_tree function
-            test_cases_list = [
-                {
-                    "id": test_case[0],
-                    "name": test_case[1],
-                    "description": test_case[2],
-                    "parent_id": test_case[3],
-                    "type": test_case[4],
-                    "order": test_case[5],
-                    "created_at": test_case[6].isoformat() if test_case[6] else None,
-                    "updated_at": test_case[7].isoformat() if test_case[7] else None
-                }
-                for test_case in test_cases
-            ]
+            # Convert to hierarchical structure
+            test_case_map = {}
+            root_items = []
             
-            # Build the tree structure
-            tree_data = build_tree(test_cases_list)
-            return tree_data
+            for tc in test_cases:
+                test_case = {
+                    "id": tc[0],
+                    "name": tc[1],
+                    "description": tc[2],
+                    "parent_id": tc[3],
+                    "type": tc[4],
+                    "order": tc[5],
+                    "created_at": tc[6].isoformat() if tc[6] else None,
+                    "updated_at": tc[7].isoformat() if tc[7] else None,
+                    "children": []
+                }
+                test_case_map[tc[0]] = test_case
+                
+                if tc[3] is None:  # Root level item
+                    root_items.append(test_case)
+                else:
+                    # Add to parent's children
+                    parent = test_case_map.get(tc[3])
+                    if parent:
+                        parent["children"].append(test_case)
+            
+            return root_items
     except Exception as e:
         print(f"Error getting project test tree: {e}")
         raise HTTPException(
@@ -2475,6 +2529,76 @@ async def get_test_step_screenshot(
     finally:
         if conn:
             return_db_connection(conn)
+
+@app.post("/api/users/create", response_model=User)
+async def create_new_user(user_data: UserCreate, current_user: User = Depends(get_current_user)):
+    # Check if the current user is an admin
+    if current_user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin users can create new users"
+        )
+    
+    # Create the new user
+    with get_db_connection() as conn:
+        return create_user(conn, user_data)
+
+@app.put("/api/users/{user_id}/role")
+async def update_user_role(
+    user_id: int, 
+    role_data: dict = Body(..., example={"role": "admin"}),
+    current_user: User = Depends(get_current_user)
+):
+    # Check if the current user is an admin
+    if current_user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin users can update user roles"
+        )
+    
+    # Validate the role
+    new_role = role_data.get("role")
+    if new_role not in ["admin", "user"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid role. Role must be 'admin' or 'user'"
+        )
+    
+    # Update the user's role
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Check if user exists
+            cur.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            
+            # Update the role
+            cur.execute(
+                "UPDATE users SET role = %s WHERE id = %s RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role",
+                (new_role, user_id)
+            )
+            user_data = cur.fetchone()
+            conn.commit()
+            
+            if not user_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            
+            return {
+                "id": user_data[0],
+                "email": user_data[1],
+                "full_name": user_data[2],
+                "is_active": user_data[3],
+                "created_at": user_data[4].isoformat() if user_data[4] else None,
+                "last_login": user_data[5].isoformat() if user_data[5] else None,
+                "client_id": user_data[6],
+                "role": user_data[7]
+            }
 
 if __name__ == "__main__":
     import uvicorn

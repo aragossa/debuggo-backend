@@ -38,7 +38,9 @@ def create_user(conn, user_data: UserCreate) -> User:
         
         # If client_id is provided, verify it exists
         if user_data.client_id:
-            cur.execute("SELECT id FROM clients WHERE id = %s", (user_data.client_id,))
+            # Convert UUID to string before using in query
+            client_id_str = str(user_data.client_id)
+            cur.execute("SELECT id FROM clients WHERE id = %s", (client_id_str,))
             if cur.fetchone() is None:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -47,13 +49,17 @@ def create_user(conn, user_data: UserCreate) -> User:
         
         # Create new user
         hashed_password = get_password_hash(user_data.password)
+        
+        # Convert client_id to string if it exists
+        client_id_param = str(user_data.client_id) if user_data.client_id else None
+        
         cur.execute(
             """
             INSERT INTO users (email, password_hash, full_name, client_id, role)
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role
             """,
-            (user_data.email, hashed_password, user_data.full_name, user_data.client_id, user_data.role)
+            (user_data.email, hashed_password, user_data.full_name, client_id_param, user_data.role)
         )
         user_data = cur.fetchone()
         conn.commit()
