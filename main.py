@@ -1140,6 +1140,16 @@ async def create_project(
             detail="Project name is required"
         )
     
+    # If user is not admin, force client_id to current user's client
+    if current_user.role == 'user':
+        project_data["client_id"] = str(current_user.client_id)
+    elif not project_data.get("client_id"):
+        # For admins, client_id must be provided
+        raise HTTPException(
+            status_code=400,
+            detail="Client is required for project creation"
+        )
+    
     conn = None
     try:
         conn = get_db_connection()
@@ -1151,16 +1161,16 @@ async def create_project(
                 RETURNING id, name, description, client_id, created_at, updated_at
                 """,
                 (
-                    project_data.get("name"),
+                    project_data["name"],
                     project_data.get("description"),
-                    str(current_user.client_id)
+                    project_data["client_id"]
                 )
             )
             project = cursor.fetchone()
             conn.commit()
             
             return {
-                "id": str(project[0]),  # Convert UUID to string
+                "id": str(project[0]),
                 "name": project[1],
                 "description": project[2],
                 "client_id": str(project[3]) if project[3] else None,
@@ -2537,6 +2547,13 @@ async def create_new_user(user_data: UserCreate, current_user: User = Depends(ge
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only admin users can create new users"
+        )
+    
+    # If the new user is 'user' role, client_id is required
+    if (user_data.role == 'user' or user_data.role is None) and not user_data.client_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client is required for users with role 'user'"
         )
     
     # Create the new user
