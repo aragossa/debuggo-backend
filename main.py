@@ -400,13 +400,14 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                     WITH RECURSIVE TestCaseHierarchy AS (
                         SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at
                         FROM test_cases
-                        WHERE parent_id IS NULL AND client_id = %s
+                        WHERE parent_id IS NULL AND client_id = %s AND project_id = %s
                         
                         UNION ALL
                         
                         SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at
                         FROM test_cases tc
                         JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
+                        WHERE tc.client_id = %s AND tc.project_id = %s
                     )
                     SELECT 
                         t.id,
@@ -425,7 +426,7 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                     WHERE c.id = %s
                     ORDER BY t.parent_id NULLS FIRST, t."order"
                     """,
-                    (client_id, client_id)
+                    (client_id, current_user.client_id, client_id, current_user.client_id, client_id)
                 )
 
             rows = cur.fetchall()
@@ -1388,23 +1389,45 @@ async def get_project_test_tree(
                     detail="Project not found"
                 )
             
+            print(f"Fetching test tree for project_id: {project_id}, client_id: {client_id_str}")
+            
+            # Let's also check all test cases for this project
+            cursor.execute(
+                """
+                SELECT id, name, parent_id, type, client_id, project_id
+                FROM test_cases
+                WHERE project_id = %s
+                ORDER BY id
+                """,
+                (project_id,)
+            )
+            all_project_test_cases = cursor.fetchall()
+            print(f"All test cases for project {project_id}:")
+            for tc in all_project_test_cases:
+                print(f"  ID: {tc[0]}, Name: {tc[1]}, Parent: {tc[2]}, Type: {tc[3]}")
+            
             # Use a recursive query to get all test cases for this project with proper hierarchy
             cursor.execute(
                 """
                 WITH RECURSIVE TestCaseHierarchy AS (
-                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at, client_id, project_id
+                    -- Base case: get all root nodes
+                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at
                     FROM test_cases
-                    WHERE parent_id IS NULL AND client_id = %s AND project_id = %s
+                    WHERE parent_id IS NULL AND project_id = %s
+                    
                     UNION ALL
-                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at, tc.client_id, tc.project_id
+                    
+                    -- Recursive case: get all children
+                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at
                     FROM test_cases tc
                     JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
+                    WHERE tc.project_id = %s
                 )
                 SELECT id, name, description, parent_id, type, "order", created_at, updated_at
                 FROM TestCaseHierarchy
-                ORDER BY "order", name
+                ORDER BY parent_id NULLS FIRST, "order", name
                 """,
-                (client_id_str, project_id)
+                (project_id, project_id)
             )
             test_cases = cursor.fetchall()
             
@@ -2418,10 +2441,8 @@ async def update_test_case(
     try:
         with conn.cursor() as cur:
             # Check if the test case exists and belongs to the user's client
-            cur.execute(
-                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
-                (id, str(current_user.client_id))
-            )
+            cur.execute("SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                        (id, str(current_user.client_id)))
             test_case = cur.fetchone()
             if not test_case:
                 raise HTTPException(
