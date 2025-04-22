@@ -397,6 +397,17 @@ class TestRunner:
         else:
             self.logger.warning(f"[PID:{pid}] No environment variables provided")
         
+        # Set running flag in Redis
+        try:
+            if self._redis:
+                # Clear any existing stop flag
+                self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                # Set running flag
+                self._redis.set(f"test_case_running:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                self.logger.info(f"[PID:{pid}] Set running status in Redis for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to set running status in Redis: {e}")
+        
         with self._process_lock():
             try:
                 # Initialize browser
@@ -416,6 +427,13 @@ class TestRunner:
                 
                 self.logger.info(f"[PID:{pid}] Starting test step execution")
                 for step in steps:
+                    # Check if we should stop execution
+                    if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
+                        self.logger.info(f"[PID:{pid}] Stopping test case execution as requested for test case {test_case_id}")
+                        duration = (datetime.now() - start_time).total_seconds()
+                        self._log_test_run(test_case_id, "stopped", duration=duration)
+                        return {"status": "stopped", "message": "Test execution stopped by user", "duration": duration}
+                    
                     step_id, action, element_path, description, expected_result, value, path_type = step
                     self.logger.info(f"[PID:{pid}] Executing step {step_id}: {action}")
                     self.execute_step(action, element_path, value, path_type, env)
@@ -424,13 +442,31 @@ class TestRunner:
                 duration = (datetime.now() - start_time).total_seconds()
                 self._log_test_run(test_case_id, "success", duration=duration)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
+                
+                # Clean up Redis flags
+                try:
+                    if self._redis:
+                        self._redis.delete(f"test_case_running:{test_case_id}")
+                        self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                except Exception as e:
+                    self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {e}")
+                
                 return {"status": "success", "duration": duration}
 
             except Exception as e:
                 duration = (datetime.now() - start_time).total_seconds()
                 self.logger.error(f"[PID:{pid}] Test case failed: {str(e)}")
-                self._log_test_run(test_case_id, "failure", str(e), duration)
-                return {"status": "failure", "error": str(e), "duration": duration}
+                self._log_test_run(test_case_id, "failure", error=str(e), duration=duration)
+                
+                # Clean up Redis flags
+                try:
+                    if self._redis:
+                        self._redis.delete(f"test_case_running:{test_case_id}")
+                        self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                except Exception as redis_error:
+                    self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {redis_error}")
+                
+                return {"status": "error", "error": str(e), "duration": duration}
 
             finally:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
@@ -445,62 +481,76 @@ class TestRunner:
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
         """
         pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Starting test step generation for test case {test_case_id}")
+        
+        # Set the generating status in Redis
+        try:
+            if self._redis:
+                # Clear any existing stop flag
+                self._redis.delete(f"test_case_stop_generating:{test_case_id}")
+                # Set generating flag
+                self._redis.set(f"test_case_generating:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                self.logger.info(f"[PID:{pid}] Set generation status in Redis for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to set generation status in Redis: {e}")
+        
         try:
             # Acquire process lock
             with self._process_lock():
-                self.logger.info(f"[PID:{pid}] Starting test step generation for ID: {test_case_id}")
+                self.logger.info(f"[PID:{pid}] Acquired process lock for test case {test_case_id}")
                 
-                # Initialize components
-                system = System()
-                # Initialize environment helper with provided variables
-                env = EnvHelper(environment_vars)
+                # Initialize browser if needed
+                if not self.browser:
+                    self.browser = BrowserAutomation(headless=True)
+                    self.logger.info(f"[PID:{pid}] Initialized browser")
                 
-                # Log environment variables for debugging
-                if environment_vars:
-                    self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
-                else:
-                    self.logger.warning(f"[PID:{pid}] No environment variables provided")
-                    
-                html_analyzer = self.html_analyzer  # Use the singleton HTML analyzer
-                
-                # Clean up any existing browser instance
-                self._cleanup_browser()
-                
-                # Create new browser instance
-                self.browser = BrowserAutomation(headless=True)
-                
-                # Get test case details - name and description
-                test_case_data = self._get_test_case(test_case_id=test_case_id)
-                test_name = test_case_data[0]
-                test_description = test_case_data[1] or ""  # Use empty string if description is None
-                
+                # Get test case details
+                test_name, test_description = self._get_test_case(test_case_id)
                 self.logger.info(f"[PID:{pid}] Test case: {test_name}")
-                self.logger.info(f"[PID:{pid}] Description: {test_description}")
-
-                # Ensure we have a base URL to navigate to
-                if not env.base_url:
-                    self.logger.warning(f"[PID:{pid}] No base_url provided in environment variables")
-                    # Use a default or fallback URL if needed
-                    if 'http' not in test_description.lower():
-                        self.logger.warning(f"[PID:{pid}] Using a default URL since none was provided")
-                        env.base_url = "http://localhost"  # Default fallback
                 
-                self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
-                self.browser.navigate(url=env.base_url)
+                # Create environment helper
+                env = EnvHelper(environment_vars or {})
                 
-                step_order = 0
+                # Set up HTML analyzer if not already initialized
+                if not self.html_analyzer:
+                    self.html_analyzer = HtmlAnalyzer()
+                    self.logger.info(f"[PID:{pid}] Initialized HTML analyzer")
+                
+                html_analyzer = self.html_analyzer
+                
+                # Navigate to the base URL
+                base_url = env.get_base_url()
+                if not base_url:
+                    raise ValueError("Base URL is required for test step generation")
+                
+                self.logger.info(f"[PID:{pid}] Navigating to {base_url}")
+                self.browser.navigate(base_url)
+                
+                # Wait for page to load
+                self.browser.wait_for_page_load()
+                
+                # Take a screenshot for analysis
+                screenshot_path = self.browser.take_screenshot(f"step_0_{test_case_id}")
+                self.logger.info(f"[PID:{pid}] Screenshot saved to {screenshot_path}")
+                
+                # Get page source for analysis
                 page_source = self.browser.get_page_source()
-                screenshot_path = self.browser.take_screenshot()
-                prev_step_description = ''
-                next_prompt = ''
                 
-                # Track previous steps to avoid duplicates
-                previous_steps = set()
+                # Initialize variables for the loop
+                step_order = 1
+                next_prompt = "Start"
+                prev_step_description = ""
                 max_retries = 3
-                retry_delay = 2  # seconds
+                retry_delay = 5
+                previous_steps = set()  # To avoid duplicate steps
                 
                 try:
                     while next_prompt != 'Stop':
+                        # Check if we should stop generation
+                        if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                            self.logger.info(f"[PID:{pid}] Stopping test step generation as requested for test case {test_case_id}")
+                            break
+                            
                         self.logger.info(f"[PID:{pid}] Processing step {step_order}, next_prompt: {next_prompt}")
                         
                         retry_count = 0
@@ -692,7 +742,7 @@ class TestRunner:
                                         # Unpack the response
                                         if len(analyzer_response) == 5:
                                             next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
-                                            value = ""
+                                            value = ""  # Default empty value
                                         else:
                                             next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
                                             
@@ -970,9 +1020,17 @@ class TestRunner:
             raise
         
         finally:
+            # Clear the generating status in Redis
+            try:
+                if self._redis:
+                    self._redis.delete(f"test_case_generating:{test_case_id}")
+                    self.logger.info(f"[PID:{pid}] Cleared generation status in Redis for test case {test_case_id}")
+            except Exception as e:
+                self.logger.error(f"[PID:{pid}] Failed to clear generation status in Redis: {e}")
+            
             # Always clean up resources
             self._cleanup_browser()
-            self.logger.info(f"[PID:{pid}] Test step generation completed")
+            self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
 
     def _get_step_history(self, test_case_id: int) -> list:
         """
@@ -1013,3 +1071,78 @@ class TestRunner:
         except Exception as e:
             self.logger.error(f"Error getting step history: {str(e)}")
             return []
+
+    def is_generating_steps(self, test_case_id: int) -> bool:
+        """
+        Check if a test case is currently generating steps.
+        
+        Args:
+            test_case_id: ID of the test case
+            
+        Returns:
+            bool: True if the test case is generating steps, False otherwise
+        """
+        try:
+            if self._redis:
+                result = self._redis.exists(f"test_case_generating:{test_case_id}")
+                return bool(result)
+        except Exception as e:
+            self.logger.error(f"Error checking generation status in Redis: {e}")
+        
+        return False
+
+    def stop_generating_steps(self, test_case_id: int) -> bool:
+        """
+        Stop the generation of test steps for a test case.
+        
+        Args:
+            test_case_id: ID of the test case
+            
+        Returns:
+            bool: True if the generation was stopped, False otherwise
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Stopping test step generation for test case {test_case_id}")
+        
+        try:
+            # Set a stop flag in Redis
+            if self._redis:
+                self._redis.set(f"test_case_stop_generating:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                
+                # Also clear the generating status
+                self._redis.delete(f"test_case_generating:{test_case_id}")
+                
+                self.logger.info(f"[PID:{pid}] Set stop flag in Redis for test case {test_case_id}")
+                return True
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to set stop flag in Redis: {e}")
+        
+        return False
+
+    def stop_test_case_execution(self, test_case_id: int) -> bool:
+        """
+        Stop the execution of a test case.
+        
+        Args:
+            test_case_id: ID of the test case
+            
+        Returns:
+            bool: True if the execution was stopped, False otherwise
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Stopping test case execution for test case {test_case_id}")
+        
+        try:
+            # Set a stop flag in Redis
+            if self._redis:
+                self._redis.set(f"test_case_stop_execution:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                
+                # Also clear the running status
+                self._redis.delete(f"test_case_running:{test_case_id}")
+                
+                self.logger.info(f"[PID:{pid}] Set stop execution flag in Redis for test case {test_case_id}")
+                return True
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to set stop execution flag in Redis: {e}")
+        
+        return False

@@ -2553,10 +2553,17 @@ async def get_test_step_screenshot(
             # Return the dictionary directly
             return JSONResponse(content=screenshot_dict)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve screenshot: {str(e)}"
-        )
+        # Check if the error is related to the screenshot not being found
+        if "No screenshot found" in str(e) or "screenshot" in str(e).lower():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No screenshot found for this test step: {str(e)}"
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to retrieve screenshot: {str(e)}"
+            )
     finally:
         if conn:
             return_db_connection(conn)
@@ -2637,6 +2644,162 @@ async def update_user_role(
                 "client_id": user_data[6],
                 "role": user_data[7]
             }
+
+@app.get("/api/test_case_generation_status/{id}")
+async def test_case_generation_status(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Check if a test case is currently generating steps and return the current steps.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # Verify the test case exists and belongs to the user's client
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Test case not found")
+            
+            # Check if the test case is currently generating steps
+            runner = TestRunner()
+            is_generating = runner.is_generating_steps(id)
+            
+            # Get the current test steps
+            cursor.execute(
+                """
+                SELECT id, test_case_id, description, action, element_path, value, path_type, expected_result, created_at, updated_at 
+                FROM test_steps 
+                WHERE test_case_id = %s 
+                ORDER BY step_order
+                """,
+                (id,)
+            )
+            test_steps = cursor.fetchall()
+            
+            # Convert to list of dicts
+            steps = []
+            for step in test_steps:
+                step_dict = dict(step)
+                # Convert datetime objects to ISO format strings
+                for key, value in step_dict.items():
+                    if isinstance(value, datetime):
+                        step_dict[key] = value.isoformat()
+                steps.append(step_dict)
+            
+            return {
+                "is_generating": is_generating,
+                "test_steps": steps
+            }
+    except Exception as e:
+        print(f"Error checking test case generation status: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check test case generation status: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/stop_test_case_generation/{id}")
+async def stop_test_case_generation(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Stop the generation of test steps for a test case.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify the test case exists and belongs to the user's client
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Test case not found")
+            
+            # Get the TestRunner instance and stop the generation
+            runner = TestRunner()
+            runner.stop_generating_steps(id)
+            
+            return {"status": "stopped"}
+    except Exception as e:
+        print(f"Error stopping test case generation: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stop test case generation: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/stop_test_case_execution/{id}")
+async def stop_test_case_execution(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Stop the execution of a test case.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify that the test case exists and belongs to the user's client
+            cursor.execute(
+                """
+                SELECT id FROM test_cases
+                WHERE id = %s AND client_id = %s
+                """,
+                (id, str(current_user.client_id))
+            )
+            test_case = cursor.fetchone()
+            if not test_case:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Test case not found or you don't have permission to access it"
+                )
+            
+            # Use the TestRunner to stop the test case execution
+            runner = TestRunner()
+            runner.stop_test_case_execution(id)
+            
+            return {"status": "success", "message": "Test case execution stop requested"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stop test case execution: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/stop_test_case_execution/{id}")
+async def stop_test_case_execution(id: int, request: Request):
+    """
+    Stop the execution of a test case
+    """
+    logger.info(f"Received request to stop test case execution for ID: {id}")
+    
+    # Get test runner instance
+    test_runner = get_test_runner()
+    
+    # Stop test case execution
+    result = test_runner.stop_test_case_execution(id)
+    
+    if result:
+        return {"status": "success", "message": "Test case execution stop requested"}
+    else:
+        return {"status": "error", "message": "Failed to stop test case execution"}
 
 if __name__ == "__main__":
     import uvicorn

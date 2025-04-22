@@ -74,6 +74,26 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
 
+    def wait_for_page_load(self, timeout=None):
+        """
+        Wait for the page to fully load by checking document.readyState.
+        
+        Args:
+            timeout (int, optional): Timeout in seconds. If None, uses the default timeout.
+        """
+        if timeout is None:
+            timeout = self.timeout
+            
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            self.logger.info(f"[PID:{self.pid}] Page loaded successfully")
+        except TimeoutException:
+            self.logger.warning(f"[PID:{self.pid}] Timed out waiting for page to load completely")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for page load: {str(e)}")
+
     def find_element(self, selector, by='xpath'):
         """
         Find an element using either CSS selector or XPath.

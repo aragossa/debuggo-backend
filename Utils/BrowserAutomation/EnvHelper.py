@@ -17,6 +17,30 @@ class EnvHelper:
             if 'password' in environment_vars and environment_vars['password']:
                 self._password = environment_vars['password']
 
+    def get_base_url(self) -> Optional[str]:
+        """
+        Get the base URL from environment variables.
+        
+        Returns:
+            Optional[str]: The base URL or None if not set
+        """
+        return self._base_url
+        
+    @property
+    def base_url(self) -> Optional[str]:
+        """
+        Get the base URL.
+        
+        Returns:
+            Optional[str]: The base URL or None if not set
+        """
+        return self._base_url
+    
+    @base_url.setter
+    def base_url(self, value: str):
+        """Set base_url value."""
+        self._base_url = value
+
     @contextmanager
     def get_db_connection(self):
         """Context manager for database connections."""
@@ -49,18 +73,6 @@ class EnvHelper:
                 if not result:
                     raise ValueError(f"Variable '{name}' not found in database")
                 return result[0]
-
-    @property
-    def base_url(self) -> str:
-        """Get cached base_url or fetch from database."""
-        if self._base_url is None:
-            raise ValueError("Base URL not provided in environment variables")
-        return self._base_url
-    
-    @base_url.setter
-    def base_url(self, value: str):
-        """Set base_url value."""
-        self._base_url = value
 
     @property
     def login(self) -> str:
