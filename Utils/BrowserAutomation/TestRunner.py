@@ -17,6 +17,7 @@ from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
 from Utils.Connectors.DbConnector import DbConnector
 from Utils.System import System
+import io
 
 
 class TestRunner:
@@ -328,6 +329,8 @@ class TestRunner:
                 self.browser.hover(element_path, by_strategy)
             elif action == "select":
                 self.browser.select(element_path, value, by_strategy)
+            elif action == "clear":
+                self.browser.clear(element_path, by_strategy)
             else:
                 raise ValueError(f"Unsupported action: {action}")
                 
@@ -408,6 +411,10 @@ class TestRunner:
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to set running status in Redis: {e}")
         
+        # Capture stdout for logging
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        
         with self._process_lock():
             try:
                 # Initialize browser
@@ -436,11 +443,88 @@ class TestRunner:
                     
                     step_id, action, element_path, description, expected_result, value, path_type = step
                     self.logger.info(f"[PID:{pid}] Executing step {step_id}: {action}")
-                    self.execute_step(action, element_path, value, path_type, env)
+                    
+                    try:
+                        self.execute_step(action, element_path, value, path_type, env)
+                    except AssertionError as assertion_error:
+                        # Capture assertion failures specifically
+                        error_message = str(assertion_error)
+                        self.logger.error(f"[PID:{pid}] Assertion failed in step {step_id}: {error_message}")
+                        
+                        # Get stack trace for detailed error info
+                        import traceback
+                        stack_trace = traceback.format_exc()
+                        
+                        # Log the test run as a failure
+                        duration = (datetime.now() - start_time).total_seconds()
+                        stdout_content = stdout_capture.getvalue()
+                        stderr_content = stderr_capture.getvalue() + f"\nAssertion Error in step {step_id}: {error_message}\n{stack_trace}"
+                        
+                        self._log_test_run(
+                            test_case_id, 
+                            "failure", 
+                            exception=error_message,
+                            duration=duration,
+                            stdout=stdout_content,
+                            stderr=stderr_content
+                        )
+                        
+                        # Clean up Redis flags
+                        try:
+                            if self._redis:
+                                self._redis.delete(f"test_case_running:{test_case_id}")
+                                self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                        except Exception as redis_error:
+                            self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {redis_error}")
+                        
+                        return {
+                            "status": "failure", 
+                            "error": error_message, 
+                            "step_id": step_id,
+                            "duration": duration
+                        }
+                    except Exception as step_error:
+                        # Handle other exceptions during step execution
+                        error_message = str(step_error)
+                        self.logger.error(f"[PID:{pid}] Error in step {step_id}: {error_message}")
+                        
+                        # Get stack trace for detailed error info
+                        import traceback
+                        stack_trace = traceback.format_exc()
+                        
+                        # Log the test run as a failure
+                        duration = (datetime.now() - start_time).total_seconds()
+                        stdout_content = stdout_capture.getvalue()
+                        stderr_content = stderr_capture.getvalue() + f"\nError in step {step_id}: {error_message}\n{stack_trace}"
+                        
+                        self._log_test_run(
+                            test_case_id, 
+                            "failure", 
+                            exception=error_message,
+                            duration=duration,
+                            stdout=stdout_content,
+                            stderr=stderr_content
+                        )
+                        
+                        # Clean up Redis flags
+                        try:
+                            if self._redis:
+                                self._redis.delete(f"test_case_running:{test_case_id}")
+                                self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                        except Exception as redis_error:
+                            self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {redis_error}")
+                        
+                        return {
+                            "status": "error", 
+                            "error": error_message, 
+                            "step_id": step_id,
+                            "duration": duration
+                        }
 
                 # Calculate duration and log success
                 duration = (datetime.now() - start_time).total_seconds()
-                self._log_test_run(test_case_id, "success", duration=duration)
+                stdout_content = stdout_capture.getvalue()
+                self._log_test_run(test_case_id, "success", duration=duration, stdout=stdout_content)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
                 
                 # Clean up Redis flags
@@ -455,8 +539,25 @@ class TestRunner:
 
             except Exception as e:
                 duration = (datetime.now() - start_time).total_seconds()
-                self.logger.error(f"[PID:{pid}] Test case failed: {str(e)}")
-                self._log_test_run(test_case_id, "failure", error=str(e), duration=duration)
+                error_message = str(e)
+                self.logger.error(f"[PID:{pid}] Test case failed: {error_message}")
+                
+                # Get stack trace for detailed error info
+                import traceback
+                stack_trace = traceback.format_exc()
+                
+                # Log the test run as a failure
+                stdout_content = stdout_capture.getvalue()
+                stderr_content = stderr_capture.getvalue() + f"\nTest case error: {error_message}\n{stack_trace}"
+                
+                self._log_test_run(
+                    test_case_id, 
+                    "failure", 
+                    exception=error_message,
+                    duration=duration,
+                    stdout=stdout_content,
+                    stderr=stderr_content
+                )
                 
                 # Clean up Redis flags
                 try:
@@ -466,7 +567,7 @@ class TestRunner:
                 except Exception as redis_error:
                     self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {redis_error}")
                 
-                return {"status": "error", "error": str(e), "duration": duration}
+                return {"status": "error", "error": error_message, "duration": duration}
 
             finally:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
@@ -669,7 +770,7 @@ class TestRunner:
                                             """, (step_id, encoded_string, f"Error screenshot for step {step_order}"))
                                             connection.commit()
                                 except Exception as screenshot_error:
-                                    self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
+                                    self.logger.error(f"[PID:{pid}] Failed to capture error screenshot: {str(screenshot_error)}")
                                 
                                 # Update the step in the database to mark it as failed
                                 try:

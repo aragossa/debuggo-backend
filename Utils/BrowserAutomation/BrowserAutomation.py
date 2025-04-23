@@ -808,6 +808,23 @@ class BrowserAutomation:
         
         self.logger.info(f"[PID:{self.pid}] === END DEBUG PAGE STRUCTURE ===")
 
+    def clear(self, selector, by='xpath'):
+        """
+        Clear the content of an input field.
+        
+        Args:
+            selector (str): The selector to find the element
+            by (str): The selector strategy ('xpath' or 'css')
+        """
+        try:
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            element = self.find_element(selector, by_strategy)
+            element.clear()
+            self.logger.info(f"[PID:{self.pid}] Cleared content from element: {selector}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to clear element {selector}: {str(e)}")
+            raise
+
     def close(self):
         """Close the browser and cleanup"""
         if self.driver:
