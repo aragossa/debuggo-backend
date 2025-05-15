@@ -2670,6 +2670,21 @@ async def test_case_generation_status(
             runner = TestRunner()
             is_generating = runner.is_generating_steps(id)
             
+            # Get current and next step information from Redis
+            current_step = ""
+            next_step = ""
+            if is_generating and runner._redis:
+                try:
+                    current_step = runner._redis.get(f"test_case_current_step:{id}") or ""
+                    if isinstance(current_step, bytes):
+                        current_step = current_step.decode('utf-8')
+                    
+                    next_step = runner._redis.get(f"test_case_next_step:{id}") or ""
+                    if isinstance(next_step, bytes):
+                        next_step = next_step.decode('utf-8')
+                except Exception as e:
+                    print(f"Error getting step information from Redis: {e}")
+            
             # Get the current test steps
             cursor.execute(
                 """
@@ -2694,7 +2709,9 @@ async def test_case_generation_status(
             
             return {
                 "is_generating": is_generating,
-                "test_steps": steps
+                "test_steps": steps,
+                "current_step": current_step,
+                "next_step": next_step
             }
     except Exception as e:
         print(f"Error checking test case generation status: {e}")

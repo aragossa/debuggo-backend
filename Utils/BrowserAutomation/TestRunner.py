@@ -591,6 +591,9 @@ class TestRunner:
                 self._redis.delete(f"test_case_stop_generating:{test_case_id}")
                 # Set generating flag
                 self._redis.set(f"test_case_generating:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                # Initialize current and next step information
+                self._redis.set(f"test_case_current_step:{test_case_id}", "", ex=3600)
+                self._redis.set(f"test_case_next_step:{test_case_id}", "Starting...", ex=3600)
                 self.logger.info(f"[PID:{pid}] Set generation status in Redis for test case {test_case_id}")
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to set generation status in Redis: {e}")
@@ -653,6 +656,13 @@ class TestRunner:
                             break
                             
                         self.logger.info(f"[PID:{pid}] Processing step {step_order}, next_prompt: {next_prompt}")
+                        
+                        # Update current and next step information in Redis
+                        if self._redis:
+                            current_step = prev_step_description if prev_step_description else "Starting test generation"
+                            next_step = next_prompt if next_prompt != "Stop" else "Finalizing test generation"
+                            self._redis.set(f"test_case_current_step:{test_case_id}", current_step, ex=3600)
+                            self._redis.set(f"test_case_next_step:{test_case_id}", next_step, ex=3600)
                         
                         retry_count = 0
                         while retry_count < max_retries:
@@ -1121,11 +1131,13 @@ class TestRunner:
             raise
         
         finally:
-            # Clear the generating status in Redis
+            # Clear the generating status and step information in Redis
             try:
                 if self._redis:
                     self._redis.delete(f"test_case_generating:{test_case_id}")
-                    self.logger.info(f"[PID:{pid}] Cleared generation status in Redis for test case {test_case_id}")
+                    self._redis.delete(f"test_case_current_step:{test_case_id}")
+                    self._redis.delete(f"test_case_next_step:{test_case_id}")
+                    self.logger.info(f"[PID:{pid}] Cleared generation status and step information in Redis for test case {test_case_id}")
             except Exception as e:
                 self.logger.error(f"[PID:{pid}] Failed to clear generation status in Redis: {e}")
             
