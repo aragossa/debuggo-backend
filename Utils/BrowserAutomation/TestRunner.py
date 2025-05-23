@@ -291,8 +291,12 @@ class TestRunner:
             env_helper (EnvHelper): Optional environment helper for variable processing
         """
         try:
-            # We're no longer processing variables here since they should already be processed
-            # when passed to this method from generate_test_steps
+            # Process variables in element_path and value using the EnvHelper
+            if env_helper:
+                if element_path:
+                    element_path = env_helper.process_variables(element_path)
+                if value:
+                    value = env_helper.process_variables(value)
             
             # Handle None or empty by_strategy
             if not by_strategy:

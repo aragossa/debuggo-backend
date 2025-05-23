@@ -444,7 +444,7 @@ IMPORTANT:
         
         self._wait_for_rate_limit()
         
-        model = genai.GenerativeModel("gemini-2.5-pro-preview-03-25")
+        model = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5
