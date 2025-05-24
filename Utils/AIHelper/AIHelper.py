@@ -444,68 +444,116 @@ IMPORTANT:
         
         self._wait_for_rate_limit()
         
+        # Log detailed information about the request
+        prompt_length = len(prompt)
+        truncated_prompt = prompt[:10000] + "..." if prompt_length > 10000 else prompt
+        
+        self.logger.info(f"====== GEMINI REQUEST START ======")
+        self.logger.info(f"Prompt length: {prompt_length} characters")
+        self.logger.info(f"Image included: {'Yes' if image else 'No'}")
+        self.logger.info(f"Text content included: {'Yes' if text_content else 'No'}")
+        self.logger.info(f"Prompt preview: {truncated_prompt}")
+        self.logger.info(f"====== GEMINI REQUEST END ======")
+        
         model = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5
         base_delay = 2  # Start with 2 seconds delay
+        request_start_time = time.time()
+        
         for attempt in range(max_retries):
             try:
                 # Wait for rate limit before each attempt
                 if attempt > 0:
                     self._wait_for_rate_limit()
+                    self.logger.info(f"Retry attempt {attempt+1}/{max_retries} for Gemini request")
                 
                 if image:
-                    self.logger.info(f"Sending prompt to Gemini with image")
+                    self.logger.info(f"Sending prompt to Gemini with image - attempt {attempt+1}")
                     response = model.generate_content([prompt, image])
                 else:
-                    self.logger.info(f"Sending prompt to Gemini")
+                    self.logger.info(f"Sending prompt to Gemini - attempt {attempt+1}")
                     response = model.generate_content(prompt)
-                # Get the response text
+                # Get the response text and calculate response time
+                request_end_time = time.time()
+                response_time = request_end_time - request_start_time
                 response_text = response.text.strip()
+                response_length = len(response_text)
                 
-                self.logger.info("=== RAW GEMINI RESPONSE START ===")
+                self.logger.info(f"====== GEMINI RESPONSE START ======")
+                self.logger.info(f"Response time: {response_time:.2f} seconds")
+                self.logger.info(f"Response length: {response_length} characters")
                 self.logger.info(f"Raw response text (first 1000 chars):\n{response_text[:1000]}")
                 if len(response_text) > 1000:
                     self.logger.info(f"... and {len(response_text) - 1000} more characters")
-                self.logger.info("=== RAW GEMINI RESPONSE END ===")
+                self.logger.info(f"====== GEMINI RESPONSE END ======")
 
                 # Try to parse as JSON
+                self.logger.info("====== JSON PARSING START ======")
                 try:
-                    self.logger.info("Attempting to parse response as JSON...")
+                    self.logger.info("Attempt 1: Direct JSON parsing of full response")
                     parsed_response = json.loads(response_text)
-                    self.logger.info("Successfully parsed JSON response")
-                    self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                    self.logger.info("✓ Successfully parsed full response as JSON")
+                    self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
+                    self.logger.info("====== JSON PARSING END ======")
                     return parsed_response
                 except json.JSONDecodeError as e:
-                    self.logger.info(f"Direct JSON parsing failed: {str(e)}")
-                    self.logger.info("Checking for JSON in code blocks...")
-
-                    # If JSON parsing fails, check if it's in a code block
+                    self.logger.info(f"✗ Direct JSON parsing failed: {str(e)}")
+                    
+                    # If JSON parsing fails, check if it's in a code block with json tag
                     if "```json" in response_text:
-                        json_content = response_text.split("```json")[1].split("```")[0].strip()
+                        self.logger.info("Attempt 2: Parsing JSON from ```json code block")
                         try:
+                            json_content = response_text.split("```json")[1].split("```")[0].strip()
+                            self.logger.info(f"Extracted JSON code block length: {len(json_content)} characters")
                             parsed_response = json.loads(json_content)
-                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                            self.logger.info("✓ Successfully parsed JSON from code block")
+                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
+                            self.logger.info("====== JSON PARSING END ======")
                             return parsed_response
                         except json.JSONDecodeError as e:
-                            self.logger.error(f"Failed to parse JSON from code block: {str(e)}")
-                            raise
+                            self.logger.error(f"✗ Failed to parse JSON from ```json code block: {str(e)}")
+                            self.logger.info(f"Problem content: {json_content[:200]}..." if len(json_content) > 200 else json_content)
+                    
+                    # Try extracting from any code block
                     elif "```" in response_text:
-                        # Try extracting from any code block
-                        json_content = response_text.split("```")[1].strip()
-                        self.logger.info(f"Extracted content from code block:\n{json_content}")
+                        self.logger.info("Attempt 3: Parsing JSON from generic ``` code block")
                         try:
+                            json_content = response_text.split("```")[1].strip()
+                            self.logger.info(f"Extracted generic code block length: {len(json_content)} characters")
                             parsed_response = json.loads(json_content)
-                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)}")
+                            self.logger.info("✓ Successfully parsed JSON from generic code block")
+                            self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
+                            self.logger.info("====== JSON PARSING END ======")
                             return parsed_response
                         except json.JSONDecodeError as e:
-                            self.logger.error(f"Failed to parse JSON from generic code block: {str(e)}")
-                            raise
-
-                    self.logger.error("No valid JSON found in code blocks")
-                    self.logger.error(f"Raw response that failed parsing: {response_text}")
-                    raise ValueError('Cannot parse the response')
+                            self.logger.error(f"✗ Failed to parse JSON from generic code block: {str(e)}")
+                            self.logger.info(f"Problem content: {json_content[:200]}..." if len(json_content) > 200 else json_content)
+                    
+                    # Try to find JSON object within text using regex as a last resort
+                    self.logger.info("Attempt 4: Searching for JSON-like patterns in response")
+                    import re
+                    json_pattern = r'\{[^\{\}]*\{[^\{\}]*\}[^\{\}]*\}'
+                    potential_jsons = re.findall(json_pattern, response_text)
+                    
+                    if potential_jsons:
+                        self.logger.info(f"Found {len(potential_jsons)} potential JSON objects")
+                        for i, potential_json in enumerate(potential_jsons):
+                            try:
+                                parsed_response = json.loads(potential_json)
+                                self.logger.info(f"✓ Successfully parsed JSON from pattern match #{i+1}")
+                                self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
+                                self.logger.info("====== JSON PARSING END ======")
+                                return parsed_response
+                            except json.JSONDecodeError:
+                                self.logger.info(f"✗ Failed to parse potential JSON #{i+1}")
+                                continue
+                    
+                    self.logger.error("✗ All JSON parsing attempts failed")
+                    self.logger.error(f"Raw response that failed parsing (first 300 chars): {response_text[:300]}")
+                    self.logger.info("====== JSON PARSING END ======")
+                    raise ValueError('Cannot parse the response - all parsing attempts failed')
                 break
             except google.api_core.exceptions.InternalServerError as e:
                 self.logger.warning(f"Internal server error (attempt {attempt + 1}/{max_retries}): {e}")
