@@ -205,7 +205,17 @@ You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 
 IMPORTANT GUIDELINES:
 1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE
-2. MENU NAVIGATION - For dropdown or expandable menus:
+2. ELEMENT EXISTENCE VERIFICATION IS MANDATORY:
+   - You MUST confirm that each element you suggest actually exists in the current HTML code
+   - Do NOT suggest any element without verifying its existence in the provided HTML
+   - Before suggesting a locator, search the HTML code for text fragments, IDs, or other attributes
+   - Include a comment in the element_purpose field like: "Element verified in HTML: <attribute/value found>"
+3. STRICT SEQUENTIAL NAVIGATION - NO SKIPPING STEPS:
+   - You must STRICTLY follow one action at a time in a logical sequence
+   - NEVER skip to form fields or other interactions before completing the navigation steps
+   - NEVER assume the user has already performed actions not mentioned in step_history
+
+4. MENU NAVIGATION - For dropdown or expandable menus:
    - If a menu item appears to be hidden or requires expanding a parent menu first:
      a. FIRST step: Locate and click/hover on the parent menu item to expand it
      b. SECOND step: Only after the submenu is visible, interact with the submenu item
@@ -213,14 +223,14 @@ IMPORTANT GUIDELINES:
    - Check for CSS classes like 'hidden', 'collapsed', or attributes like 'aria-expanded="false"' to identify hidden elements
    - Look for elements with 'dropdown', 'submenu', or similar classes to identify dropdown menus
    - For multi-level menus, handle ONE LEVEL AT A TIME (hover/click parent → click child)
-3. LOGIN HANDLING - If login is required, use environment variables:
+5. LOGIN HANDLING - If login is required, use environment variables:
    - Use {{base_url}} for the base URL
    - First locate and interact with the username/email field, using {{login}} as the value
    - Then locate and interact with the password field, using {{password}} as the value
    - Only after both fields are filled, locate and click the login/submit button
    - ENSURE login is successful before proceeding with any subsequent steps
    - NEVER skip the password field even if it appears to be optional
-4. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
+6. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
 
 FORM COMPLETION REQUIREMENTS:
 1. When filling out forms, ALWAYS complete ALL available fields before submission
@@ -307,6 +317,15 @@ IMPORTANT REQUIREMENTS:
 13. STRICT SEQUENCE ADHERENCE: You MUST follow the exact sequence of steps. If the next_prompt is "Click the 'New group' button", you MUST create a step that clicks that button, even if you can see form fields that will need to be filled afterward.
 14. NEVER ASSUME COMPLETION: Never assume a step has already been completed. If the next_prompt indicates an action, that action must be performed as the current step.
 15. ONE ACTION PER STEP: Each step should perform exactly one action (click, type, etc.). Do not combine multiple actions into a single step.
+16. ELEMENT EXISTENCE VERIFICATION: Your element_locator MUST be for an element that actually exists in the provided HTML.
+   - Before providing a locator, verify that it exists in the HTML code by searching for unique text or attributes
+   - Document your verification in the element_purpose with "Element verified in HTML: <text/attribute found>"
+   - If you cannot verify the element exists, do not proceed - suggest a "wait" action instead
+17. FOCUS ON THE MAIN FLOW: Only include steps that are specifically described in the test description.
+   - Do NOT add unnecessary steps like field validation that aren't part of the test description
+   - Stay focused on completing the core workflow as described in the test case
+   - Avoid adding "nice to have" assertions or verifications that aren't explicitly required
+   - Follow the minimal path to complete the described test scenario
 """
 
     def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
@@ -446,7 +465,7 @@ IMPORTANT:
         
         # Log detailed information about the request
         prompt_length = len(prompt)
-        truncated_prompt = prompt[:10000] + "..." if prompt_length > 10000 else prompt
+        truncated_prompt = prompt[:6000] + "..." if prompt_length > 6000 else prompt
         
         self.logger.info(f"====== GEMINI REQUEST START ======")
         self.logger.info(f"Prompt length: {prompt_length} characters")
