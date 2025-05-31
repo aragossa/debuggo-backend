@@ -23,7 +23,7 @@ import logging
 import traceback
 from pathlib import Path
 import requests
-from models.user import User, UserCreate, UserLogin, Token, RefreshToken
+from models.user import User, UserCreate, UserLogin, Token
 from models.client import Client, ClientCreate
 from models.test import GenerateStepsRequest
 from Utils.System import System
@@ -35,9 +35,6 @@ from Utils.auth import (
     create_access_token,
     get_password_hash,
     verify_password,
-    create_refresh_token,
-    verify_refresh_token,
-    revoke_refresh_token,
     SECRET_KEY,
     ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES
@@ -258,43 +255,18 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
         conn.commit()
 
-        # Create access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        # Create access token with longer expiration (24 hours instead of 60 minutes)
+        access_token_expires = timedelta(hours=24)
         access_token = create_access_token(
             data={"sub": user_data[1]}, expires_delta=access_token_expires
         )
         
-        # Create refresh token
-        refresh_token = create_refresh_token(user_id=user_data[0], email=user_data[1])
-        
-        return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+        return {"access_token": access_token, "token_type": "bearer"}
     finally:
         cur.close()
         return_db_connection(conn)
 
-@app.post("/api/refresh-token", response_model=Token)
-async def refresh_access_token(refresh_token_data: RefreshToken):
-    # Verify the refresh token
-    is_valid, token_data = verify_refresh_token(refresh_token_data.refresh_token)
-    
-    if not is_valid or not token_data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired refresh token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Create a new access token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": token_data["email"]}, expires_delta=access_token_expires
-    )
-    
-    # Create a new refresh token and revoke the old one
-    new_refresh_token = create_refresh_token(user_id=token_data["user_id"], email=token_data["email"])
-    revoke_refresh_token(refresh_token_data.refresh_token)
-    
-    return {"access_token": access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
+# Refresh token endpoint removed to simplify authentication
 
 @app.get("/api/users/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_user)):
