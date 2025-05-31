@@ -34,7 +34,14 @@ class User(UserBase):
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
+
+    class Config:
+        from_attributes = True
+
+class RefreshToken(BaseModel):
+    refresh_token: str
 
     class Config:
         from_attributes = True
