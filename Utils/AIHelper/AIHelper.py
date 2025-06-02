@@ -6,10 +6,12 @@ import google.generativeai as genai
 import google
 import json
 import logging
+import os
 from typing import Literal, Dict, Any, Union, Optional
 from PIL import Image
 import threading
 import requests
+import glob
 
 from Utils.System import System
 
@@ -457,6 +459,63 @@ IMPORTANT:
             # Add current request timestamp
             self._request_times.append(now)
 
+    def _get_next_file_number(self, prefix):
+        """Get the next available file number for saving screenshots and prompts."""
+        # Create page_sources directory if it doesn't exist
+        page_sources_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'page_sources')
+        if not os.path.exists(page_sources_dir):
+            os.makedirs(page_sources_dir)
+            self.logger.info(f"Created directory: {page_sources_dir}")
+        
+        # Find the highest existing file number
+        pattern = os.path.join(page_sources_dir, f"{prefix}_*.png")
+        existing_files = glob.glob(pattern)
+        
+        max_number = 0
+        for file in existing_files:
+            try:
+                # Extract the number from the filename
+                filename = os.path.basename(file)
+                number_part = filename.replace(f"{prefix}_", "").replace(".png", "")
+                if number_part.isdigit():
+                    number = int(number_part)
+                    max_number = max(max_number, number)
+            except (ValueError, IndexError):
+                continue
+        
+        return max_number + 1
+
+    def _save_to_page_sources(self, image=None, prompt=None, response=None):
+        """Save screenshot, prompt, and response to page_sources folder."""
+        if not any([image, prompt, response]):
+            return
+        
+        # Get the base directory
+        page_sources_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'page_sources')
+        
+        # Get the next available file number
+        if image is not None:
+            file_number = self._get_next_file_number("screenshot")
+        
+            # Save screenshot
+            screenshot_path = os.path.join(page_sources_dir, f"screenshot_{file_number}.png")
+            image.save(screenshot_path)
+            self.logger.info(f"Saved screenshot to {screenshot_path}")
+        
+            # Save prompt if provided
+            if prompt is not None:
+                prompt_path = os.path.join(page_sources_dir, f"text_input_{file_number}.txt")
+                with open(prompt_path, 'w', encoding='utf-8') as f:
+                    f.write(prompt)
+                self.logger.info(f"Saved prompt to {prompt_path}")
+        
+            # Save response if provided
+            if response is not None:
+                response_path = os.path.join(page_sources_dir, f"text_output_{file_number}.txt")
+                with open(response_path, 'w', encoding='utf-8') as f:
+                    f.write(response)
+                self.logger.info(f"Saved response to {response_path}")
+
     def send_request_to_gemini(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> Union[bool, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
@@ -507,6 +566,9 @@ IMPORTANT:
                 if len(response_text) > 1000:
                     self.logger.info(f"... and {len(response_text) - 1000} more characters")
                 self.logger.info(f"====== GEMINI RESPONSE END ======")
+                
+                # Save screenshot, prompt, and response to page_sources folder
+                self._save_to_page_sources(image=image, prompt=prompt, response=response_text)
 
                 # Try to parse as JSON
                 self.logger.info("====== JSON PARSING START ======")
