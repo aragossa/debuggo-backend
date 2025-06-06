@@ -533,7 +533,7 @@ IMPORTANT:
         self.logger.info(f"Prompt preview: {truncated_prompt}")
         self.logger.info(f"====== GEMINI REQUEST END ======")
         
-        model = genai.GenerativeModel("gemini-2.5-pro-preview-05-06")
+        model = genai.GenerativeModel("gemini-2.5-pro-preview-06-05")
         genai.configure(api_key=self.gemini_api_key)
         response = None
         max_retries = 5
