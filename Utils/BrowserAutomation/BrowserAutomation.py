@@ -617,6 +617,12 @@ class BrowserAutomation:
                 if is_selected != expected_selected:
                     raise AssertionError(f"[PID:{self.pid}] Expected selected {expected_selected} but got {is_selected}")
 
+            elif assertion_type == "current_url_contains":
+                current_url = self.driver.current_url
+                if value not in current_url:
+                    raise AssertionError(f"[PID:{self.pid}] Expected URL to contain '{value}' but got '{current_url}'")
+                self.logger.info(f"[PID:{self.pid}] URL contains '{value}' as expected: '{current_url}'")
+
             elif assertion_type == "type":
                 # Handle type attribute assertions specifically for input fields
                 actual_type = element.get_attribute("type")
