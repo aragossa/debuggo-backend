@@ -275,7 +275,6 @@ class BrowserAutomation:
             raise
 
     def press_key(self, selector, value, by='xpath'):
-        # Define mapping of keys to Selenium Keys constants
         KEY_MAPPING = {
             'enter': Keys.ENTER,
             'tab': Keys.TAB,
@@ -289,6 +288,10 @@ class BrowserAutomation:
             'down': Keys.DOWN,
             'left': Keys.LEFT,
             'right': Keys.RIGHT,
+            'arrow_up': Keys.UP,
+            'arrow_down': Keys.DOWN,
+            'arrow_left': Keys.LEFT,
+            'arrow_right': Keys.RIGHT,
         }
 
         try:
@@ -303,7 +306,7 @@ class BrowserAutomation:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
 
             # Find and interact with the element
-            element = self.find_element(selector, by_strategy)
+            element = self.find_element(selector, by)
             element.send_keys(selenium_key)
             self.logger.info(f"[PID:{self.pid}] Pressed {key.upper()} key on element: {selector}")
 
@@ -313,8 +316,7 @@ class BrowserAutomation:
 
     def get_text(self, selector, by='xpath'):
         try:
-            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
-            element = self.find_element(selector, by_strategy)
+            element = self.find_element(selector, by)
             return element.text
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to get text from element {selector}: {str(e)}")
