@@ -1,18 +1,19 @@
-from Utils.Connectors.DbConnector import DbConnector
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 def save_test_run_result(test_case_id, result, exception="", duration=None, stdout="", stderr="", additional_info=""):
-    db = DbConnector()
-    conn = db.get_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute('''
-        INSERT INTO test_runs (test_case_id, result, exception, duration, stdout, stderr, additional_info)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-    ''', (test_case_id, result, exception, duration, stdout, stderr, additional_info))
+        cursor.execute('''
+            INSERT INTO test_runs (test_case_id, result, exception, duration, stdout, stderr, additional_info)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ''', (test_case_id, result, exception, duration, stdout, stderr, additional_info))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        return_db_connection(conn)
 
 
 
@@ -25,8 +26,7 @@ def execute_test_case(test_case_id):
 
     start_time = time.time()
 
-    db = DbConnector()
-    conn = db.get_connection()
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Retrieve the python_script and curl command from the test_cases table where id = test_case_id
@@ -38,14 +38,14 @@ def execute_test_case(test_case_id):
     if result is None:
         exception_message = f"No test case found with id {test_case_id}"
         save_test_run_result(test_case_id, "Failed", exception=exception_message)
-        conn.close()
+        return_db_connection(conn)
         return {
             "result": "Failed",
             "exception": exception_message
         }
 
     curl_command = result
-    conn.close()
+    return_db_connection(conn)
 
     stdout_content = ""
     stderr_content = ""

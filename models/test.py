@@ -5,6 +5,7 @@ from datetime import datetime
 class GenerateStepsRequest(BaseModel):
     project_id: Optional[UUID4] = None
     environment_id: Optional[int] = None
+    ai_model_id: Optional[int] = None
     
     class Config:
         from_attributes = True

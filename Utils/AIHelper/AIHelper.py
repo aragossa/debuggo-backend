@@ -487,34 +487,70 @@ IMPORTANT:
 
     def _save_to_page_sources(self, image=None, prompt=None, response=None):
         """Save screenshot, prompt, and response to page_sources folder."""
-        if not any([image, prompt, response]):
-            return
-        
-        # Get the base directory
-        page_sources_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'page_sources')
+        # Create page_sources directory if it doesn't exist
+        page_sources_dir = os.path.join(os.getcwd(), 'page_sources')
+        os.makedirs(page_sources_dir, exist_ok=True)
         
         # Get the next available file number
-        if image is not None:
-            file_number = self._get_next_file_number("screenshot")
+        file_number = self._get_next_file_number(page_sources_dir)
         
+        if image:
             # Save screenshot
             screenshot_path = os.path.join(page_sources_dir, f"screenshot_{file_number}.png")
             image.save(screenshot_path)
             self.logger.info(f"Saved screenshot to {screenshot_path}")
         
-            # Save prompt if provided
-            if prompt is not None:
-                prompt_path = os.path.join(page_sources_dir, f"text_input_{file_number}.txt")
-                with open(prompt_path, 'w', encoding='utf-8') as f:
-                    f.write(prompt)
-                self.logger.info(f"Saved prompt to {prompt_path}")
+        if prompt is not None:
+            prompt_path = os.path.join(page_sources_dir, f"text_input_{file_number}.txt")
+            with open(prompt_path, 'w', encoding='utf-8') as f:
+                f.write(prompt)
+            self.logger.info(f"Saved prompt to {prompt_path}")
         
-            # Save response if provided
-            if response is not None:
-                response_path = os.path.join(page_sources_dir, f"text_output_{file_number}.txt")
-                with open(response_path, 'w', encoding='utf-8') as f:
-                    f.write(response)
-                self.logger.info(f"Saved response to {response_path}")
+        if response is not None:
+            response_path = os.path.join(page_sources_dir, f"text_output_{file_number}.txt")
+            with open(response_path, 'w', encoding='utf-8') as f:
+                f.write(response)
+            self.logger.info(f"Saved response to {response_path}")
+
+    def _get_model_id(self) -> str:
+        """Get the model ID from the database based on the provider."""
+        try:
+            # Default model ID in case database query fails
+            default_model_id = "gemini-2.5-pro-preview-06-05"
+            
+            # If provider is not gemini, return the default model ID
+            if self.provider != 'gemini':
+                self.logger.info(f"Provider is not Gemini, using default model ID: {default_model_id}")
+                return default_model_id
+            
+            # Get a connection from the pool
+            conn = self.db_connection
+            if not conn:
+                self.logger.warning("No database connection available, using default model ID")
+                return default_model_id
+                
+            with conn.cursor() as cur:
+                # Query the database for the active default model
+                cur.execute("""
+                    SELECT model_id FROM ai_models 
+                    WHERE is_active = TRUE AND is_default = TRUE
+                    LIMIT 1
+                """)
+                
+                result = cur.fetchone()
+                
+                if result and result[0]:
+                    model_id = result[0]
+                    self.logger.info(f"Using model ID from database: {model_id}")
+                    return model_id
+                else:
+                    self.logger.warning(f"No default active model found in database, using default model ID: {default_model_id}")
+                    return default_model_id
+                    
+        except Exception as e:
+            self.logger.error(f"Error retrieving model ID from database: {str(e)}")
+            self.logger.warning(f"Using default model ID: gemini-2.5-pro-preview-06-05")
+            return "gemini-2.5-pro-preview-06-05"
 
     def send_request_to_gemini(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> Union[bool, Any]:
         if not self.gemini_api_key:
@@ -533,8 +569,10 @@ IMPORTANT:
         self.logger.info(f"Prompt preview: {truncated_prompt}")
         self.logger.info(f"====== GEMINI REQUEST END ======")
         
-        model = genai.GenerativeModel("gemini-2.5-pro-preview-06-05")
+        # Get the model ID from the database
+        model_id = self._get_model_id()
         genai.configure(api_key=self.gemini_api_key)
+        model = genai.GenerativeModel(model_id)
         response = None
         max_retries = 5
         base_delay = 2  # Start with 2 seconds delay

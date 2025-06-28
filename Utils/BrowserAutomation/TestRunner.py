@@ -15,9 +15,9 @@ import os.path
 from Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
 from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
-from Utils.Connectors.DbConnector import DbConnector
 from Utils.System import System
 import io
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 class TestRunner:
@@ -175,8 +175,7 @@ class TestRunner:
 
     def _connect_db(self):
         """Create database connection"""
-        db = DbConnector()
-        return db.get_connection()
+        return get_db_connection()
 
     def _log_test_run(self, test_case_id: int, result: str, exception: str = None,
                       duration: float = None, stdout: str = None, stderr: str = None):
@@ -377,11 +376,11 @@ class TestRunner:
         """Context manager for database connections."""
         connection = None
         try:
-            connection = System.get_db_connection()
+            connection = get_db_connection()
             yield connection
         finally:
             if connection:
-                System._pool.putconn(connection)
+                return_db_connection(connection)
 
     def run_test_case(self, test_case_id: int, environment_vars=None):
         """
@@ -577,7 +576,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
                 self._cleanup_browser()
 
-    def generate_test_steps(self, test_case_id: int, environment_vars=None):
+    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None):
         """
         Generate test steps using AI analysis of page HTML.
         
@@ -625,6 +624,31 @@ class TestRunner:
                     self.logger.info(f"[PID:{pid}] Initialized HTML analyzer")
                 
                 html_analyzer = self.html_analyzer
+                
+                # If AI model ID is provided, get the model details and set the provider
+                if ai_model_id:
+                    try:
+                        conn = get_db_connection()
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                """
+                                SELECT model_id FROM ai_models 
+                                WHERE id = %s AND is_active = TRUE
+                                """, 
+                                (ai_model_id,)
+                            )
+                            model = cursor.fetchone()
+                            if model:
+                                model_id = model[0]
+                                # Extract provider from model_id (e.g., "gemini-2.5-pro" -> "gemini")
+                                provider = model_id.split('-')[0] if '-' in model_id else model_id
+                                self.logger.info(f"[PID:{pid}] Using AI model: {model_id} (provider: {provider})")
+                                html_analyzer.switch_provider(provider)
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Error setting AI model: {e}")
+                    finally:
+                        if 'conn' in locals() and conn:
+                            return_db_connection(conn)
                 
                 # Navigate to the base URL
                 base_url = env.get_base_url()

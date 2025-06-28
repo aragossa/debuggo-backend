@@ -1,15 +1,14 @@
-from Utils.Connectors.DbConnector import DbConnector
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 def get_test_data_from_db(test_case_id: int, client_id: str):
-    db = DbConnector()
-    conn = db.get_connection()
-
-    result = get_test_data_from_db_helper(conn, test_case_id, client_id)
-
-    conn.close()
-
-    return result
+    conn = get_db_connection()
+    
+    try:
+        result = get_test_data_from_db_helper(conn, test_case_id, client_id)
+        return result
+    finally:
+        return_db_connection(conn)
 
 
 def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):

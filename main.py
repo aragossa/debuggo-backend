@@ -44,18 +44,10 @@ from fetch_test_steps import get_test_data_from_db_helper
 from test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool
 
 # Initialize connection pool
 db_pool = None
-
-def get_db_connection():
-    if db_pool is None:
-        raise HTTPException(status_code=500, detail="Database pool not initialized")
-    return db_pool.getconn()
-
-def return_db_connection(conn):
-    if db_pool is not None and conn is not None:
-        db_pool.putconn(conn)
 
 class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
@@ -157,17 +149,21 @@ async def lifespan(app: FastAPI):
     global db_pool, kafka_consumer, consumer_thread
     system = System()
     
-    # Initialize database pool
+    # Initialize database pool using db_utils
     try:
-        db_pool = SimpleConnectionPool(
-            minconn=1,
-            maxconn=20,  # Increase max connections
-            host=system.db_host,
-            database=system.db_name,
-            user=system.db_user,
-            password=system.db_password,
-            port=system.db_port
-        )
+        # Set environment variables for db_utils
+        os.environ["DB_HOST"] = system.db_host
+        os.environ["DB_NAME"] = system.db_name
+        os.environ["DB_USER"] = system.db_user
+        os.environ["DB_PASSWORD"] = system.db_password
+        os.environ["DB_PORT"] = system.db_port
+        
+        # Initialize the database pool
+        init_db_pool()
+        
+        # Get the db_pool reference from db_utils
+        from Utils.Connectors.db_utils import db_pool as utils_db_pool
+        db_pool = utils_db_pool
     except Exception as e:
         print(f"Failed to initialize database pool: {e}")
         raise
@@ -199,8 +195,9 @@ async def lifespan(app: FastAPI):
         kafka_consumer.stop()
     if consumer_thread:
         consumer_thread.join(timeout=1.0)
-    if db_pool:
-        db_pool.closeall()
+    # Close the database pool using db_utils
+    from Utils.Connectors.db_utils import close_db_pool
+    close_db_pool()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -608,8 +605,40 @@ async def generate_steps(
                 if conn:
                     return_db_connection(conn)
         
+        # Get the AI model ID to use
+        ai_model_id = None
+        if request_data and request_data.ai_model_id:
+            # Use the model specified in the request
+            ai_model_id = request_data.ai_model_id
+        else:
+            # Check if the user has a preferred model
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT ai_model_id FROM user_ai_models WHERE user_id = %s
+                        """,
+                        (current_user.id,)
+                    )
+                    user_model = cursor.fetchone()
+                    if user_model:
+                        ai_model_id = user_model[0]
+                    else:
+                        # Use the default model
+                        cursor.execute(
+                            """
+                            SELECT id FROM ai_models WHERE is_default = TRUE AND is_active = TRUE
+                            """
+                        )
+                        default_model = cursor.fetchone()
+                        if default_model:
+                            ai_model_id = default_model[0]
+            finally:
+                if conn:
+                    return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars))
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id))
         thread.daemon = True
         thread.start()
         
@@ -702,8 +731,40 @@ async def confirm_generate_steps(
                 if conn:
                     return_db_connection(conn)
         
+        # Get the AI model ID to use
+        ai_model_id = None
+        if request_data and request_data.ai_model_id:
+            # Use the model specified in the request
+            ai_model_id = request_data.ai_model_id
+        else:
+            # Check if the user has a preferred model
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT ai_model_id FROM user_ai_models WHERE user_id = %s
+                        """,
+                        (current_user.id,)
+                    )
+                    user_model = cursor.fetchone()
+                    if user_model:
+                        ai_model_id = user_model[0]
+                    else:
+                        # Use the default model
+                        cursor.execute(
+                            """
+                            SELECT id FROM ai_models WHERE is_default = TRUE AND is_active = TRUE
+                            """
+                        )
+                        default_model = cursor.fetchone()
+                        if default_model:
+                            ai_model_id = default_model[0]
+            finally:
+                if conn:
+                    return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars))
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id))
         thread.daemon = True
         thread.start()
         
@@ -2822,6 +2883,322 @@ async def stop_test_case_execution(id: int, request: Request):
         return {"status": "success", "message": "Test case execution stop requested"}
     else:
         return {"status": "error", "message": "Failed to stop test case execution"}
+
+# AI Model Management Endpoints
+
+class AIModelCreate(BaseModel):
+    name: str
+    model_id: str
+    description: Optional[str] = None
+    is_active: Optional[bool] = True
+    is_default: Optional[bool] = False
+
+class AIModelUpdate(BaseModel):
+    name: Optional[str] = None
+    model_id: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_default: Optional[bool] = None
+
+@app.get("/api/ai-models", response_model=List[Dict])
+async def list_ai_models(current_user: User = Depends(get_current_user)):
+    """
+    List all available AI models.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT id, name, model_id, description, is_active, is_default, created_at, updated_at
+                FROM ai_models
+                ORDER BY name
+            """)
+            models = cursor.fetchall()
+            
+            # Check if the user has a preferred model
+            cursor.execute("""
+                SELECT ai_model_id
+                FROM user_ai_models
+                WHERE user_id = %s
+            """, (current_user.id,))
+            user_model = cursor.fetchone()
+            
+            # Add user_selected flag to each model
+            for model in models:
+                model['user_selected'] = user_model and model['id'] == user_model['ai_model_id']
+                
+            return models
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list AI models: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/ai-models", response_model=Dict)
+async def create_ai_model(model_data: AIModelCreate, current_user: User = Depends(get_current_user)):
+    """
+    Create a new AI model. Admin only.
+    """
+    # Check if user is admin
+    check_admin_role(current_user)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if model_id already exists
+            cursor.execute("""
+                SELECT id FROM ai_models WHERE model_id = %s
+            """, (model_data.model_id,))
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"AI model with model_id '{model_data.model_id}' already exists"
+                )
+            
+            # If this model is set as default, unset any existing default
+            if model_data.is_default:
+                cursor.execute("""
+                    UPDATE ai_models SET is_default = FALSE WHERE is_default = TRUE
+                """)
+            
+            # Insert new model
+            cursor.execute("""
+                INSERT INTO ai_models (name, model_id, description, is_active, is_default)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                model_data.name,
+                model_data.model_id,
+                model_data.description,
+                model_data.is_active,
+                model_data.is_default
+            ))
+            model_id = cursor.fetchone()[0]
+            conn.commit()
+            
+            return {"id": model_id, "message": "AI model created successfully"}
+    except HTTPException:
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create AI model: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.put("/api/ai-models/{model_id}", response_model=Dict)
+async def update_ai_model(
+    model_id: int,
+    model_data: AIModelUpdate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update an existing AI model. Admin only.
+    """
+    # Check if user is admin
+    check_admin_role(current_user)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if model exists
+            cursor.execute("""
+                SELECT id FROM ai_models WHERE id = %s
+            """, (model_id,))
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"AI model with ID {model_id} not found"
+                )
+            
+            # If this model is set as default, unset any existing default
+            if model_data.is_default:
+                cursor.execute("""
+                    UPDATE ai_models SET is_default = FALSE WHERE is_default = TRUE
+                """)
+            
+            # Build update query dynamically based on provided fields
+            update_fields = []
+            params = []
+            
+            if model_data.name is not None:
+                update_fields.append("name = %s")
+                params.append(model_data.name)
+                
+            if model_data.model_id is not None:
+                update_fields.append("model_id = %s")
+                params.append(model_data.model_id)
+                
+            if model_data.description is not None:
+                update_fields.append("description = %s")
+                params.append(model_data.description)
+                
+            if model_data.is_active is not None:
+                update_fields.append("is_active = %s")
+                params.append(model_data.is_active)
+                
+            if model_data.is_default is not None:
+                update_fields.append("is_default = %s")
+                params.append(model_data.is_default)
+            
+            # Add updated_at timestamp
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            
+            # Execute update if there are fields to update
+            if update_fields:
+                query = f"UPDATE ai_models SET {', '.join(update_fields)} WHERE id = %s"
+                params.append(model_id)
+                cursor.execute(query, params)
+                conn.commit()
+            
+            return {"message": "AI model updated successfully"}
+    except HTTPException:
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update AI model: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.delete("/api/ai-models/{model_id}", response_model=Dict)
+async def delete_ai_model(
+    model_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete an AI model. Admin only.
+    """
+    # Check if user is admin
+    check_admin_role(current_user)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if model exists
+            cursor.execute("""
+                SELECT is_default FROM ai_models WHERE id = %s
+            """, (model_id,))
+            model = cursor.fetchone()
+            if not model:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"AI model with ID {model_id} not found"
+                )
+            
+            # Don't allow deletion of default model
+            if model[0]:  # is_default
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot delete the default AI model"
+                )
+            
+            # Delete model
+            cursor.execute("""
+                DELETE FROM ai_models WHERE id = %s
+            """, (model_id,))
+            conn.commit()
+            
+            return {"message": "AI model deleted successfully"}
+    except HTTPException:
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete AI model: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/user-ai-model", response_model=Dict)
+async def set_user_ai_model(
+    model_data: dict = Body(..., example={"ai_model_id": 1}),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Set the user's preferred AI model.
+    """
+    conn = None
+    try:
+        ai_model_id = model_data.get("ai_model_id")
+        if not ai_model_id:
+            raise HTTPException(
+                status_code=400,
+                detail="ai_model_id is required"
+            )
+        
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Check if model exists and is active
+            cursor.execute("""
+                SELECT id FROM ai_models WHERE id = %s AND is_active = TRUE
+            """, (ai_model_id,))
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Active AI model with ID {ai_model_id} not found"
+                )
+            
+            # Check if user already has a preferred model
+            cursor.execute("""
+                SELECT user_id FROM user_ai_models WHERE user_id = %s
+            """, (current_user.id,))
+            user_model = cursor.fetchone()
+            
+            if user_model:
+                # Update existing preference
+                cursor.execute("""
+                    UPDATE user_ai_models 
+                    SET ai_model_id = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                """, (ai_model_id, current_user.id))
+            else:
+                # Insert new preference
+                cursor.execute("""
+                    INSERT INTO user_ai_models (user_id, ai_model_id)
+                    VALUES (%s, %s)
+                """, (current_user.id, ai_model_id))
+            
+            conn.commit()
+            return {"message": "User AI model preference updated successfully"}
+    except HTTPException:
+        if conn:
+            conn.rollback()
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to set user AI model preference: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
 
 if __name__ == "__main__":
     import uvicorn

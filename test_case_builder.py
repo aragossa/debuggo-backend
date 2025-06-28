@@ -1,4 +1,4 @@
-from Utils.Connectors.DbConnector import DbConnector
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 # Function to recursively build tree structure from flat data
@@ -16,9 +16,8 @@ def build_tree(nodes, parent_id=None):
 
 # Connect to the SQLite database
 def fetch_tree_data(client_id):
-    # Establish connection to the SQLite database
-    db = DbConnector()
-    conn = db.get_connection()
+    # Establish connection to the PostgreSQL database
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Execute the recursive query
@@ -39,8 +38,8 @@ def fetch_tree_data(client_id):
     # Fetch all results
     result = cursor.fetchall()
 
-    # Close the database connection
-    conn.close()
+    # Return the database connection to the pool
+    return_db_connection(conn)
 
     # Convert the result into a list of dictionaries
     nodes = []
