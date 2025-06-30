@@ -584,6 +584,24 @@ class TestRunner:
             test_case_id: ID of the test case
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
         """
+        # Record start time
+        start_time = datetime.now()
+        
+        # Update the test case with the start time
+        try:
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE test_cases 
+                        SET steps_generation_start_time = %s
+                        WHERE id = %s
+                        """,
+                        (start_time, test_case_id)
+                    )
+                    connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to update test case with start time: {e}")
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting test step generation for test case {test_case_id}")
         
@@ -1159,13 +1177,32 @@ class TestRunner:
             raise
         
         finally:
-            # Clear the generating status and step information in Redis
+            # Record end time
+            end_time = datetime.now()
+            
+            # Update the test case with the end time
+            try:
+                with self.get_db_connection() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE test_cases 
+                            SET steps_generation_end_time = %s
+                            WHERE id = %s
+                            """,
+                            (end_time, test_case_id)
+                        )
+                        connection.commit()
+            except Exception as e:
+                self.logger.error(f"[PID:{pid}] Failed to update test case with end time: {e}")
+            
+            # Clear the generating status in Redis
             try:
                 if self._redis:
                     self._redis.delete(f"test_case_generating:{test_case_id}")
                     self._redis.delete(f"test_case_current_step:{test_case_id}")
                     self._redis.delete(f"test_case_next_step:{test_case_id}")
-                    self.logger.info(f"[PID:{pid}] Cleared generation status and step information in Redis for test case {test_case_id}")
+                    self.logger.info(f"[PID:{pid}] Cleared generation status in Redis for test case {test_case_id}")
             except Exception as e:
                 self.logger.error(f"[PID:{pid}] Failed to clear generation status in Redis: {e}")
             

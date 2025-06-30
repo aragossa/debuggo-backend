@@ -15,7 +15,7 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
     cursor = conn.cursor()
 
     cursor.execute('''
-         SELECT name, description, updated_at
+         SELECT name, description, updated_at, steps_generation_start_time, steps_generation_end_time
          FROM test_cases
          WHERE id = %s AND client_id = %s
      ''', (test_case_id, client_id))
@@ -76,11 +76,13 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
         }
         test_runs.append(test_run)
 
-    # Return both test_steps and test_runs
+    # Return test case data including generation timing
     return {
         "test_name": test_case_row[0],
         "test_description": test_case_row[1],
         "updated_at": test_case_row[2].isoformat() if test_case_row[2] else None,
+        "steps_generation_start_time": test_case_row[3].isoformat() if test_case_row[3] else None,
+        "steps_generation_end_time": test_case_row[4].isoformat() if test_case_row[4] else None,
         "test_steps": test_steps,
         "test_runs": test_runs
     }

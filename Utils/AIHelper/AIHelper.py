@@ -206,7 +206,7 @@ You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
 {step_history}
 
 IMPORTANT GUIDELINES:
-1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE
+1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE AND NOT DISABLED
 2. ELEMENT EXISTENCE VERIFICATION IS MANDATORY:
    - You MUST confirm that each element you suggest actually exists in the current HTML code
    - Do NOT suggest any element without verifying its existence in the provided HTML
@@ -230,6 +230,7 @@ IMPORTANT GUIDELINES:
    - First locate and interact with the username/email field, using {{login}} as the value
    - Then locate and interact with the password field, using {{password}} as the value
    - Only after both fields are filled, locate and click the login/submit button
+   - Don't use variables {{login}} and {{password}} in any other place except login page
    - ENSURE login is successful before proceeding with any subsequent steps
    - NEVER skip the password field even if it appears to be optional
 6. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
