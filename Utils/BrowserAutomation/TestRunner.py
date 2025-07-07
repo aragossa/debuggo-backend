@@ -76,7 +76,7 @@ class TestRunner:
             self.logger.info(f"[PID:{self.pid}] HTML Analyzer initialized")
             # Initialize browser
             try:
-                self.browser = BrowserAutomation(headless=True)
+                self.browser = BrowserAutomation(headless=False)
                 self.logger.info(f"[PID:{self.pid}] Browser initialized")
             except Exception as e:
                 self.logger.error(f"[PID:{self.pid}] Failed to initialize browser: {str(e)}")
@@ -343,7 +343,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{self.pid}] Checking if page has been reloaded after {action}")
                 if self.browser.wait_for_page_changes():
                     self.logger.info(f"[PID:{self.pid}] Page was reloaded, waiting 5 seconds for it to stabilize")
-                    time.sleep(5)
+                    time.sleep(1)
                 else:
                     self.logger.info(f"[PID:{self.pid}] No page reload detected after {action}")
             
@@ -425,7 +425,7 @@ class TestRunner:
                 self._cleanup_browser()
                 
                 self.logger.info(f"[PID:{pid}] Creating new browser instance")
-                self.browser = BrowserAutomation(headless=True)
+                self.browser = BrowserAutomation(headless=False)
                 self.logger.info(f"[PID:{self.pid}] Browser started successfully")
 
                 # Get and execute test steps
@@ -626,7 +626,7 @@ class TestRunner:
                 
                 # Initialize browser if needed
                 if not self.browser:
-                    self.browser = BrowserAutomation(headless=True)
+                    self.browser = BrowserAutomation(headless=False)
                     self.logger.info(f"[PID:{pid}] Initialized browser")
                 
                 # Get test case details

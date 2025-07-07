@@ -37,6 +37,9 @@ class System:
         self.redis_host = os.getenv('REDIS_HOST', 'localhost')
         self.redis_port = int(os.getenv('REDIS_PORT', '6379'))
 
+        # Selenium Grid configuration
+        self.selenium_grid_url = os.getenv('SELENIUM_GRID_URL', 'http://localhost:4444/wd/hub')
+
         # Kafka configuration
         self.kafka_host = os.getenv('KAFKA_HOST', 'localhost')
         self.kafka_port = os.getenv('KAFKA_PORT', '9092')

@@ -6,6 +6,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 import logging
 import sys
 import os
@@ -15,10 +16,11 @@ import time
 import re
 
 from Utils.BrowserAutomation.EnvHelper import EnvHelper
+from Utils.System import System
 
 
 class BrowserAutomation:
-    def __init__(self, headless=True, timeout=10):
+    def __init__(self, headless=False, timeout=10):
         self.timeout = timeout
         self.driver = None
         self.logger = self._setup_logger()
@@ -41,7 +43,7 @@ class BrowserAutomation:
 
         return logger
 
-    def setup_driver(self, headless=True):
+    def setup_driver(self, headless=False):
         try:
             chrome_options = Options()
             if headless:
@@ -52,16 +54,29 @@ class BrowserAutomation:
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('--remote-debugging-port=9222')  # Enable debugging
             chrome_options.add_argument('--enable-logging')  # Enable Chrome logging
             chrome_options.add_argument('--v=1')  # Verbose logging
 
-            self.driver = webdriver.Chrome(options=chrome_options)
+            # Get system configuration for Selenium Grid URL
+            system = System()
+            # Default to localhost:4444 if not specified in System
+            grid_url = getattr(system, 'selenium_grid_url', 'http://localhost:4444/wd/hub')
+            
+            # Log the Selenium Grid connection attempt
+            self.logger.info(f"[PID:{self.pid}] Connecting to Selenium Grid at {grid_url}")
+            
+            # Create a remote WebDriver connection to Selenium Grid
+            # In Selenium 4+, capabilities are specified through options object
+            self.driver = webdriver.Remote(
+                command_executor=grid_url,
+                options=chrome_options
+            )
+            
             self.driver.implicitly_wait(5)
-            # Don't log here as TestRunner will handle it
+            self.logger.info(f"[PID:{self.pid}] Successfully connected to Selenium Grid")
 
         except Exception as e:
-            self.logger.error(f"[PID:{self.pid}] Failed to setup browser: {str(e)}")
+            self.logger.error(f"[PID:{self.pid}] Failed to connect to Selenium Grid: {str(e)}")
             if hasattr(e, 'msg'):
                 self.logger.error(f"[PID:{self.pid}] Error message: {e.msg}")
             raise

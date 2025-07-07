@@ -2004,7 +2004,7 @@ async def test_element_locator(
             
             # Clean up any existing browser instance and create a new one
             test_runner._cleanup_browser()
-            test_runner.browser = BrowserAutomation(headless=True)
+            test_runner.browser = BrowserAutomation(headless=False)
             
             # Navigate to the base URL
             test_runner.browser.navigate(base_url)
