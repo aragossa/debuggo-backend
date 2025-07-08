@@ -108,7 +108,7 @@ class EnvHelper:
         """
         Process environment variables in a text string.
         
-        Replaces {{variable_name}} with the actual value from environment variables.
+        Replaces %variable_name% with the actual value from environment variables.
         
         Args:
             text (str): The text containing environment variable placeholders
@@ -121,8 +121,8 @@ class EnvHelper:
             
         import re
         
-        # Find all {{variable}} patterns in the text
-        pattern = r'\{\{([^}]+)\}\}'
+        # Find all %variable% patterns in the text
+        pattern = r'%([^%]+)%'
         matches = re.findall(pattern, text)
         
         # Replace each variable with its value
@@ -142,7 +142,7 @@ class EnvHelper:
                     continue
                     
                 # Replace the placeholder with the actual value
-                placeholder = f'{{{{{var_name}}}}}'
+                placeholder = f'%{var_name}%'
                 result = result.replace(placeholder, value)
                 
             except ValueError:

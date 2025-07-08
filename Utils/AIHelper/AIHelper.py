@@ -226,11 +226,11 @@ IMPORTANT GUIDELINES:
    - Look for elements with 'dropdown', 'submenu', or similar classes to identify dropdown menus
    - For multi-level menus, handle ONE LEVEL AT A TIME (hover/click parent → click child)
 5. LOGIN HANDLING - If login is required, use environment variables:
-   - Use {{base_url}} for the base URL
-   - First locate and interact with the username/email field, using {{login}} as the value
-   - Then locate and interact with the password field, using {{password}} as the value
+   - Use %base_url% for the base URL
+   - First locate and interact with the username/email field, using %login% as the value
+   - Then locate and interact with the password field, using %password% as the value
    - Only after both fields are filled, locate and click the login/submit button
-   - Don't use variables {{login}} and {{password}} in any other place except login page
+   - Don't use variables %login% and %password% in any other place except login page
    - ENSURE login is successful before proceeding with any subsequent steps
    - NEVER skip the password field even if it appears to be optional
 6. SEQUENTIAL EXECUTION - All steps after login must only be executed after successful login verification
@@ -238,8 +238,8 @@ IMPORTANT GUIDELINES:
 FORM COMPLETION REQUIREMENTS:
 1. When filling out forms, ALWAYS complete ALL available fields before submission
 2. For login forms specifically:
-   - FIRST step: Locate and fill the username/email field with {{login}}
-   - SECOND step: Locate and fill the password field with {{password}}
+   - FIRST step: Locate and fill the username/email field with %login%
+   - SECOND step: Locate and fill the password field with %password%
    - THIRD step: Click the login/submit button
    - These steps MUST be performed as separate actions in this exact sequence
 3. NEVER combine multiple form field actions into a single step
@@ -300,14 +300,14 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "by_strategy": "xpath",
     "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
-    "value": "For type actions: MUST provide actual test data (e.g., '{{{{login}}}}' for login field)",
+    "value": "For type actions: MUST provide actual test data (e.g., '%login%' for login field)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
 }}
 
 IMPORTANT REQUIREMENTS:
 1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
 2. Action Types: For any type of actions, ensure that the value field is non-empty and includes appropriate test data.
-3. Environment Variables: Use {{{{base_url}}}}, {{{{login}}}}, and {{{{password}}}} for environment-specific values.
+3. Environment Variables: Use %base_url%, %login%, and %password% for environment-specific values.
 4. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
 5. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
 6. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
