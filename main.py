@@ -492,7 +492,7 @@ async def run_test_case(
     conn = None
     try:
         # Get the singleton instance of TestRunner
-        runner = TestRunner()
+        runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
         
         environment_vars = {}
         
@@ -576,7 +576,7 @@ async def generate_steps(
     
     try:
         # Get the singleton instance of TestRunner
-        runner = TestRunner()
+        runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
         
         # Set up environment variables if environment_id is provided
         environment_vars = {}
@@ -702,7 +702,7 @@ async def confirm_generate_steps(
     
     try:
         # Get the singleton instance of TestRunner
-        runner = TestRunner()
+        runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
         
         # Set up environment variables if environment_id is provided
         environment_vars = {}
@@ -1994,7 +1994,7 @@ async def test_element_locator(
                 raise HTTPException(status_code=404, detail="Test case not found")
         
         # Initialize the test runner
-        test_runner = TestRunner()
+        test_runner = TestRunner(user_id=str(current_user.id), test_case_id=request_data.test_case_id if request_data.test_case_id else None)
         
         # Set up environment variables if an environment was provided
         if environment:
@@ -2732,7 +2732,7 @@ async def test_case_generation_status(
                 raise HTTPException(status_code=404, detail="Test case not found")
             
             # Check if the test case is currently generating steps
-            runner = TestRunner()
+            runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
             is_generating = runner.is_generating_steps(id)
             
             # Get current and next step information from Redis
@@ -2810,7 +2810,7 @@ async def stop_test_case_generation(
                 raise HTTPException(status_code=404, detail="Test case not found")
             
             # Get the TestRunner instance and stop the generation
-            runner = TestRunner()
+            runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
             runner.stop_generating_steps(id)
             
             return {"status": "stopped"}
@@ -2853,7 +2853,7 @@ async def stop_test_case_execution(
                 )
             
             # Use the TestRunner to stop the test case execution
-            runner = TestRunner()
+            runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
             runner.stop_test_case_execution(id)
             
             return {"status": "success", "message": "Test case execution stop requested"}

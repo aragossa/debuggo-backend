@@ -21,138 +21,179 @@ from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 class TestRunner:
-    _instance = None
-    _lock = Lock()
+    _instances = {}
+    _lock = Lock()  # Local threading lock as fallback
     _redis = None
-    _redis_lock = None
-    _lock_key = "test_runner_lock"
     _lock_timeout = 300  # 5 minutes timeout
 
-    def __new__(cls):
+    def __new__(cls, user_id=None, test_case_id=None):
         pid = os.getpid()
+        # Create a unique key for this user and test case
+        instance_key = f"{user_id}_{test_case_id}" if user_id and test_case_id else "default"
+        
         with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(TestRunner, cls).__new__(cls)
-                cls._instance.browser = None
-                cls._instance.test_run_id = None
-                cls._instance.logger = cls._instance._setup_logger()
-                cls._instance.html_analyzer = None  # Initialize HTML analyzer as None
-                cls._instance.logger.info(f"[PID:{pid}] Creating new TestRunner instance")
+            # If no instance exists for this key, create one
+            if instance_key not in cls._instances:
+                instance = super(TestRunner, cls).__new__(cls)
+                instance.browser = None
+                instance.test_run_id = None
+                instance.user_id = user_id
+                instance.test_case_id = test_case_id
+                instance.instance_key = instance_key
+                instance.logger = instance._setup_logger()
+                instance.html_analyzer = None  # Initialize HTML analyzer as None
+                instance.logger.info(f"[PID:{pid}] Creating new TestRunner instance for user:{user_id}, test:{test_case_id}")
                 
-                # Initialize Redis connection
-                system = System()
-                try:
-                    cls._instance._redis = redis.Redis(
-                        host=system.redis_host,
-                        port=system.redis_port,
-                        decode_responses=True
-                    )
-                    cls._instance.logger.info(f"[PID:{pid}] Redis connection established")
-                    
-                    # Create a Redis lock
-                    cls._instance._redis_lock = cls._instance._redis.lock(
-                        cls._instance._lock_key,
-                        timeout=cls._instance._lock_timeout,
-                        blocking=True,
-                        blocking_timeout=60
-                    )
-                    cls._instance.logger.info(f"[PID:{pid}] Redis lock created")
-                except Exception as e:
-                    cls._instance.logger.error(f"[PID:{pid}] Error initializing Redis: {e}")
-                    raise
+                # Initialize Redis connection (shared across instances)
+                if not hasattr(cls, '_redis_initialized'):
+                    system = System()
+                    try:
+                        cls._redis = redis.Redis(
+                            host=system.redis_host,
+                            port=system.redis_port,
+                            decode_responses=True
+                        )
+                        instance.logger.info(f"[PID:{pid}] Redis connection established")
+                        cls._redis_initialized = True
+                        # No need to create a global Redis lock on initialization
+                        # We'll create test-specific locks when needed
+                        instance.logger.info(f"[PID:{pid}] Redis connection ready for test-specific locks")
+                    except Exception as e:
+                        instance.logger.error(f"[PID:{pid}] Error initializing Redis: {e}")
+                        raise
+                
+                cls._instances[instance_key] = instance
+                return instance
             else:
-                cls._instance.logger.info(f"[PID:{pid}] Returning existing TestRunner instance")
-            return cls._instance
+                cls._instances[instance_key].logger.info(f"[PID:{pid}] Returning existing TestRunner instance for user:{user_id}, test:{test_case_id}")
+                return cls._instances[instance_key]
 
-    def __init__(self):
-        """Initialize TestRunner. This will only run once due to singleton pattern."""
+    def __init__(self, user_id=None, test_case_id=None):
+        """Initialize TestRunner for a specific user and test case"""
         self.logger = self._setup_logger()
         self.pid = os.getpid()
+        self.user_id = user_id
+        self.test_case_id = test_case_id
+        
         if not hasattr(self, '_initialized'):
-            self.logger.info(f"[PID:{self.pid}] Initializing TestRunner")
+            self.logger.info(f"[PID:{self.pid}] Initializing TestRunner for user:{user_id}, test:{test_case_id}")
             self._initialized = True
-            # Initialize HTML analyzer only once
+            # Initialize HTML analyzer
             self.html_analyzer = HtmlAnalyzer()
             self.logger.info(f"[PID:{self.pid}] HTML Analyzer initialized")
-            # Initialize browser
-            try:
-                self.browser = BrowserAutomation(headless=False)
-                self.logger.info(f"[PID:{self.pid}] Browser initialized")
-            except Exception as e:
-                self.logger.error(f"[PID:{self.pid}] Failed to initialize browser: {str(e)}")
-                raise
+            
+            # Each instance will have its own browser
+            # But we'll create it on demand when needed rather than at initialization time
+            self.browser = None
+            self.logger.info(f"[PID:{self.pid}] Browser will be initialized when needed")
         else:
-            self.logger.info(f"[PID:{self.pid}] TestRunner already initialized")
+            self.logger.info(f"[PID:{self.pid}] TestRunner already initialized for user:{user_id}, test:{test_case_id}")
 
     def __del__(self):
         """Cleanup method to ensure browser is closed when TestRunner is destroyed"""
         pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] TestRunner instance being destroyed")
+        self.logger.info(f"[PID:{pid}] TestRunner instance being destroyed for user:{self.user_id}, test:{self.test_case_id}")
         self._cleanup_browser()
+        
+        # Remove this instance from the instances dictionary
+        if hasattr(self, 'instance_key') and self.instance_key in self.__class__._instances:
+            del self.__class__._instances[self.instance_key]
 
     @contextmanager
-    def _process_lock(self):
-        """Process-safe lock using Redis or threading lock as fallback"""
+    def _test_case_lock(self, test_case_id):
+        """Process-safe lock specific to a test case using Redis or threading lock as fallback"""
         pid = os.getpid()
+        lock_key = f"test_case_lock:{test_case_id}"
         acquired = False
         redis_error = None
+        redis_lock = None
         
         try:
-            self.logger.info(f"[PID:{pid}] Attempting to acquire lock")
+            self.logger.info(f"[PID:{pid}] Attempting to acquire lock for test case {test_case_id}")
             
             # First try Redis lock if available
-            if hasattr(self, '_redis_lock') and self._redis_lock:
+            if self._redis:
                 try:
-                    self.logger.info(f"[PID:{pid}] Trying Redis lock")
-                    acquired = self._redis_lock.acquire(blocking=True, blocking_timeout=5)
+                    self.logger.info(f"[PID:{pid}] Creating test-specific Redis lock for test case {test_case_id}")
+                    redis_lock = self._redis.lock(
+                        lock_key,
+                        timeout=self._lock_timeout,
+                        blocking=True,
+                        blocking_timeout=5
+                    )
+                    
+                    acquired = redis_lock.acquire(blocking=True, blocking_timeout=5)
                     if acquired:
-                        self.logger.info(f"[PID:{pid}] Successfully acquired Redis lock")
+                        self.logger.info(f"[PID:{pid}] Successfully acquired Redis lock for test case {test_case_id}")
                         redis_error = None
                     else:
-                        self.logger.warning(f"[PID:{pid}] Failed to acquire Redis lock, falling back to threading lock")
+                        self.logger.warning(f"[PID:{pid}] Failed to acquire Redis lock for test case {test_case_id}, falling back to threading lock")
                         redis_error = "Failed to acquire Redis lock after timeout"
                 except Exception as e:
                     self.logger.warning(f"[PID:{pid}] Redis error: {str(e)}, falling back to threading lock")
                     redis_error = str(e)
             else:
-                self.logger.info(f"[PID:{pid}] Redis lock not available")
-                redis_error = "Redis lock not initialized"
+                self.logger.info(f"[PID:{pid}] Redis not available")
+                redis_error = "Redis not initialized"
             
             # If Redis failed, use threading lock
             if redis_error:
                 try:
                     self._lock.acquire()
                     acquired = True
-                    self.logger.info(f"[PID:{pid}] Successfully acquired threading lock")
+                    self.logger.info(f"[PID:{pid}] Successfully acquired threading lock for test case {test_case_id}")
                 except Exception as e:
-                    self.logger.error(f"[PID:{pid}] Failed to acquire threading lock: {str(e)}")
-                    raise TimeoutError(f"Could not acquire any lock for test execution: {str(e)}")
+                    self.logger.error(f"[PID:{pid}] Failed to acquire threading lock for test case {test_case_id}: {str(e)}")
+                    raise TimeoutError(f"Could not acquire any lock for test case {test_case_id} execution: {str(e)}")
             
             yield
         finally:
             if acquired:
                 try:
                     # Release the appropriate lock
-                    if redis_error is None and hasattr(self, '_redis_lock') and self._redis_lock:
-                        self._redis_lock.release()
-                        self.logger.info(f"[PID:{pid}] Released Redis lock")
+                    if redis_error is None and redis_lock:
+                        redis_lock.release()
+                        self.logger.info(f"[PID:{pid}] Released Redis lock for test case {test_case_id}")
                     else:
                         self._lock.release()
-                        self.logger.info(f"[PID:{pid}] Released threading lock")
+                        self.logger.info(f"[PID:{pid}] Released threading lock for test case {test_case_id}")
                 except Exception as e:
-                    self.logger.error(f"[PID:{pid}] Error releasing lock: {str(e)}")
+                    self.logger.error(f"[PID:{pid}] Error releasing lock for test case {test_case_id}: {str(e)}")
             else:
-                self.logger.warning(f"[PID:{pid}] No lock to release")
+                self.logger.warning(f"[PID:{pid}] No lock to release for test case {test_case_id}")
+    
+    @contextmanager
+    def _no_lock(self):
+        """A context manager that doesn't apply any locks - for operations that don't need locking"""
+        try:
+            yield
+        finally:
+            pass
+
+    def _ensure_browser_initialized(self):
+        """Ensure the browser is initialized if it's not already"""
+        pid = os.getpid()
+        if not self.browser:
+            self.logger.info(f"[PID:{pid}] Initializing browser for user:{self.user_id}, test:{self.test_case_id}")
+            try:
+                self.browser = BrowserAutomation(headless=False)
+                self.logger.info(f"[PID:{pid}] Browser initialized successfully")
+            except Exception as e:
+                self.logger.error(f"[PID:{pid}] Failed to initialize browser: {str(e)}")
+                raise
+        return self.browser
 
     def _cleanup_browser(self):
-        """Helper method to cleanup browser instance"""
+        """Cleanup method to close the browser"""
         pid = os.getpid()
-        if self.browser:
+        if hasattr(self, 'browser') and self.browser:
+            self.logger.info(f"[PID:{pid}] Cleaning up browser for user:{self.user_id}, test:{self.test_case_id}")
             try:
                 self.browser.close()
+                self.browser = None
                 self.logger.info(f"[PID:{pid}] Browser closed successfully")
             except Exception as e:
-                self.logger.error(f"[PID:{pid}] Error closing browser: {e}")
+                self.logger.error(f"[PID:{pid}] Error closing browser: {str(e)}")
             finally:
                 self.browser = None
                 self.logger.info(f"[PID:{pid}] Browser instance set to None")
@@ -418,15 +459,12 @@ class TestRunner:
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         
-        with self._process_lock():
+        with self._test_case_lock(test_case_id):
             try:
-                # Initialize browser
-                self.logger.info(f"[PID:{pid}] Cleaning up any existing browser instance")
-                self._cleanup_browser()
-                
-                self.logger.info(f"[PID:{pid}] Creating new browser instance")
-                self.browser = BrowserAutomation(headless=False)
-                self.logger.info(f"[PID:{self.pid}] Browser started successfully")
+                # Initialize browser using our ensure method instead of direct initialization
+                self.logger.info(f"[PID:{pid}] Ensuring browser is initialized for test case {test_case_id}")
+                self._ensure_browser_initialized()
+                self.logger.info(f"[PID:{self.pid}] Browser ready for test execution")
 
                 # Get and execute test steps
                 self.logger.info(f"[PID:{pid}] Retrieving test steps")
@@ -620,14 +658,13 @@ class TestRunner:
             self.logger.error(f"[PID:{pid}] Failed to set generation status in Redis: {e}")
         
         try:
-            # Acquire process lock
-            with self._process_lock():
+            # Acquire test-case specific lock
+            with self._test_case_lock(test_case_id):
                 self.logger.info(f"[PID:{pid}] Acquired process lock for test case {test_case_id}")
                 
-                # Initialize browser if needed
-                if not self.browser:
-                    self.browser = BrowserAutomation(headless=False)
-                    self.logger.info(f"[PID:{pid}] Initialized browser")
+                # Initialize browser using our ensure method
+                self._ensure_browser_initialized()
+                self.logger.info(f"[PID:{pid}] Ensured browser is initialized for test case {test_case_id}")
                 
                 # Get test case details
                 test_name, test_description = self._get_test_case(test_case_id)
