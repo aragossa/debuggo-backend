@@ -1469,9 +1469,6 @@ async def get_project_test_tree(
                 (project_id,)
             )
             all_project_test_cases = cursor.fetchall()
-            print(f"All test cases for project {project_id}:")
-            for tc in all_project_test_cases:
-                print(f"  ID: {tc[0]}, Name: {tc[1]}, Parent: {tc[2]}, Type: {tc[3]}")
             
             # Use a recursive query to get all test cases for this project with proper hierarchy
             cursor.execute(
