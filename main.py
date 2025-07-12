@@ -96,6 +96,7 @@ class CreateTestCaseRequest(BaseModel):
 class UpdateTestCaseRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    parent_id: Optional[int] = None
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
@@ -2045,6 +2046,51 @@ async def test_element_locator(
             detail=f"Error testing element locator: {str(e)}"
         )
 
+@app.get("/api/test_groups")
+async def get_test_groups(current_user: User = Depends(get_current_user)):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Get all test groups for the user's client
+            cur.execute(
+                """
+                SELECT id, name, description, parent_id, "order", created_at, updated_at
+                FROM test_cases
+                WHERE client_id = %s AND type = 'group'
+                ORDER BY "order"
+                """,
+                (str(current_user.client_id),)
+            )
+            groups = cur.fetchall()
+            
+            # Format the response
+            formatted_groups = []
+            for group in groups:
+                formatted_group = {
+                    "id": group[0],
+                    "name": group[1],
+                    "description": group[2],
+                    "parent_id": group[3],
+                    "order": group[4],
+                    "created_at": group[5].isoformat() if group[5] else None,
+                    "updated_at": group[6].isoformat() if group[6] else None,
+                    "children": []
+                }
+                formatted_groups.append(formatted_group)
+            
+            # Build the tree structure
+            group_map = {group["id"]: group for group in formatted_groups}
+            root_groups = []
+            
+            for group in formatted_groups:
+                if group["parent_id"] is None:
+                    root_groups.append(group)
+                else:
+                    parent = group_map.get(group["parent_id"])
+                    if parent:
+                        parent["children"].append(group)
+            
+            return root_groups
+
 @app.post("/api/test_groups", status_code=status.HTTP_201_CREATED)
 async def create_test_group(
     request_data: CreateTestGroupRequest,
@@ -2517,19 +2563,35 @@ async def update_test_case(
                 )
             
             # Update the test case
-            cur.execute(
-                """
-                UPDATE test_cases 
-                SET name = %s, description = %s, updated_at = NOW()
-                WHERE id = %s
-                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
-                """,
-                (
-                    request_data.name,
-                    request_data.description,
-                    id
+            if request_data.parent_id is not None:
+                cur.execute(
+                    """
+                    UPDATE test_cases 
+                    SET name = %s, description = %s, parent_id = %s, updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                    """,
+                    (
+                        request_data.name,
+                        request_data.description,
+                        request_data.parent_id,
+                        id
+                    )
                 )
-            )
+            else:
+                cur.execute(
+                    """
+                    UPDATE test_cases 
+                    SET name = %s, description = %s, updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                    """,
+                    (
+                        request_data.name,
+                        request_data.description,
+                        id
+                    )
+                )
             updated_test_case = cur.fetchone()
             conn.commit()
             

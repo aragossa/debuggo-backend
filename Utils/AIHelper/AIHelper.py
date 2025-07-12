@@ -563,12 +563,12 @@ IMPORTANT:
         prompt_length = len(prompt)
         truncated_prompt = prompt[:6000] + "..." if prompt_length > 6000 else prompt
         
-        self.logger.info(f"====== GEMINI REQUEST START ======")
-        self.logger.info(f"Prompt length: {prompt_length} characters")
-        self.logger.info(f"Image included: {'Yes' if image else 'No'}")
-        self.logger.info(f"Text content included: {'Yes' if text_content else 'No'}")
-        self.logger.info(f"Prompt preview: {truncated_prompt}")
-        self.logger.info(f"====== GEMINI REQUEST END ======")
+        # self.logger.info(f"====== GEMINI REQUEST START ======")
+        # self.logger.info(f"Prompt length: {prompt_length} characters")
+        # self.logger.info(f"Image included: {'Yes' if image else 'No'}")
+        # self.logger.info(f"Text content included: {'Yes' if text_content else 'No'}")
+        # self.logger.info(f"Prompt preview: {truncated_prompt}")
+        # self.logger.info(f"====== GEMINI REQUEST END ======")
         
         # Get the model ID from the database
         model_id = self._get_model_id()
