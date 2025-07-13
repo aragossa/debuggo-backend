@@ -3259,6 +3259,147 @@ async def set_user_ai_model(
         if conn:
             return_db_connection(conn)
 
+from models.contact import ContactRequest, ContactRequestResponse
+
+# Contact Request Endpoints
+
+@app.post("/api/contact", response_model=dict)
+async def submit_contact_request(
+    request_data: ContactRequest,
+):
+    """
+    Submit a contact request from the landing page.
+    This endpoint is public and does not require authentication.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Insert the contact request
+        cursor.execute(
+            """
+            INSERT INTO contact_requests (name, message)
+            VALUES (%s, %s)
+            RETURNING id
+            """,
+            (request_data.name, request_data.message)
+        )
+        
+        new_id = cursor.fetchone()[0]
+        conn.commit()
+        
+        return {"success": True, "id": new_id, "message": "Contact request submitted successfully"}
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error submitting contact request: {str(e)}")
+        logging.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "message": f"Error submitting contact request: {str(e)}"}
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
+@app.get("/api/contact-requests", response_model=List[dict])
+async def get_contact_requests(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all contact requests.
+    This endpoint is only accessible to admin users.
+    """
+    # Check if user is admin
+    check_admin_role(current_user)
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Get all contact requests
+        cursor.execute(
+            """
+            SELECT id, name, message, created_at, status
+            FROM contact_requests
+            ORDER BY created_at DESC
+            """
+        )
+        
+        contact_requests = []
+        for row in cursor.fetchall():
+            contact_requests.append({
+                "id": row["id"],
+                "name": row["name"],
+                "message": row["message"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "status": row["status"]
+            })
+        
+        return contact_requests
+    except Exception as e:
+        logging.error(f"Error getting contact requests: {str(e)}")
+        logging.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error getting contact requests: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
+@app.put("/api/contact-requests/{request_id}", response_model=dict)
+async def update_contact_request_status(
+    request_id: int,
+    status_data: dict = Body(..., example={"status": "resolved"}),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the status of a contact request.
+    This endpoint is only accessible to admin users.
+    """
+    # Check if user is admin
+    check_admin_role(current_user)
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Update the contact request status
+        cursor.execute(
+            """
+            UPDATE contact_requests
+            SET status = %s
+            WHERE id = %s
+            RETURNING id
+            """,
+            (status_data.get("status"), request_id)
+        )
+        
+        updated = cursor.fetchone()
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Contact request with ID {request_id} not found"
+            )
+        
+        conn.commit()
+        
+        return {"success": True, "message": "Contact request status updated successfully"}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error updating contact request status: {str(e)}")
+        logging.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating contact request status: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
