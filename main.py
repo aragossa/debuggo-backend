@@ -49,6 +49,12 @@ from Utils.Connectors.db_utils import get_db_connection, return_db_connection, i
 # Initialize connection pool
 db_pool = None
 
+# Define a model for session information response
+class SessionInfo(BaseModel):
+    session_id: Optional[str] = None
+    vnc_port: Optional[int] = None
+    vnc_url: Optional[str] = None
+
 class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
     value: Optional[str] = None
@@ -649,6 +655,37 @@ async def generate_steps(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate test steps: {str(e)}"
+        )
+
+@app.get("/api/test-cases/{id}/session-info", response_model=SessionInfo)
+async def get_session_info(id: int, current_user: User = Depends(get_current_user)):
+    """
+    Get the Selenium Grid session information for a specific test case.
+    This includes the session ID and VNC URL for viewing the browser session.
+    """
+    try:
+        # Get the TestRunner instance for this test case
+        runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
+        
+        # Get the session information
+        session_info = runner.get_session_info()
+        
+        if not session_info:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "No active browser session found for this test case"}
+            )
+        
+        return SessionInfo(
+            session_id=session_info["session_id"],
+            vnc_port=session_info["vnc_port"],
+            vnc_url=session_info["vnc_url"]
+        )
+    except Exception as e:
+        print(f"Error getting session info: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Failed to get session information: {str(e)}"}
         )
 
 @app.post("/api/confirm_generate_steps/{id}", response_model=Dict)

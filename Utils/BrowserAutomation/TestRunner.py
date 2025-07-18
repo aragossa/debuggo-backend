@@ -197,6 +197,36 @@ class TestRunner:
             finally:
                 self.browser = None
                 self.logger.info(f"[PID:{pid}] Browser instance set to None")
+                
+    def get_session_info(self):
+        """Get the Selenium Grid session ID and VNC information"""
+        if not self.browser:
+            return None
+            
+        session_id = getattr(self.browser, 'session_id', None)
+        if not session_id:
+            return None
+            
+        # For Selenium Grid with VNC support, we need to map the session to a VNC port
+        # The standard mapping is to use ports 7900-7903 for the 4 nodes
+        # We'll use a simple round-robin approach based on the session ID
+        try:
+            # Use the last character of the session ID to determine the VNC port
+            # This is a simple approach and might need to be adjusted based on your Grid setup
+            last_char = session_id[-1]
+            port_index = int(last_char, 16) % 4  # Convert hex to int and get modulo 4
+            vnc_port = 7900 + port_index
+            
+            return {
+                "session_id": session_id,
+                "vnc_port": vnc_port,
+                "vnc_url": f"http://localhost:{vnc_port}",
+                "user_id": self.user_id,
+                "test_case_id": self.test_case_id
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting VNC information: {str(e)}")
+            return None
 
     def _setup_logger(self):
         logger = logging.getLogger('TestRunner')

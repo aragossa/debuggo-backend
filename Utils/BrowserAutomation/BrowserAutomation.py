@@ -25,6 +25,7 @@ class BrowserAutomation:
         self.driver = None
         self.logger = self._setup_logger()
         self.pid = os.getpid()  # Initialize pid before setup_driver
+        self.session_id = None  # Track the Selenium Grid session ID
         self.setup_driver(headless)
         self.env = EnvHelper()
 
@@ -72,8 +73,11 @@ class BrowserAutomation:
                 options=chrome_options
             )
             
+            # Store the session ID for VNC access
+            self.session_id = self.driver.session_id
+            self.logger.info(f"[PID:{self.pid}] Successfully connected to Selenium Grid with session ID: {self.session_id}")
+            
             self.driver.implicitly_wait(5)
-            self.logger.info(f"[PID:{self.pid}] Successfully connected to Selenium Grid")
 
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to connect to Selenium Grid: {str(e)}")
