@@ -7,6 +7,7 @@ from models.crud import get_or_create_oauth_user
 from Utils.auth import create_access_token
 from Utils.Connectors.db_utils import get_db_connection, return_db_connection
 import secrets
+import os
 
 router = APIRouter()
 
@@ -94,7 +95,7 @@ async def auth_google_callback(request: Request):
             )
             
             # Redirect to frontend with token
-            frontend_url = request.headers.get("referer", "http://localhost:3000")
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
             redirect_url = f"{frontend_url}?token={access_token}"
             return RedirectResponse(url=redirect_url)
             
