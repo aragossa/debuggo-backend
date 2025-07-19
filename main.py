@@ -3,8 +3,10 @@ import uuid
 import json
 from datetime import timedelta
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status, Form, File, UploadFile, BackgroundTasks, Body, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Form, BackgroundTasks, Response, Query, File, UploadFile, Body
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
 from typing import Dict, List, Optional
@@ -23,7 +25,7 @@ import logging
 import traceback
 from pathlib import Path
 import requests
-from models.user import User, UserCreate, UserLogin, Token
+from models.user import User, UserCreate, UserLogin, Token, OAuthUserInfo
 from models.client import Client, ClientCreate
 from models.test import GenerateStepsRequest
 from Utils.System import System
@@ -39,6 +41,7 @@ from Utils.auth import (
     ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
+from Utils.oauth import oauth, google, get_user_info_from_google
 from models.crud import create_user, get_user_by_email, get_client_test_cases
 from fetch_test_steps import get_test_data_from_db_helper
 from test_case_builder import get_tests_tree, build_tree
@@ -205,11 +208,18 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add SessionMiddleware for OAuth
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+# Include OAuth routes
+from routes.oauth_routes import router as oauth_router
+app.include_router(oauth_router, prefix="/api", tags=["oauth"])
 
 def get_db_dependencies():
     return {
@@ -1210,7 +1220,11 @@ async def create_project(
     
     # If user is not admin, force client_id to current user's client
     if current_user.role == 'user':
-        project_data["client_id"] = str(current_user.client_id)
+        # Handle None client_id properly
+        if current_user.client_id is None:
+            project_data["client_id"] = None
+        else:
+            project_data["client_id"] = str(current_user.client_id)
     elif not project_data.get("client_id"):
         # For admins, client_id must be provided
         raise HTTPException(
