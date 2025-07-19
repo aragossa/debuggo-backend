@@ -375,6 +375,8 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
         with conn.cursor() as cur:
             # Convert UUID to string for the query
             client_id = str(current_user.client_id) if current_user.client_id else None
+            # Get project_id from request query params if available
+            project_id = None
             
             if current_user.role == 'admin':
                 cur.execute(
@@ -439,7 +441,7 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                     WHERE c.id = %s
                     ORDER BY t.parent_id NULLS FIRST, t."order"
                     """,
-                    (client_id, current_user.client_id, client_id, current_user.client_id, client_id)
+                    (client_id, project_id, client_id, project_id, client_id)
                 )
 
             rows = cur.fetchall()
