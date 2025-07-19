@@ -1,16 +1,19 @@
 from pydantic import BaseModel, EmailStr, UUID4
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any
 from datetime import datetime
 
 class UserBase(BaseModel):
     email: EmailStr
     full_name: Optional[str] = None
+    auth_provider: Optional[str] = None  # 'google', 'password', etc.
+    auth_provider_id: Optional[str] = None  # External ID from auth provider
+    profile_picture: Optional[str] = None  # URL to profile picture
 
     class Config:
         from_attributes = True
 
 class UserCreate(UserBase):
-    password: str
+    password: Optional[str] = None  # Optional for OAuth users
     client_id: Optional[UUID4] = None
     role: Optional[Literal['admin', 'user']] = 'user'
 
@@ -35,6 +38,15 @@ class User(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user_info: Optional[Dict[str, Any]] = None  # Additional user info for frontend
 
     class Config:
         from_attributes = True
+
+
+class OAuthUserInfo(BaseModel):
+    email: EmailStr
+    full_name: Optional[str] = None
+    auth_provider: str
+    auth_provider_id: str
+    profile_picture: Optional[str] = None

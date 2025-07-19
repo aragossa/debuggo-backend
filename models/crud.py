@@ -1,7 +1,8 @@
 from typing import Optional
 from datetime import datetime
+import uuid
 from models.client import Client, ClientCreate
-from models.user import User, UserCreate
+from models.user import User, UserCreate, OAuthUserInfo
 from psycopg2.extras import DictCursor
 from fastapi import HTTPException, status
 from Utils.auth import get_password_hash
@@ -79,7 +80,8 @@ def get_user_by_email(conn, email: str) -> Optional[User]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, email, full_name, is_active, created_at, last_login, client_id, role
+            SELECT id, email, full_name, is_active, created_at, last_login, client_id, role,
+                   auth_provider, auth_provider_id, profile_picture
             FROM users WHERE email = %s
             """,
             (email,)
@@ -96,8 +98,138 @@ def get_user_by_email(conn, email: str) -> Optional[User]:
             created_at=user_data[4],
             last_login=user_data[5],
             client_id=user_data[6],
-            role=user_data[7]
+            role=user_data[7],
+            auth_provider=user_data[8],
+            auth_provider_id=user_data[9],
+            profile_picture=user_data[10]
         )
+
+def get_or_create_oauth_user(conn, user_info: OAuthUserInfo) -> User:
+    """Get an existing OAuth user or create a new one"""
+    with conn.cursor() as cur:
+        # Check if user already exists with this provider and provider_id
+        cur.execute(
+            """
+            SELECT id, email, full_name, is_active, created_at, last_login, client_id, role,
+                   auth_provider, auth_provider_id, profile_picture
+            FROM users 
+            WHERE email = %s AND auth_provider = %s
+            """,
+            (user_info.email, user_info.auth_provider)
+        )
+        user_data = cur.fetchone()
+        
+        if user_data is not None:
+            # Update user information if needed
+            cur.execute(
+                """
+                UPDATE users 
+                SET full_name = %s, profile_picture = %s, last_login = CURRENT_TIMESTAMP
+                WHERE id = %s
+                RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role,
+                          auth_provider, auth_provider_id, profile_picture
+                """,
+                (user_info.full_name, user_info.profile_picture, user_data[0])
+            )
+            updated_user = cur.fetchone()
+            conn.commit()
+            
+            # If user doesn't have a client, create one
+            if updated_user[6] is None:  # client_id is None
+                client_id = create_client_for_user(conn, updated_user[1], updated_user[2])
+                
+                # Update user with new client_id
+                cur.execute(
+                    """
+                    UPDATE users 
+                    SET client_id = %s
+                    WHERE id = %s
+                    RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role,
+                              auth_provider, auth_provider_id, profile_picture
+                    """,
+                    (client_id, updated_user[0])
+                )
+                updated_user = cur.fetchone()
+                conn.commit()
+            
+            return User(
+                id=updated_user[0],
+                email=updated_user[1],
+                full_name=updated_user[2],
+                is_active=updated_user[3],
+                created_at=updated_user[4],
+                last_login=updated_user[5],
+                client_id=updated_user[6],
+                role=updated_user[7],
+                auth_provider=updated_user[8],
+                auth_provider_id=updated_user[9],
+                profile_picture=updated_user[10]
+            )
+        
+        # Create new user
+        cur.execute(
+            """
+            INSERT INTO users 
+            (email, full_name, is_active, auth_provider, auth_provider_id, profile_picture, role)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role,
+                      auth_provider, auth_provider_id, profile_picture
+            """,
+            (user_info.email, user_info.full_name, True, 
+             user_info.auth_provider, user_info.auth_provider_id, user_info.profile_picture, 'user')
+        )
+        new_user = cur.fetchone()
+        conn.commit()
+        
+        # Create a client for the new user
+        client_id = create_client_for_user(conn, new_user[1], new_user[2])
+        
+        # Update user with new client_id
+        cur.execute(
+            """
+            UPDATE users 
+            SET client_id = %s
+            WHERE id = %s
+            RETURNING id, email, full_name, is_active, created_at, last_login, client_id, role,
+                      auth_provider, auth_provider_id, profile_picture
+            """,
+            (client_id, new_user[0])
+        )
+        updated_user = cur.fetchone()
+        conn.commit()
+        
+        return User(
+            id=updated_user[0],
+            email=updated_user[1],
+            full_name=updated_user[2],
+            is_active=updated_user[3],
+            created_at=updated_user[4],
+            last_login=updated_user[5],
+            client_id=updated_user[6],
+            role=updated_user[7],
+            auth_provider=updated_user[8],
+            auth_provider_id=updated_user[9],
+            profile_picture=updated_user[10]
+        )
+
+def create_client_for_user(conn, email: str, full_name: str = None) -> str:
+    """Create a new client for a user and return the client_id"""
+    client_name = full_name or email.split('@')[0]
+    client_id = str(uuid.uuid4())
+    
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO clients (id, name, created_at, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            (client_id, client_name)
+        )
+        client_id = cur.fetchone()[0]
+        conn.commit()
+    
+    return client_id
 
 def get_client_test_cases(conn, client_id: str):
     with conn.cursor(cursor_factory=DictCursor) as cur:
