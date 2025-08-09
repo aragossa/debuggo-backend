@@ -109,6 +109,6 @@ class TextAnalyzer(AIHelper):
 
     def analyze_txt(self, file_content: bytes, client_id: int = None, project_id: str = None):
         text = file_content.decode('utf-8')
-        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_txt_promt(), text=text)
+        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_txt_promt(text), text_content=text)
         self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True
