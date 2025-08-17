@@ -140,6 +140,7 @@ origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:8080",
+    "http://127.0.0.1:9000",
     "http://18.184.65.241",
     "http://95.217.211.91",
     "http://auroqa.com",
@@ -2705,6 +2706,75 @@ async def get_test_step_screenshot(
                 status_code=500,
                 detail=f"Failed to retrieve screenshot: {str(e)}"
             )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/test_run/{run_id}/steps")
+async def get_test_run_steps(
+    run_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Retrieve all steps for a specific test run with their execution details.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # First verify that the test run belongs to the current user's client
+            cursor.execute(
+                """
+                SELECT tr.id 
+                FROM test_runs tr
+                JOIN test_cases tc ON tr.test_case_id = tc.id
+                WHERE tr.id = %s AND tc.client_id = %s
+                """,
+                (run_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Test run not found or you don't have permission to access it"
+                )
+            
+            # Get the test case ID for this run
+            cursor.execute(
+                "SELECT test_case_id FROM test_runs WHERE id = %s",
+                (run_id,)
+            )
+            test_case_id = cursor.fetchone()[0]
+            
+            # Get all steps for this test case with their screenshot info
+            cursor.execute(
+                """
+                SELECT ts.id, ts.step_order, ts.description, ts.action, ts.element_path, ts.value,
+                       CASE WHEN s.id IS NOT NULL THEN true ELSE false END as has_screenshot
+                FROM test_steps ts
+                LEFT JOIN screenshots s ON ts.id = s.test_step_id
+                WHERE ts.test_case_id = %s
+                ORDER BY ts.step_order
+                """,
+                (test_case_id,)
+            )
+            steps = []
+            for row in cursor.fetchall():
+                steps.append({
+                    "id": row[0],
+                    "step_order": row[1],
+                    "description": row[2],
+                    "action": row[3],
+                    "element_path": row[4],
+                    "value": row[5],
+                    "has_screenshot": row[6]
+                })
+            
+            return {"steps": steps, "test_case_id": test_case_id, "run_id": run_id}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve test run steps: {str(e)}"
+        )
     finally:
         if conn:
             return_db_connection(conn)
