@@ -4,11 +4,10 @@ import json
 from datetime import timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status, Request, Form, BackgroundTasks, Response, Query, File, UploadFile, Body
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import JSONResponse
 from typing import Dict, List, Optional
 from pydantic import BaseModel, UUID4
 from datetime import datetime
@@ -2676,6 +2675,7 @@ async def get_test_step_screenshot(
             
             # If not found in new system, try old screenshots table
             if not result:
+                # Try old system
                 cursor.execute(
                     """
                     SELECT screenshot, description
@@ -2688,44 +2688,54 @@ async def get_test_step_screenshot(
                 result = cursor.fetchone()
                 
                 if not result:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="No screenshot found for this test step"
-                    )
+                    # Return JSON response indicating no screenshot available
+                    return JSONResponse(content={
+                        "screenshot_available": False,
+                        "message": "No screenshot found for this test step"
+                    })
                 
-                # Handle old system format
+                # Handle old system format - convert blob to base64 if needed
                 screenshot_data = result[0]
                 if isinstance(screenshot_data, memoryview):
                     screenshot_data = bytes(screenshot_data)
                 
                 if isinstance(screenshot_data, bytes):
-                    screenshot_data = screenshot_data.decode('utf-8')
-                
-                screenshot_dict = {
-                    "screenshot": screenshot_data,
-                    "description": result[1] if result[1] is not None else "Screenshot"
-                }
+                    # This is binary data, decode as base64
+                    import base64
+                    screenshot_base64 = base64.b64encode(screenshot_data).decode('utf-8')
+                else:
+                    # This is already base64 string
+                    screenshot_base64 = screenshot_data
             else:
-                # Handle new system format
-                screenshot_dict = {
-                    "screenshot": result[0],
-                    "description": result[1] if result[1] else "Step execution screenshot"
-                }
+                # Handle new system format - result[0] is base64 string
+                screenshot_base64 = result[0]
             
-            # Return the dictionary directly
-            return JSONResponse(content=screenshot_dict)
+            # Decode base64 to binary data for FileResponse
+            import base64
+            import io
+            try:
+                screenshot_binary = base64.b64decode(screenshot_base64)
+                # Create a BytesIO object to serve as file-like object
+                screenshot_io = io.BytesIO(screenshot_binary)
+                
+                # Return StreamingResponse with the image data
+                return StreamingResponse(
+                    io.BytesIO(screenshot_binary),
+                    media_type="image/png",
+                    headers={"Content-Disposition": "inline; filename=screenshot.png"}
+                )
+            except Exception as decode_error:
+                logger.error(f"Error decoding base64 screenshot: {decode_error}")
+                return JSONResponse(content={
+                    "screenshot_available": False,
+                    "message": "Error decoding screenshot data"
+                })
     except Exception as e:
-        # Check if the error is related to the screenshot not being found
-        if "No screenshot found" in str(e) or "screenshot" in str(e).lower():
-            raise HTTPException(
-                status_code=404,
-                detail=f"No screenshot found for this test step: {str(e)}"
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to retrieve screenshot: {str(e)}"
-            )
+        # Return JSON response indicating error
+        return JSONResponse(content={
+            "screenshot_available": False,
+            "message": f"Error retrieving screenshot: {str(e)}"
+        })
     finally:
         if conn:
             return_db_connection(conn)
