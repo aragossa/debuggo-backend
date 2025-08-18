@@ -425,7 +425,7 @@ class TestRunner:
 
     def run_test_case(self, test_case_id: int, environment_vars=None):
         """
-        Run a complete test case
+        Run a complete test case with step-by-step result tracking
 
         Args:
             test_case_id: ID of the test case to run
@@ -459,8 +459,15 @@ class TestRunner:
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         
+        # Create test run record and get test_run_id
+        test_run_id = None
+        step_execution_results = []
+        
         with self._test_case_lock(test_case_id):
             try:
+                # Clean up any orphaned running steps before starting
+                self._cleanup_orphaned_running_steps()
+                
                 # Initialize browser using our ensure method instead of direct initialization
                 self.logger.info(f"[PID:{pid}] Ensuring browser is initialized for test case {test_case_id}")
                 self._ensure_browser_initialized()
@@ -470,27 +477,114 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Retrieving test steps")
                 steps = self._get_test_steps(test_case_id)
                 
+                # Create initial test run record
+                test_run_id = self._create_test_run(test_case_id, "running")
+                self.logger.info(f"[PID:{pid}] Created test run record with ID: {test_run_id}")
+                
                 self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
                 self.browser.navigate(url=env.base_url)
                 
                 self.logger.info(f"[PID:{pid}] Starting test step execution")
+                step_order = 1
+                
                 for step in steps:
                     # Check if we should stop execution
                     if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
                         self.logger.info(f"[PID:{pid}] Stopping test case execution as requested for test case {test_case_id}")
+                        
+                        # Mark remaining steps as skipped
+                        for remaining_step in steps[step_order-1:]:
+                            remaining_step_id = remaining_step[0]
+                            self._log_step_execution_result(
+                                test_run_id, remaining_step_id, step_order, "skipped",
+                                error_message="Test execution stopped by user"
+                            )
+                            step_order += 1
+                        
                         duration = (datetime.now() - start_time).total_seconds()
-                        self._log_test_run(test_case_id, "stopped", duration=duration)
-                        return {"status": "stopped", "message": "Test execution stopped by user", "duration": duration}
+                        self._update_test_run(test_run_id, "stopped", duration=duration)
+                        return {
+                            "status": "stopped", 
+                            "message": "Test execution stopped by user", 
+                            "duration": duration,
+                            "test_run_id": test_run_id,
+                            "step_results": self._get_step_execution_results(test_run_id)
+                        }
                     
                     step_id, action, element_path, description, expected_result, value, path_type = step
-                    self.logger.info(f"[PID:{pid}] Executing step {step_id}: {action}")
+                    self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
+                    
+                    # Record step start
+                    step_start_time = datetime.now()
+                    step_result_id = self._log_step_execution_result(
+                        test_run_id, step_id, step_order, "running"
+                    )
                     
                     try:
                         self.execute_step(action, element_path, value, path_type, env)
+                        
+                        # Take screenshot after successful step execution
+                        screenshot_path = None
+                        screenshot_base64 = None
+                        try:
+                            screenshot_path = self.browser.take_screenshot(f"step_{step_order}_success")
+                            # Convert screenshot to base64 for database storage
+                            if screenshot_path and os.path.exists(screenshot_path):
+                                with open(screenshot_path, "rb") as img_file:
+                                    screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                        except Exception as screenshot_error:
+                            self.logger.warning(f"[PID:{pid}] Failed to capture screenshot for step {step_id}: {screenshot_error}")
+                        
+                        # Calculate execution time
+                        execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                        
+                        # Update step result as passed
+                        self._update_step_execution_result(
+                            step_result_id, "passed", 
+                            screenshot_path=screenshot_path,
+                            screenshot_base64=screenshot_base64,
+                            execution_time_ms=execution_time_ms
+                        )
+                        
+                        self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
+                        
                     except AssertionError as assertion_error:
                         # Capture assertion failures specifically
                         error_message = str(assertion_error)
                         self.logger.error(f"[PID:{pid}] Assertion failed in step {step_id}: {error_message}")
+                        
+                        # Take screenshot on failure
+                        screenshot_path = None
+                        screenshot_base64 = None
+                        try:
+                            screenshot_path = self.browser.take_screenshot(f"step_{step_order}_assertion_failed")
+                            if screenshot_path and os.path.exists(screenshot_path):
+                                with open(screenshot_path, "rb") as img_file:
+                                    screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                        except Exception as screenshot_error:
+                            self.logger.warning(f"[PID:{pid}] Failed to capture error screenshot: {screenshot_error}")
+                        
+                        # Calculate execution time
+                        execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                        
+                        # Update step result as failed
+                        self._update_step_execution_result(
+                            step_result_id, "failed",
+                            error_message=error_message,
+                            screenshot_path=screenshot_path,
+                            screenshot_base64=screenshot_base64,
+                            execution_time_ms=execution_time_ms
+                        )
+                        
+                        # Mark remaining steps as skipped
+                        remaining_step_order = step_order + 1
+                        for remaining_step in steps[step_order:]:
+                            remaining_step_id = remaining_step[0]
+                            self._log_step_execution_result(
+                                test_run_id, remaining_step_id, remaining_step_order, "skipped",
+                                error_message="Skipped due to previous step failure"
+                            )
+                            remaining_step_order += 1
                         
                         # Get stack trace for detailed error info
                         import traceback
@@ -501,9 +595,8 @@ class TestRunner:
                         stdout_content = stdout_capture.getvalue()
                         stderr_content = stderr_capture.getvalue() + f"\nAssertion Error in step {step_id}: {error_message}\n{stack_trace}"
                         
-                        self._log_test_run(
-                            test_case_id, 
-                            "failure", 
+                        self._update_test_run(
+                            test_run_id, "failure", 
                             exception=error_message,
                             duration=duration,
                             stdout=stdout_content,
@@ -522,12 +615,48 @@ class TestRunner:
                             "status": "failure", 
                             "error": error_message, 
                             "step_id": step_id,
-                            "duration": duration
+                            "duration": duration,
+                            "test_run_id": test_run_id,
+                            "step_results": self._get_step_execution_results(test_run_id)
                         }
+                        
                     except Exception as step_error:
                         # Handle other exceptions during step execution
                         error_message = str(step_error)
                         self.logger.error(f"[PID:{pid}] Error in step {step_id}: {error_message}")
+                        
+                        # Take screenshot on error
+                        screenshot_path = None
+                        screenshot_base64 = None
+                        try:
+                            screenshot_path = self.browser.take_screenshot(f"step_{step_order}_error")
+                            if screenshot_path and os.path.exists(screenshot_path):
+                                with open(screenshot_path, "rb") as img_file:
+                                    screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                        except Exception as screenshot_error:
+                            self.logger.warning(f"[PID:{pid}] Failed to capture error screenshot: {screenshot_error}")
+                        
+                        # Calculate execution time
+                        execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                        
+                        # Update step result as failed
+                        self._update_step_execution_result(
+                            step_result_id, "failed",
+                            error_message=error_message,
+                            screenshot_path=screenshot_path,
+                            screenshot_base64=screenshot_base64,
+                            execution_time_ms=execution_time_ms
+                        )
+                        
+                        # Mark remaining steps as skipped
+                        remaining_step_order = step_order + 1
+                        for remaining_step in steps[step_order:]:
+                            remaining_step_id = remaining_step[0]
+                            self._log_step_execution_result(
+                                test_run_id, remaining_step_id, remaining_step_order, "skipped",
+                                error_message="Skipped due to previous step failure"
+                            )
+                            remaining_step_order += 1
                         
                         # Get stack trace for detailed error info
                         import traceback
@@ -538,9 +667,8 @@ class TestRunner:
                         stdout_content = stdout_capture.getvalue()
                         stderr_content = stderr_capture.getvalue() + f"\nError in step {step_id}: {error_message}\n{stack_trace}"
                         
-                        self._log_test_run(
-                            test_case_id, 
-                            "failure", 
+                        self._update_test_run(
+                            test_run_id, "failure", 
                             exception=error_message,
                             duration=duration,
                             stdout=stdout_content,
@@ -559,13 +687,17 @@ class TestRunner:
                             "status": "error", 
                             "error": error_message, 
                             "step_id": step_id,
-                            "duration": duration
+                            "duration": duration,
+                            "test_run_id": test_run_id,
+                            "step_results": self._get_step_execution_results(test_run_id)
                         }
+                    
+                    step_order += 1
 
                 # Calculate duration and log success
                 duration = (datetime.now() - start_time).total_seconds()
                 stdout_content = stdout_capture.getvalue()
-                self._log_test_run(test_case_id, "success", duration=duration, stdout=stdout_content)
+                self._update_test_run(test_run_id, "success", duration=duration, stdout=stdout_content)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
                 
                 # Clean up Redis flags
@@ -576,7 +708,12 @@ class TestRunner:
                 except Exception as e:
                     self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {e}")
                 
-                return {"status": "success", "duration": duration}
+                return {
+                    "status": "success", 
+                    "duration": duration,
+                    "test_run_id": test_run_id,
+                    "step_results": self._get_step_execution_results(test_run_id)
+                }
 
             except Exception as e:
                 duration = (datetime.now() - start_time).total_seconds()
@@ -587,18 +724,64 @@ class TestRunner:
                 import traceback
                 stack_trace = traceback.format_exc()
                 
+                # CRITICAL FIX: Update any steps that are still in "running" status
+                if test_run_id:
+                    try:
+                        self.logger.warning(f"[PID:{pid}] Updating any running steps to failed due to test case exception")
+                        with self.get_db_connection() as connection:
+                            with connection.cursor() as cursor:
+                                # Find all running steps for this test run
+                                cursor.execute(
+                                    """
+                                    SELECT id, test_step_id, step_order, started_at
+                                    FROM test_step_execution_results 
+                                    WHERE test_run_id = %s AND status = 'running'
+                                    """,
+                                    (test_run_id,)
+                                )
+                                running_steps = cursor.fetchall()
+                                
+                                # Update each running step to failed
+                                for step_result_id, step_id, step_order, started_at in running_steps:
+                                    execution_time_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                                    cursor.execute(
+                                        """
+                                        UPDATE test_step_execution_results 
+                                        SET status = %s, error_message = %s, execution_time_ms = %s, completed_at = %s
+                                        WHERE id = %s
+                                        """,
+                                        ("failed", f"Test case failed with exception: {error_message}", 
+                                         execution_time_ms, datetime.now(), step_result_id)
+                                    )
+                                    self.logger.info(f"[PID:{pid}] Updated step {step_id} (order {step_order}) from running to failed")
+                                
+                                connection.commit()
+                                if running_steps:
+                                    self.logger.info(f"[PID:{pid}] Updated {len(running_steps)} running steps to failed status")
+                    except Exception as update_error:
+                        self.logger.error(f"[PID:{pid}] Failed to update running steps: {update_error}")
+                
                 # Log the test run as a failure
                 stdout_content = stdout_capture.getvalue()
                 stderr_content = stderr_capture.getvalue() + f"\nTest case error: {error_message}\n{stack_trace}"
                 
-                self._log_test_run(
-                    test_case_id, 
-                    "failure", 
-                    exception=error_message,
-                    duration=duration,
-                    stdout=stdout_content,
-                    stderr=stderr_content
-                )
+                if test_run_id:
+                    self._update_test_run(
+                        test_run_id, "failure", 
+                        exception=error_message,
+                        duration=duration,
+                        stdout=stdout_content,
+                        stderr=stderr_content
+                    )
+                else:
+                    self._log_test_run(
+                        test_case_id, 
+                        "failure", 
+                        exception=error_message,
+                        duration=duration,
+                        stdout=stdout_content,
+                        stderr=stderr_content
+                    )
                 
                 # Clean up Redis flags
                 try:
@@ -608,7 +791,13 @@ class TestRunner:
                 except Exception as redis_error:
                     self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {redis_error}")
                 
-                return {"status": "error", "error": error_message, "duration": duration}
+                return {
+                    "status": "error", 
+                    "error": error_message, 
+                    "duration": duration,
+                    "test_run_id": test_run_id,
+                    "step_results": self._get_step_execution_results(test_run_id) if test_run_id else []
+                }
 
             finally:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
@@ -662,13 +851,16 @@ class TestRunner:
             with self._test_case_lock(test_case_id):
                 self.logger.info(f"[PID:{pid}] Acquired process lock for test case {test_case_id}")
                 
+                # Clean up any orphaned running steps before starting
+                self._cleanup_orphaned_running_steps()
+                
                 # Initialize browser using our ensure method
                 self._ensure_browser_initialized()
                 self.logger.info(f"[PID:{pid}] Ensured browser is initialized for test case {test_case_id}")
                 
-                # Get test case details
-                test_name, test_description = self._get_test_case(test_case_id)
-                self.logger.info(f"[PID:{pid}] Test case: {test_name}")
+                # Log the test run start
+                test_run_id = self._log_test_run(test_case_id, "running")
+                self.logger.info(f"[PID:{pid}] Logged test run {test_run_id} as running")
                 
                 # Create environment helper
                 env = EnvHelper(environment_vars or {})
@@ -1212,40 +1404,221 @@ class TestRunner:
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
             raise
-        
-        finally:
-            # Record end time
-            end_time = datetime.now()
-            
-            # Update the test case with the end time
+
+    def _create_test_run(self, test_case_id: int, status: str = "running"):
+        """Create a new test run record and return the test_run_id"""
+        try:
+            connection = get_db_connection()
             try:
-                with self.get_db_connection() as connection:
-                    with connection.cursor() as cursor:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO test_runs (test_case_id, result, run_date)
+                        VALUES (%s, %s, %s)
+                        RETURNING id
+                        """,
+                        (test_case_id, status, datetime.now())
+                    )
+                    test_run_id = cursor.fetchone()[0]
+                    connection.commit()
+                    return test_run_id
+            finally:
+                return_db_connection(connection)
+        except Exception as e:
+            self.logger.error(f"Failed to create test run: {e}")
+            raise
+
+    def _update_test_run(self, test_run_id: int, status: str, exception: str = None, 
+                        duration: float = None, stdout: str = None, stderr: str = None):
+        """Update an existing test run record"""
+        try:
+            connection = get_db_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE test_runs 
+                        SET result = %s, exception = %s, duration = %s, stdout = %s, stderr = %s
+                        WHERE id = %s
+                        """,
+                        (status, exception, duration, stdout, stderr, test_run_id)
+                    )
+                    connection.commit()
+            finally:
+                return_db_connection(connection)
+        except Exception as e:
+            self.logger.error(f"Failed to update test run {test_run_id}: {e}")
+
+    def _log_step_execution_result(self, test_run_id: int, test_step_id: int, step_order: int, 
+                                  status: str, error_message: str = None, screenshot_path: str = None,
+                                  screenshot_base64: str = None, execution_time_ms: int = None):
+        """Log a step execution result and return the result ID"""
+        try:
+            connection = get_db_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO test_step_execution_results 
+                        (test_run_id, test_step_id, step_order, status, error_message, 
+                         screenshot_path, screenshot_base64, execution_time_ms, started_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (test_run_id, test_step_id, step_order, status, error_message,
+                         screenshot_path, screenshot_base64, execution_time_ms, datetime.now())
+                    )
+                    result_id = cursor.fetchone()[0]
+                    connection.commit()
+                    return result_id
+            finally:
+                return_db_connection(connection)
+        except Exception as e:
+            self.logger.error(f"Failed to log step execution result: {e}")
+            return None
+
+    def _update_step_execution_result(self, result_id: int, status: str, error_message: str = None,
+                                     screenshot_path: str = None, screenshot_base64: str = None,
+                                     execution_time_ms: int = None):
+        """Update an existing step execution result"""
+        try:
+            connection = get_db_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE test_step_execution_results 
+                        SET status = %s, error_message = %s, screenshot_path = %s, 
+                            screenshot_base64 = %s, execution_time_ms = %s, completed_at = %s
+                        WHERE id = %s
+                        """,
+                        (status, error_message, screenshot_path, screenshot_base64, 
+                         execution_time_ms, datetime.now(), result_id)
+                    )
+                    connection.commit()
+            finally:
+                return_db_connection(connection)
+        except Exception as e:
+            self.logger.error(f"Failed to update step execution result {result_id}: {e}")
+
+    def _cleanup_orphaned_running_steps(self, test_run_id: int = None):
+        """
+        Clean up any steps that have been stuck in 'running' status for more than 5 minutes.
+        This handles cases where the process was killed or crashed unexpectedly.
+        
+        Args:
+            test_run_id: Optional specific test run ID to clean up. If None, cleans all orphaned steps.
+        """
+        try:
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    if test_run_id:
+                        # Clean up specific test run
                         cursor.execute(
                             """
-                            UPDATE test_cases 
-                            SET steps_generation_end_time = %s
-                            WHERE id = %s
+                            SELECT id, test_step_id, step_order, started_at
+                            FROM test_step_execution_results 
+                            WHERE test_run_id = %s AND status = 'running' 
+                            AND started_at < NOW() - INTERVAL '5 minutes'
                             """,
-                            (end_time, test_case_id)
+                            (test_run_id,)
                         )
+                    else:
+                        # Clean up all orphaned steps
+                        cursor.execute(
+                            """
+                            SELECT id, test_step_id, step_order, started_at, test_run_id
+                            FROM test_step_execution_results 
+                            WHERE status = 'running' 
+                            AND started_at < NOW() - INTERVAL '5 minutes'
+                            """
+                        )
+                    
+                    orphaned_steps = cursor.fetchall()
+                    
+                    if orphaned_steps:
+                        self.logger.warning(f"Found {len(orphaned_steps)} orphaned running steps, cleaning up...")
+                        
+                        for row in orphaned_steps:
+                            step_result_id = row[0]
+                            step_id = row[1]
+                            step_order = row[2]
+                            started_at = row[3]
+                            run_id = row[4] if not test_run_id else test_run_id
+                            
+                            execution_time_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                            cursor.execute(
+                                """
+                                UPDATE test_step_execution_results 
+                                SET status = %s, error_message = %s, execution_time_ms = %s, completed_at = %s
+                                WHERE id = %s
+                                """,
+                                ("failed", "Step was orphaned - process may have crashed or been killed", 
+                                 execution_time_ms, datetime.now(), step_result_id)
+                            )
+                            self.logger.info(f"Cleaned up orphaned step {step_id} (order {step_order}) in test run {run_id}")
+                        
                         connection.commit()
-            except Exception as e:
-                self.logger.error(f"[PID:{pid}] Failed to update test case with end time: {e}")
+                        self.logger.info(f"Successfully cleaned up {len(orphaned_steps)} orphaned running steps")
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to clean up orphaned running steps: {e}")
+
+    def _get_step_execution_results(self, test_run_id: int):
+        """
+        Get all step execution results for a test run.
+        
+        Args:
+            test_run_id: ID of the test run
             
-            # Clear the generating status in Redis
-            try:
-                if self._redis:
-                    self._redis.delete(f"test_case_generating:{test_case_id}")
-                    self._redis.delete(f"test_case_current_step:{test_case_id}")
-                    self._redis.delete(f"test_case_next_step:{test_case_id}")
-                    self.logger.info(f"[PID:{pid}] Cleared generation status in Redis for test case {test_case_id}")
-            except Exception as e:
-                self.logger.error(f"[PID:{pid}] Failed to clear generation status in Redis: {e}")
+        Returns:
+            List of step execution results with step details
+        """
+        try:
+            # First clean up any orphaned steps for this test run
+            self._cleanup_orphaned_running_steps(test_run_id)
             
-            # Always clean up resources
-            self._cleanup_browser()
-            self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT tser.id, tser.test_step_id, tser.step_order, tser.status,
+                               tser.error_message, tser.screenshot_path, tser.screenshot_base64,
+                               tser.execution_time_ms, tser.started_at, tser.completed_at,
+                               ts.description, ts.action, ts.element_path, ts.value
+                        FROM test_step_execution_results tser
+                        JOIN test_steps ts ON tser.test_step_id = ts.id
+                        WHERE tser.test_run_id = %s
+                        ORDER BY tser.step_order
+                        """,
+                        (test_run_id,)
+                    )
+                    
+                    results = []
+                    for row in cursor.fetchall():
+                        result = {
+                            'id': row[0],
+                            'test_step_id': row[1],
+                            'step_order': row[2],
+                            'status': row[3],
+                            'error_message': row[4],
+                            'screenshot_path': row[5],
+                            'screenshot_base64': row[6],
+                            'execution_time_ms': row[7],
+                            'started_at': row[8].isoformat() if row[8] else None,
+                            'completed_at': row[9].isoformat() if row[9] else None,
+                            'description': row[10],
+                            'action': row[11],
+                            'element_path': row[12],
+                            'value': row[13]
+                        }
+                        results.append(result)
+                    
+                    return results
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to get step execution results: {e}")
+            return []
 
     def _get_step_history(self, test_case_id: int) -> list:
         """
