@@ -2661,36 +2661,56 @@ async def get_test_step_screenshot(
                     detail="Test step not found or you don't have permission to access it"
                 )
             
-            # Get the screenshot
+            # Get the screenshot from step execution results (new system)
             cursor.execute(
                 """
-                SELECT screenshot, description
-                FROM screenshots
-                WHERE test_step_id = %s
+                SELECT screenshot_base64, error_message
+                FROM test_step_execution_results
+                WHERE test_step_id = %s AND screenshot_base64 IS NOT NULL
+                ORDER BY started_at DESC
                 LIMIT 1
                 """,
                 (step_id,)
             )
             result = cursor.fetchone()
             
+            # If not found in new system, try old screenshots table
             if not result:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No screenshot found for this test step"
+                cursor.execute(
+                    """
+                    SELECT screenshot, description
+                    FROM screenshots
+                    WHERE test_step_id = %s
+                    LIMIT 1
+                    """,
+                    (step_id,)
                 )
-            
-            # Convert the result to a dictionary
-            screenshot_data = result[0]
-            if isinstance(screenshot_data, memoryview):
-                screenshot_data = bytes(screenshot_data)
-            
-            if isinstance(screenshot_data, bytes):
-                screenshot_data = screenshot_data.decode('utf-8')
-            
-            screenshot_dict = {
-                "screenshot": screenshot_data,
-                "description": result[1] if result[1] is not None else "Screenshot"
-            }
+                result = cursor.fetchone()
+                
+                if not result:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="No screenshot found for this test step"
+                    )
+                
+                # Handle old system format
+                screenshot_data = result[0]
+                if isinstance(screenshot_data, memoryview):
+                    screenshot_data = bytes(screenshot_data)
+                
+                if isinstance(screenshot_data, bytes):
+                    screenshot_data = screenshot_data.decode('utf-8')
+                
+                screenshot_dict = {
+                    "screenshot": screenshot_data,
+                    "description": result[1] if result[1] is not None else "Screenshot"
+                }
+            else:
+                # Handle new system format
+                screenshot_dict = {
+                    "screenshot": result[0],
+                    "description": result[1] if result[1] else "Step execution screenshot"
+                }
             
             # Return the dictionary directly
             return JSONResponse(content=screenshot_dict)
@@ -2774,6 +2794,113 @@ async def get_test_run_steps(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve test run steps: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.post("/api/cleanup_orphaned_steps")
+async def cleanup_orphaned_steps(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Clean up any test steps that have been stuck in 'running' status for more than 5 minutes.
+    This handles cases where test execution processes were killed or crashed unexpectedly.
+    """
+    try:
+        from Utils.BrowserAutomation.TestRunner import TestRunner
+        test_runner = TestRunner()
+        test_runner._cleanup_orphaned_running_steps()
+        
+        return {
+            "status": "success",
+            "message": "Orphaned running steps have been cleaned up"
+        }
+    except Exception as e:
+        logger.error(f"Failed to cleanup orphaned steps: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to cleanup orphaned steps: {str(e)}"
+        )
+
+@app.get("/api/test_run/{run_id}/step_execution_results")
+async def get_test_run_step_execution_results(
+    run_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Retrieve detailed step execution results for a specific test run.
+    Includes status, error messages, screenshots, and execution times.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # First verify that the test run belongs to the current user's client
+            cursor.execute(
+                """
+                SELECT tr.id 
+                FROM test_runs tr
+                JOIN test_cases tc ON tr.test_case_id = tc.id
+                WHERE tr.id = %s AND tc.client_id = %s
+                """,
+                (run_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Test run not found or you don't have permission to access it"
+                )
+            
+            # Get step execution results with test step details
+            cursor.execute(
+                """
+                SELECT tser.id, tser.test_step_id, tser.step_order, tser.status,
+                       tser.error_message, tser.screenshot_path, tser.execution_time_ms,
+                       tser.started_at, tser.completed_at,
+                       ts.description, ts.action, ts.element_path, ts.value,
+                       tr.test_case_id
+                FROM test_step_execution_results tser
+                JOIN test_steps ts ON tser.test_step_id = ts.id
+                JOIN test_runs tr ON tser.test_run_id = tr.id
+                WHERE tser.test_run_id = %s
+                ORDER BY tser.step_order
+                """,
+                (run_id,)
+            )
+            
+            step_results = []
+            test_case_id = None
+            for row in cursor.fetchall():
+                if test_case_id is None:
+                    test_case_id = row[13]  # Get test_case_id from first row
+                step_results.append({
+                    "id": row[0],
+                    "test_step_id": row[1],
+                    "step_order": row[2],
+                    "status": row[3],
+                    "error_message": row[4],
+                    "screenshot_path": row[5],
+                    "execution_time_ms": row[6],
+                    "started_at": row[7].isoformat() if row[7] else None,
+                    "completed_at": row[8].isoformat() if row[8] else None,
+                    "description": row[9],
+                    "action": row[10],
+                    "element_path": row[11],
+                    "value": row[12],
+                    "has_screenshot": bool(row[5])
+                })
+            
+            return {
+                "step_results": step_results, 
+                "test_case_id": test_case_id,
+                "run_id": run_id,
+                "total_steps": len(step_results)
+            }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve step execution results: {str(e)}"
         )
     finally:
         if conn:
