@@ -832,6 +832,30 @@ class TestRunner:
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting test step generation for test case {test_case_id}")
         
+        # Get test case details from database
+        test_name = ""
+        test_description = ""
+        try:
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT name, description 
+                        FROM test_cases 
+                        WHERE id = %s
+                        """,
+                        (test_case_id,)
+                    )
+                    result = cursor.fetchone()
+                    if result:
+                        test_name = result[0] or ""
+                        test_description = result[1] or ""
+                        self.logger.info(f"[PID:{pid}] Retrieved test case: {test_name}")
+                    else:
+                        self.logger.warning(f"[PID:{pid}] Test case {test_case_id} not found in database")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to retrieve test case details: {e}")
+        
         # Set the generating status in Redis
         try:
             if self._redis:
