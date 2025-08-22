@@ -494,10 +494,12 @@ class TestRunner:
                         
                         # Mark remaining steps as skipped
                         for remaining_step in steps[step_order-1:]:
-                            remaining_step_id = remaining_step[0]
+                            remaining_step_id, remaining_action, remaining_element_path, remaining_description, remaining_expected_result, remaining_value, remaining_path_type = remaining_step
                             self._log_step_execution_result(
                                 test_run_id, remaining_step_id, step_order, "skipped",
-                                error_message="Test execution stopped by user"
+                                error_message="Test execution stopped by user",
+                                step_description=remaining_description, step_action=remaining_action,
+                                step_element_path=remaining_element_path, step_value=remaining_value
                             )
                             step_order += 1
                         
@@ -517,7 +519,9 @@ class TestRunner:
                     # Record step start
                     step_start_time = datetime.now()
                     step_result_id = self._log_step_execution_result(
-                        test_run_id, step_id, step_order, "running"
+                        test_run_id, step_id, step_order, "running",
+                        step_description=description, step_action=action,
+                        step_element_path=element_path, step_value=value
                     )
                     
                     try:
@@ -579,10 +583,12 @@ class TestRunner:
                         # Mark remaining steps as skipped
                         remaining_step_order = step_order + 1
                         for remaining_step in steps[step_order:]:
-                            remaining_step_id = remaining_step[0]
+                            remaining_step_id, remaining_action, remaining_element_path, remaining_description, remaining_expected_result, remaining_value, remaining_path_type = remaining_step
                             self._log_step_execution_result(
                                 test_run_id, remaining_step_id, remaining_step_order, "skipped",
-                                error_message="Skipped due to previous step failure"
+                                error_message="Skipped due to previous step failure",
+                                step_description=remaining_description, step_action=remaining_action,
+                                step_element_path=remaining_element_path, step_value=remaining_value
                             )
                             remaining_step_order += 1
                         
@@ -651,10 +657,12 @@ class TestRunner:
                         # Mark remaining steps as skipped
                         remaining_step_order = step_order + 1
                         for remaining_step in steps[step_order:]:
-                            remaining_step_id = remaining_step[0]
+                            remaining_step_id, remaining_action, remaining_element_path, remaining_description, remaining_expected_result, remaining_value, remaining_path_type = remaining_step
                             self._log_step_execution_result(
                                 test_run_id, remaining_step_id, remaining_step_order, "skipped",
-                                error_message="Skipped due to previous step failure"
+                                error_message="Skipped due to previous step failure",
+                                step_description=remaining_description, step_action=remaining_action,
+                                step_element_path=remaining_element_path, step_value=remaining_value
                             )
                             remaining_step_order += 1
                         
@@ -1475,7 +1483,9 @@ class TestRunner:
 
     def _log_step_execution_result(self, test_run_id: int, test_step_id: int, step_order: int, 
                                   status: str, error_message: str = None, screenshot_path: str = None,
-                                  screenshot_base64: str = None, execution_time_ms: int = None):
+                                  screenshot_base64: str = None, execution_time_ms: int = None,
+                                  step_description: str = None, step_action: str = None,
+                                  step_element_path: str = None, step_value: str = None):
         """Log a step execution result and return the result ID"""
         try:
             connection = get_db_connection()
@@ -1485,12 +1495,14 @@ class TestRunner:
                         """
                         INSERT INTO test_step_execution_results 
                         (test_run_id, test_step_id, step_order, status, error_message, 
-                         screenshot_path, screenshot_base64, execution_time_ms, started_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         screenshot_path, screenshot_base64, execution_time_ms, started_at,
+                         step_description, step_action, step_element_path, step_value)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
                         (test_run_id, test_step_id, step_order, status, error_message,
-                         screenshot_path, screenshot_base64, execution_time_ms, datetime.now())
+                         screenshot_path, screenshot_base64, execution_time_ms, datetime.now(),
+                         step_description, step_action, step_element_path, step_value)
                     )
                     result_id = cursor.fetchone()[0]
                     connection.commit()

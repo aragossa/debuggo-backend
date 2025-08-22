@@ -687,7 +687,7 @@ async def confirm_generate_steps(
             if not cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Test case not found")
             
-            # Delete existing steps
+            # Delete all test steps - execution results are now preserved independently
             cursor.execute(
                 "DELETE FROM test_steps WHERE test_case_id = %s",
                 (id,)
@@ -2644,32 +2644,19 @@ async def get_test_step_screenshot(
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
-            # First verify that the test step belongs to the current user's client
+            # Verify permissions through execution results and test runs instead of test steps
             cursor.execute(
                 """
-                SELECT ts.id 
-                FROM test_steps ts
-                JOIN test_cases tc ON ts.test_case_id = tc.id
-                WHERE ts.id = %s AND tc.client_id = %s
-                """,
-                (step_id, str(current_user.client_id))
-            )
-            if not cursor.fetchone():
-                raise HTTPException(
-                    status_code=404,
-                    detail="Test step not found or you don't have permission to access it"
-                )
-            
-            # Get the screenshot from step execution results (new system)
-            cursor.execute(
-                """
-                SELECT screenshot_base64, error_message
-                FROM test_step_execution_results
-                WHERE test_step_id = %s AND screenshot_base64 IS NOT NULL
-                ORDER BY started_at DESC
+                SELECT tser.screenshot_base64, tser.screenshot_path
+                FROM test_step_execution_results tser
+                JOIN test_runs tr ON tser.test_run_id = tr.id
+                JOIN test_cases tc ON tr.test_case_id = tc.id
+                WHERE tser.test_step_id = %s AND tc.client_id = %s
+                AND (tser.screenshot_base64 IS NOT NULL OR tser.screenshot_path IS NOT NULL)
+                ORDER BY tser.started_at DESC
                 LIMIT 1
                 """,
-                (step_id,)
+                (step_id, str(current_user.client_id))
             )
             result = cursor.fetchone()
             
@@ -2707,8 +2694,31 @@ async def get_test_step_screenshot(
                     # This is already base64 string
                     screenshot_base64 = screenshot_data
             else:
-                # Handle new system format - result[0] is base64 string
+                # Handle new system format - result[0] is base64 string, result[1] is screenshot_path
                 screenshot_base64 = result[0]
+                screenshot_path = result[1]
+                
+                # If no base64 data but we have a path, try to read the file
+                if not screenshot_base64 and screenshot_path:
+                    try:
+                        import os
+                        import base64
+                        if os.path.exists(screenshot_path):
+                            with open(screenshot_path, "rb") as img_file:
+                                screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                    except Exception as file_error:
+                        logger.error(f"Error reading screenshot file {screenshot_path}: {file_error}")
+                        return JSONResponse(content={
+                            "screenshot_available": False,
+                            "message": "Screenshot file not accessible"
+                        })
+                
+                # If still no screenshot data, return error
+                if not screenshot_base64:
+                    return JSONResponse(content={
+                        "screenshot_available": False,
+                        "message": "No screenshot data available"
+                    })
             
             # Decode base64 to binary data for FileResponse
             import base64
@@ -2862,16 +2872,19 @@ async def get_test_run_step_execution_results(
                     detail="Test run not found or you don't have permission to access it"
                 )
             
-            # Get step execution results with test step details
+            # Get step execution results with preserved step details
             cursor.execute(
                 """
                 SELECT tser.id, tser.test_step_id, tser.step_order, tser.status,
                        tser.error_message, tser.screenshot_path, tser.execution_time_ms,
                        tser.started_at, tser.completed_at,
-                       ts.description, ts.action, ts.element_path, ts.value,
+                       COALESCE(tser.step_description, ts.description) as description,
+                       COALESCE(tser.step_action, ts.action) as action,
+                       COALESCE(tser.step_element_path, ts.element_path) as element_path,
+                       COALESCE(tser.step_value, ts.value) as value,
                        tr.test_case_id
                 FROM test_step_execution_results tser
-                JOIN test_steps ts ON tser.test_step_id = ts.id
+                LEFT JOIN test_steps ts ON tser.test_step_id = ts.id
                 JOIN test_runs tr ON tser.test_run_id = tr.id
                 WHERE tser.test_run_id = %s
                 ORDER BY tser.step_order
