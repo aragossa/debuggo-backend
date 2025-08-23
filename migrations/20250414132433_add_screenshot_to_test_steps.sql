@@ -6,7 +6,7 @@
 ALTER TABLE test_steps ADD COLUMN screenshot_path TEXT;
 
 -- Create a new table to store screenshots
-CREATE TABLE screenshots (
+CREATE TABLE IF NOT EXISTS  screenshots (
     id SERIAL PRIMARY KEY,
     test_step_id INTEGER NOT NULL,
     screenshot BYTEA NOT NULL,
@@ -16,7 +16,7 @@ CREATE TABLE screenshots (
 );
 
 -- Create index on test_step_id for faster lookups
-CREATE INDEX idx_screenshots_test_step_id ON screenshots(test_step_id);
+CREATE INDEX IF NOT EXISTS idx_screenshots_test_step_id ON screenshots(test_step_id);
 
 -- To roll back this migration, you can add statements like:
 -- ROLLBACK

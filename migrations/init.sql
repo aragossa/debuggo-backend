@@ -1,5 +1,5 @@
 -- public.test_cases definition
-CREATE TABLE public.test_cases (
+CREATE TABLE  IF NOT EXISTS  public.test_cases (
 	id serial4 NOT NULL,
 	"name" text NOT NULL,
 	description text NULL,
@@ -18,7 +18,7 @@ CREATE TABLE public.test_cases (
 
 
 -- public.test_runs definition
-CREATE TABLE public.test_runs (
+CREATE TABLE IF NOT EXISTS  public.test_runs (
 	id serial4 NOT NULL,
 	test_case_id int4 NOT NULL,
 	run_date timestamptz DEFAULT CURRENT_TIMESTAMP NULL,
@@ -36,7 +36,7 @@ ALTER TABLE public.test_runs ADD CONSTRAINT test_runs_test_case_id_fkey FOREIGN 
 
 
 -- public.test_steps definition
-CREATE TABLE public.test_steps (
+CREATE TABLE IF NOT EXISTS  public.test_steps (
 	id serial4 NOT NULL,
 	test_case_id int4 NOT NULL,
 	step_order int4 NOT NULL,
@@ -58,7 +58,7 @@ ALTER TABLE public.test_steps ADD CONSTRAINT test_steps_test_case_id_fkey FOREIG
 
 
 -- public.test_variables definition
-CREATE TABLE public.test_variables (
+CREATE TABLE IF NOT EXISTS  public.test_variables (
 	id uuid DEFAULT gen_random_uuid() NOT NULL,
 	"name" text NULL,
 	value varchar NULL,
