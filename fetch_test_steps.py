@@ -25,12 +25,13 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
     if not test_case_row:
         return None
 
-    # Query to get the test steps for the given test_case_id
+    # Query to get the test steps for the given test_case_id with screenshot info
     cursor.execute('''
-        SELECT id, step_order, description, expected_result, action, value, element_path
-        FROM test_steps
-        WHERE test_case_id = %s
-        ORDER BY step_order ASC
+        SELECT ts.id, ts.step_order, ts.description, ts.expected_result, ts.action, ts.value, ts.element_path,
+               CASE WHEN ts.screenshot_path IS NOT NULL AND ts.screenshot_path != '' THEN true ELSE false END as has_screenshot
+        FROM test_steps ts
+        WHERE ts.test_case_id = %s
+        ORDER BY ts.step_order ASC
     ''', (test_case_id,))
 
     # Fetch all the rows for test steps
@@ -45,7 +46,8 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
             "expected_result": row[3],
             "action": row[4],
             "value": row[5],
-            "element_path": row[6]
+            "element_path": row[6],
+            "has_screenshot": row[7]
         }
         for row in steps_rows
     ]
