@@ -51,6 +51,10 @@ from Utils.Connectors.db_utils import get_db_connection, return_db_connection, i
 # Initialize connection pool
 db_pool = None
 
+# Initialize logger
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
     value: Optional[str] = None
@@ -2681,17 +2685,21 @@ async def get_test_step_screenshot(
                         "message": "No screenshot found for this test step"
                     })
                 
-                # Handle old system format - convert blob to base64 if needed
+                # Handle old system format - binary data from screenshots table
                 screenshot_data = result[0]
                 if isinstance(screenshot_data, memoryview):
                     screenshot_data = bytes(screenshot_data)
                 
                 if isinstance(screenshot_data, bytes):
-                    # This is binary data, decode as base64
-                    import base64
-                    screenshot_base64 = base64.b64encode(screenshot_data).decode('utf-8')
+                    # This is binary data, return directly as StreamingResponse
+                    import io
+                    return StreamingResponse(
+                        io.BytesIO(screenshot_data),
+                        media_type="image/png",
+                        headers={"Content-Disposition": "inline; filename=screenshot.png"}
+                    )
                 else:
-                    # This is already base64 string
+                    # This is base64 string - set it for processing below
                     screenshot_base64 = screenshot_data
             else:
                 # Handle new system format - result[0] is base64 string, result[1] is screenshot_path
@@ -2724,7 +2732,10 @@ async def get_test_step_screenshot(
             import base64
             import io
             try:
-                screenshot_binary = base64.b64decode(screenshot_base64)
+                # Clean base64 data by removing whitespace and line breaks
+                cleaned_base64 = screenshot_base64.replace('\n', '').replace('\r', '').replace(' ', '').strip()
+                logger.debug(f"Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
+                screenshot_binary = base64.b64decode(cleaned_base64)
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)
                 
