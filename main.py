@@ -2682,6 +2682,7 @@ async def get_test_step_screenshot(
                 # logger.info(f"Screenshot request {step_id} - Old system query result: {'Found' if result else 'Not found'}")
             else:
                 # logger.info(f"Screenshot request {step_id} - Found result in new system (test_step_execution_results)")
+                pass
             
             if not result:
                 # Return JSON response indicating no screenshot available
