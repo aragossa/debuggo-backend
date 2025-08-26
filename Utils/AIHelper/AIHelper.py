@@ -595,6 +595,20 @@ IMPORTANT:
                 # Get the response text and calculate response time
                 request_end_time = time.time()
                 response_time = request_end_time - request_start_time
+                
+                # Check if response was blocked by safety filters
+                if not response.candidates or not response.candidates[0].content.parts:
+                    safety_ratings = response.candidates[0].safety_ratings if response.candidates else []
+                    safety_info = []
+                    for rating in safety_ratings:
+                        if rating.probability.name != "NEGLIGIBLE":
+                            safety_info.append(f"{rating.category.name}: {rating.probability.name}")
+                    
+                    error_msg = f"Response blocked by Gemini safety filters. Safety ratings: {', '.join(safety_info) if safety_info else 'Unknown safety issue'}"
+                    self.logger.error(error_msg)
+                    self.logger.error("Test generation stopped due to blocked AI response")
+                    raise ValueError(error_msg)
+                
                 response_text = response.text.strip()
                 response_length = len(response_text)
                 

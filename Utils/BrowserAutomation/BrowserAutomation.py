@@ -86,6 +86,27 @@ class BrowserAutomation:
             self.driver.get(url)
             self.logger.info(f"[PID:{self.pid}] Navigated to {url}")
         except WebDriverException as e:
+            # Check if this is a session timeout/invalid session error
+            if "Unable to find session" in str(e) or "InvalidSessionIdException" in str(e) or "NoSuchSessionException" in str(e):
+                self.logger.warning(f"[PID:{self.pid}] Session expired/invalid. Creating new session...")
+                try:
+                    # Close the old driver if it exists
+                    if self.driver:
+                        try:
+                            self.driver.quit()
+                        except:
+                            pass
+                    
+                    # Recreate the driver connection
+                    self.setup_driver(headless=False)
+                    # Retry the navigation with new session
+                    self.driver.get(url)
+                    self.logger.info(f"[PID:{self.pid}] Successfully navigated to {url} with new session")
+                    return
+                except Exception as retry_e:
+                    self.logger.error(f"[PID:{self.pid}] Failed to recover session and navigate: {str(retry_e)}")
+                    raise retry_e
+            
             self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
 

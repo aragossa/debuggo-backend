@@ -822,14 +822,14 @@ class TestRunner:
         # Record start time
         start_time = datetime.now()
         
-        # Update the test case with the start time
+        # Update the test case with the start time and clear any stale end time
         try:
             with self.get_db_connection() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """
                         UPDATE test_cases 
-                        SET steps_generation_start_time = %s
+                        SET steps_generation_start_time = %s, steps_generation_end_time = NULL
                         WHERE id = %s
                         """,
                         (start_time, test_case_id)
@@ -1431,11 +1431,37 @@ class TestRunner:
                     self.logger.error(f"[PID:{pid}] Error during step generation: {str(step_gen_error)}")
                     import traceback
                     self.logger.error(f"[PID:{pid}] Traceback: {traceback.format_exc()}")
+                    # Update end time even on error
+                    self._update_generation_end_time(test_case_id)
                     raise
+
+            # Update end time on successful completion
+            self._update_generation_end_time(test_case_id)
+            self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
+            # Update end time even on error
+            self._update_generation_end_time(test_case_id)
             raise
+
+    def _update_generation_end_time(self, test_case_id: int):
+        """Update the steps_generation_end_time for the test case"""
+        try:
+            end_time = datetime.now()
+            with self.get_db_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE test_cases 
+                        SET steps_generation_end_time = %s
+                        WHERE id = %s
+                        """,
+                        (end_time, test_case_id)
+                    )
+                    connection.commit()
+        except Exception as e:
+            self.logger.error(f"Failed to update test case with end time: {e}")
 
     def _create_test_run(self, test_case_id: int, status: str = "running"):
         """Create a new test run record and return the test_run_id"""
@@ -1735,6 +1761,9 @@ class TestRunner:
                 
                 # Also clear the generating status
                 self._redis.delete(f"test_case_generating:{test_case_id}")
+                
+                # Update the generation end time when manually stopped
+                self._update_generation_end_time(test_case_id)
                 
                 self.logger.info(f"[PID:{pid}] Set stop flag in Redis for test case {test_case_id}")
                 return True
