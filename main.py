@@ -2644,7 +2644,7 @@ async def get_test_step_screenshot(
     Retrieve the screenshot for a specific test step.
     Returns the screenshot as binary PNG data.
     """
-    logger.info(f"Screenshot request started for step_id: {step_id}")
+    # logger.info(f"Screenshot request started for step_id: {step_id}")
     conn = None
     try:
         conn = get_db_connection()
@@ -2667,7 +2667,7 @@ async def get_test_step_screenshot(
             
             # If not found in new system, try old screenshots table
             if not result:
-                logger.info(f"Screenshot request {step_id} - No result from new system, trying old screenshots table")
+                # logger.info(f"Screenshot request {step_id} - No result from new system, trying old screenshots table")
                 # Try old system
                 cursor.execute(
                     """
@@ -2679,9 +2679,9 @@ async def get_test_step_screenshot(
                     (step_id,)
                 )
                 result = cursor.fetchone()
-                logger.info(f"Screenshot request {step_id} - Old system query result: {'Found' if result else 'Not found'}")
+                # logger.info(f"Screenshot request {step_id} - Old system query result: {'Found' if result else 'Not found'}")
             else:
-                logger.info(f"Screenshot request {step_id} - Found result in new system (test_step_execution_results)")
+                # logger.info(f"Screenshot request {step_id} - Found result in new system (test_step_execution_results)")
             
             if not result:
                 # Return JSON response indicating no screenshot available
@@ -2700,7 +2700,7 @@ async def get_test_step_screenshot(
                 if isinstance(screenshot_data, bytes):
                     # This is binary data, return directly as StreamingResponse
                     import io
-                    logger.info(f"Screenshot request {step_id} - Returning binary data from old system")
+                    # logger.info(f"Screenshot request {step_id} - Returning binary data from old system")
                     return StreamingResponse(
                         io.BytesIO(screenshot_data),
                         media_type="image/png",
@@ -2708,11 +2708,11 @@ async def get_test_step_screenshot(
                     )
                 else:
                     # This is base64 string from old system - set it for processing below
-                    logger.info(f"Screenshot request {step_id} - Processing base64 from old system")
+                    # logger.info(f"Screenshot request {step_id} - Processing base64 from old system")
                     screenshot_base64 = screenshot_data
             else:
                 # Handle new system format - result[0] is base64 string, result[1] is screenshot_path
-                logger.info(f"Screenshot request {step_id} - Processing data from new system")
+                # logger.info(f"Screenshot request {step_id} - Processing data from new system")
                 screenshot_base64 = result[0]
                 screenshot_path = result[1]
                 
@@ -2744,18 +2744,18 @@ async def get_test_step_screenshot(
             try:
                 # Clean base64 data by removing whitespace and line breaks
                 cleaned_base64 = screenshot_base64.replace('\n', '').replace('\r', '').replace(' ', '').strip()
-                logger.info(f"Screenshot decode - Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
-                logger.info(f"Screenshot decode - First 20 chars of base64: {cleaned_base64[:20]}")
+                # logger.info(f"Screenshot decode - Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
+                # logger.info(f"Screenshot decode - First 20 chars of base64: {cleaned_base64[:20]}")
                 
                 # Check if base64 data has valid padding
                 missing_padding = len(cleaned_base64) % 4
                 if missing_padding:
                     cleaned_base64 += '=' * (4 - missing_padding)
-                    logger.info(f"Screenshot decode - Added padding, new length: {len(cleaned_base64)}")
+                    # logger.info(f"Screenshot decode - Added padding, new length: {len(cleaned_base64)}")
                 
                 screenshot_binary = base64.b64decode(cleaned_base64)
-                logger.info(f"Screenshot decode - Binary data size: {len(screenshot_binary)} bytes")
-                logger.info(f"Screenshot decode - First 8 bytes: {list(screenshot_binary[:8])}")
+                # logger.info(f"Screenshot decode - Binary data size: {len(screenshot_binary)} bytes")
+                # logger.info(f"Screenshot decode - First 8 bytes: {list(screenshot_binary[:8])}")
                 
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)

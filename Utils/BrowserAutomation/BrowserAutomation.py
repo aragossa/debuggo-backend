@@ -869,6 +869,74 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to clear element {selector}: {str(e)}")
             raise
 
+    def assert_text_contains(self, element_path: str, expected_text: str, by_strategy: str = None):
+        """
+        Assert that an element's text contains the expected text.
+        
+        Args:
+            element_path (str): The locator path to find the element
+            expected_text (str): The text that should be contained within the element's text
+            by_strategy (str, optional): The strategy to locate the element (e.g., 'xpath', 'css')
+            
+        Raises:
+            AssertionError: If the element's text does not contain the expected text
+            ValueError: If expected_text is not provided
+        """
+        # Handle None or empty by_strategy
+        if not by_strategy:
+            by_strategy = 'xpath'  # Default to xpath if by_strategy is None or empty
+        
+        if not expected_text:
+            raise ValueError(f"[PID:{self.pid}] Expected text cannot be empty for text contains assertion")
+        
+        self.logger.info(f"[PID:{self.pid}] Asserting that element '{element_path}' contains text: '{expected_text}' using {by_strategy}")
+        
+        try:
+            element = self.find_element(element_path, by_strategy)
+            
+            if not element:
+                raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
+            
+            # Get the actual text from the element
+            actual_text = element.text.strip()
+            expected_text = expected_text.strip()
+            
+            self.logger.info(f"[PID:{self.pid}] Element actual text: '{actual_text}'")
+            
+            # Check if the expected text is contained in the actual text (case-sensitive)
+            if expected_text not in actual_text:
+                raise AssertionError(
+                    f"[PID:{self.pid}] Text '{expected_text}' not found in element text. "
+                    f"Element text: '{actual_text}'"
+                )
+            
+            self.logger.info(f"[PID:{self.pid}] Text contains assertion passed: '{expected_text}' found in '{actual_text}'")
+            return True
+            
+        except TimeoutException:
+            # Take a screenshot for debugging
+            screenshot_path = self.take_screenshot()
+            
+            # Log additional debugging information
+            try:
+                page_url = self.driver.current_url
+                page_title = self.driver.title
+                
+                error_msg = f"[PID:{self.pid}] Element not found for text contains assertion: {element_path}\n"
+                error_msg += f"Current URL: {page_url}\n"
+                error_msg += f"Page title: {page_title}\n"
+                error_msg += f"Screenshot saved at: {screenshot_path}"
+                
+                self.logger.error(error_msg)
+            except Exception as debug_ex:
+                self.logger.error(f"[PID:{self.pid}] Error gathering debug info: {str(debug_ex)}")
+            
+            raise AssertionError(f"[PID:{self.pid}] Element not found for text contains assertion: {element_path}")
+        
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error in text contains assertion for element {element_path}: {str(e)}")
+            raise
+
     def close(self):
         """Close the browser and cleanup"""
         if self.driver:

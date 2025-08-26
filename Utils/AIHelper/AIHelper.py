@@ -298,7 +298,7 @@ Your response MUST be a valid JSON object with ALL of the following required fie
 {{
     "element_locator": "XPath selector to locate the element",
     "by_strategy": "xpath",
-    "action": "click, type, select, hover, wait, assert, scroll, clear, navigate, press_key",
+    "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST provide actual test data (e.g., '%login%' for login field)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"

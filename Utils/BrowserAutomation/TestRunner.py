@@ -369,6 +369,8 @@ class TestRunner:
                 self.browser.press_key(element_path, value, by_strategy)
             elif action == "assert":
                 self.browser.assert_element(element_path, value, by_strategy)
+            elif action == "assert_text_contains":
+                self.browser.assert_text_contains(element_path, value, by_strategy)
             elif action == "hover":
                 self.browser.hover(element_path, by_strategy)
             elif action == "select":
