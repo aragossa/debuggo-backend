@@ -47,6 +47,7 @@ from test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 from Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool
+from Services.TestExecutionService import TestExecutionService
 
 # Initialize connection pool
 db_pool = None
@@ -103,6 +104,18 @@ class UpdateTestCaseRequest(BaseModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[int] = None
+
+class CreateTestExecutionRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    project_id: UUID4
+
+class UpdateTestExecutionStatusRequest(BaseModel):
+    status: str
+
+class AssignTestRunRequest(BaseModel):
+    test_run_id: int
+    execution_id: int
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
@@ -2852,17 +2865,19 @@ async def get_test_run_steps(
             )
             test_case_id = cursor.fetchone()[0]
             
-            # Get all steps for this test case with their screenshot info
+            # Get all steps for this test case with their execution results and screenshot info
             cursor.execute(
                 """
                 SELECT ts.id, ts.step_order, ts.description, ts.action, ts.element_path, ts.value,
-                       CASE WHEN s.id IS NOT NULL THEN true ELSE false END as has_screenshot
+                       CASE WHEN s.id IS NOT NULL THEN true ELSE false END as has_screenshot,
+                       tser.status, tser.error_message, tser.execution_time_ms, tser.completed_at
                 FROM test_steps ts
                 LEFT JOIN screenshots s ON ts.id = s.test_step_id
+                LEFT JOIN test_step_execution_results tser ON ts.id = tser.test_step_id AND tser.test_run_id = %s
                 WHERE ts.test_case_id = %s
                 ORDER BY ts.step_order
                 """,
-                (test_case_id,)
+                (run_id, test_case_id)
             )
             steps = []
             for row in cursor.fetchall():
@@ -2873,7 +2888,11 @@ async def get_test_run_steps(
                     "action": row[3],
                     "element_path": row[4],
                     "value": row[5],
-                    "has_screenshot": row[6]
+                    "has_screenshot": row[6],
+                    "status": row[7] if row[7] else "not_executed",
+                    "error_message": row[8],
+                    "execution_time_ms": row[9],
+                    "completed_at": row[10]
                 })
             
             return {"steps": steps, "test_case_id": test_case_id, "run_id": run_id}
@@ -3174,6 +3193,13 @@ async def stop_test_case_generation(
             # Get the TestRunner instance and stop the generation
             runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
             runner.stop_generating_steps(id)
+            
+            # Update the test case's updated_at timestamp
+            cursor.execute(
+                "UPDATE test_cases SET updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (id,)
+            )
+            conn.commit()
             
             return {"status": "stopped"}
     except Exception as e:
@@ -3702,6 +3728,281 @@ async def update_contact_request_status(
     finally:
         cursor.close()
         return_db_connection(conn)
+
+# Test Execution endpoints
+test_execution_service = TestExecutionService()
+
+@app.get("/api/projects/{project_id}/test-executions")
+async def get_project_test_executions(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all test executions for a project.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        executions = test_execution_service.get_executions_by_project(
+            project_id, str(current_user.client_id)
+        )
+        return {"success": True, "executions": executions}
+    except Exception as e:
+        logger.error(f"Error retrieving test executions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve test executions: {str(e)}"
+        )
+
+@app.post("/api/test-executions")
+async def create_test_execution(
+    request_data: CreateTestExecutionRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new test execution.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        execution = test_execution_service.create_execution(
+            name=request_data.name,
+            description=request_data.description or "",
+            project_id=str(request_data.project_id),
+            client_id=str(current_user.client_id),
+            created_by=current_user.id
+        )
+        return {"success": True, "execution": execution}
+    except Exception as e:
+        logger.error(f"Error creating test execution: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create test execution: {str(e)}"
+        )
+
+@app.get("/api/test-executions/{execution_id}")
+async def get_test_execution(
+    execution_id: str,  # Changed to str to handle both int and UUID attempts
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get a specific test execution by ID.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    # Validate and convert execution_id to integer
+    try:
+        execution_id_int = int(execution_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid execution_id format. Expected integer, got: {execution_id}"
+        )
+    
+    try:
+        execution = await test_execution_service.get_execution_by_id(
+            execution_id_int, str(current_user.client_id)
+        )
+        
+        if not execution:
+            raise HTTPException(
+                status_code=404,
+                detail="Test execution not found"
+            )
+        
+        return {"success": True, "execution": execution}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving test execution: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve test execution: {str(e)}"
+        )
+
+@app.put("/api/test-executions/{execution_id}/status")
+async def update_test_execution_status(
+    execution_id: int,
+    request_data: UpdateTestExecutionStatusRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the status of a test execution.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    # Validate status
+    valid_statuses = ['New', 'In Progress', 'Done']
+    if request_data.status not in valid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+        )
+    
+    try:
+        success = test_execution_service.update_execution_status(
+            execution_id, request_data.status, str(current_user.client_id)
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail="Test execution not found"
+            )
+        
+        return {"success": True, "message": "Test execution status updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating test execution status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update test execution status: {str(e)}"
+        )
+
+@app.delete("/api/test-executions/{execution_id}")
+async def delete_test_execution(
+    execution_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a test execution (only if it has no test runs).
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        success = test_execution_service.delete_execution(
+            execution_id, str(current_user.client_id)
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail="Test execution not found"
+            )
+        
+        return {"success": True, "message": "Test execution deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        if "Cannot delete execution with" in str(e):
+            raise HTTPException(
+                status_code=400,
+                detail=str(e)
+            )
+        logger.error(f"Error deleting test execution: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete test execution: {str(e)}"
+        )
+
+@app.get("/api/projects/{project_id}/test-executions/in-progress")
+async def get_in_progress_executions(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all test executions with 'In Progress' status for a project.
+    Used for the Run Test dropdown.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        executions = test_execution_service.get_in_progress_executions(
+            project_id, str(current_user.client_id)
+        )
+        return {"success": True, "executions": executions}
+    except Exception as e:
+        logger.error(f"Error retrieving in-progress executions: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve in-progress executions: {str(e)}"
+        )
+
+@app.get("/api/test-executions/{execution_id}/test-runs")
+async def get_execution_test_runs(
+    execution_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all test runs for a specific execution.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        result = test_execution_service.get_execution_test_runs(
+            execution_id, str(current_user.client_id)
+        )
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error(f"Error retrieving execution test runs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve execution test runs: {str(e)}"
+        )
+
+@app.post("/api/test-runs/assign-to-execution")
+async def assign_test_run_to_execution(
+    request_data: AssignTestRunRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Assign a test run to a test execution.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        success = test_execution_service.assign_test_run_to_execution(
+            request_data.test_run_id, request_data.execution_id, str(current_user.client_id)
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail="Test run or execution not found"
+            )
+        
+        return {"success": True, "message": "Test run assigned to execution successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error assigning test run to execution: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to assign test run to execution: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
