@@ -3312,9 +3312,9 @@ async def list_ai_models(current_user: User = Depends(get_current_user)):
             """, (current_user.id,))
             user_model = cursor.fetchone()
             
-            # Add user_selected flag to each model
+            # Add is_user_selected flag to each model
             for model in models:
-                model['user_selected'] = user_model and model['id'] == user_model['ai_model_id']
+                model['is_user_selected'] = user_model and model['id'] == user_model['ai_model_id']
                 
             return models
     except Exception as e:
