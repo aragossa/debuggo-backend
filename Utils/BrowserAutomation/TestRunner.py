@@ -271,6 +271,25 @@ class TestRunner:
         try:
             with self.get_db_connection() as connection:
                 with connection.cursor() as cursor:
+                    # Map AI-generated specific actions to database-valid actions
+                    action_mapping = {
+                        'assert_text_equals': 'assert',
+                        'assert_element_visible': 'assert',
+                        'assert_element_present': 'assert',
+                        'assert_element_not_present': 'assert',
+                        'assert_url_contains': 'assert',
+                        'assert_title_contains': 'assert',
+                        'verify_text': 'assert',
+                        'verify_element': 'assert',
+                        'check_text': 'assert',
+                        'check_element': 'assert'
+                    }
+                    
+                    # Convert action if it's a specific assertion type
+                    mapped_action = action_mapping.get(action, action)
+                    
+                    self.logger.info(f"Saving step with action: {action} -> {mapped_action}")
+                    
                     insert_query = """
                         INSERT INTO public.test_steps (
                             test_case_id,
@@ -296,7 +315,7 @@ class TestRunner:
                             test_case_id,
                             step_order,
                             element_purpose,
-                            action,
+                            mapped_action,
                             element_locator,
                             value,
                             by_strategy,

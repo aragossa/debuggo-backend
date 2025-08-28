@@ -808,12 +808,28 @@ async def update_test_step(
             if not cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Test step not found")
             
+            # Map AI-generated specific actions to database-valid actions  
+            action_mapping = {
+                'assert_text_equals': 'assert',
+                'assert_element_visible': 'assert',
+                'assert_element_present': 'assert',
+                'assert_element_not_present': 'assert',
+                'assert_url_contains': 'assert',
+                'assert_title_contains': 'assert',
+                'verify_text': 'assert',
+                'verify_element': 'assert',
+                'check_text': 'assert',
+                'check_element': 'assert'
+            }
+            
             # Build update query based on provided fields
             update_fields = []
             params = []
             if update_data.action is not None:
+                # Apply action mapping if needed
+                mapped_action = action_mapping.get(update_data.action, update_data.action)
                 update_fields.append("action = %s")
-                params.append(update_data.action)
+                params.append(mapped_action)
             if update_data.value is not None:
                 update_fields.append("value = %s")
                 params.append(update_data.value)
@@ -916,6 +932,23 @@ async def create_test_step(
             max_order = cursor.fetchone()[0]
             new_order = max_order + 1
         
+        # Map AI-generated specific actions to database-valid actions
+        action_mapping = {
+            'assert_text_equals': 'assert',
+            'assert_element_visible': 'assert',
+            'assert_element_present': 'assert',
+            'assert_element_not_present': 'assert',
+            'assert_url_contains': 'assert',
+            'assert_title_contains': 'assert',
+            'verify_text': 'assert',
+            'verify_element': 'assert',
+            'check_text': 'assert',
+            'check_element': 'assert'
+        }
+        
+        # Convert action if it's a specific assertion type
+        mapped_action = action_mapping.get(request_data.action, request_data.action)
+        
         # Insert the new test step
         with conn.cursor() as cursor:
             cursor.execute("""
@@ -930,7 +963,7 @@ async def create_test_step(
                 request_data.test_case_id,
                 new_order,
                 request_data.description,
-                request_data.action,
+                mapped_action,
                 request_data.element_path,
                 request_data.value,
                 request_data.path_type,
