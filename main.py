@@ -159,8 +159,6 @@ origins = [
     "http://127.0.0.1:9000",
     "http://18.184.65.241",
     "http://95.217.211.91",
-    "http://auroqa.com",
-    "https://auroqa.com", 
     "http://debuggo.app",
     "https://debuggo.app",
 ]
