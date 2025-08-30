@@ -160,7 +160,9 @@ origins = [
     "http://18.184.65.241",
     "http://95.217.211.91",
     "http://auroqa.com",
-    
+    "https://auroqa.com", 
+    "http://debuggo.app",
+    "https://debuggo.app",
 ]
 
 
@@ -192,7 +194,7 @@ async def lifespan(app: FastAPI):
     # Initialize Kafka consumer
     kafka_bootstrap_servers = f"{system.kafka_host}:{system.kafka_port}"
     try:
-        kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'auroqa-group')
+        kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'debuggo-group')
         consumer_thread = Thread(target=kafka_consumer.consume_messages, daemon=True)
         consumer_thread.start()
         print(f"Kafka consumer initialized and connected to {kafka_bootstrap_servers}")
@@ -516,7 +518,7 @@ async def run_test_case(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Endpoint to run test script.
+    Endpoint to start test execution asynchronously and return test_run_id immediately.
     If environment_id is provided, the test will use the environment variables.
     """
     conn = None
@@ -549,13 +551,109 @@ async def run_test_case(
                         "password": env_data[2]
                     }
         
-        # Run the test case in a blocking manner to prevent concurrent executions
-        result = await asyncio.to_thread(runner.run_test_case, id, environment_vars)
+        # Start test execution asynchronously and get test_run_id immediately
+        result = runner.start_test_case_async(id, environment_vars)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to run test case: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/test_run/{test_run_id}/status")
+async def get_test_run_status(
+    test_run_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get the current status of a test run.
+    Returns test run details, completion status, and step execution results.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify that the test run belongs to the current user's client
+            cursor.execute(
+                """
+                SELECT tr.id, tr.test_case_id, tr.result, tr.exception, tr.duration, 
+                       tr.stdout, tr.stderr, tr.run_date, tr.execution_id,
+                       tc.name as test_case_name, tc.description as test_case_description
+                FROM test_runs tr
+                JOIN test_cases tc ON tr.test_case_id = tc.id
+                WHERE tr.id = %s AND tc.client_id = %s
+                """,
+                (test_run_id, str(current_user.client_id))
+            )
+            test_run = cursor.fetchone()
+            
+            if not test_run:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Test run not found"
+                )
+            
+            # Get step execution results
+            cursor.execute(
+                """
+                SELECT tser.test_step_id, tser.step_order, tser.status, tser.error_message,
+                       tser.execution_time_ms, tser.started_at, tser.completed_at,
+                       ts.description, ts.action, ts.element_path, ts.value
+                FROM test_step_execution_results tser
+                JOIN test_steps ts ON tser.test_step_id = ts.id
+                WHERE tser.test_run_id = %s
+                ORDER BY tser.step_order
+                """,
+                (test_run_id,)
+            )
+            step_results = cursor.fetchall()
+            
+            # Calculate completion status
+            is_running = test_run[2] == "running"  # result field
+            is_completed = test_run[2] in ["completed", "failed", "stopped"]
+            
+            # Format step results
+            formatted_steps = []
+            for step in step_results:
+                formatted_steps.append({
+                    "test_step_id": step[0],
+                    "step_order": step[1],
+                    "status": step[2],
+                    "error_message": step[3],
+                    "execution_time_ms": step[4],
+                    "started_at": step[5].isoformat() if step[5] else None,
+                    "completed_at": step[6].isoformat() if step[6] else None,
+                    "description": step[7],
+                    "action": step[8],
+                    "element_path": step[9],
+                    "value": step[10]
+                })
+            
+            return {
+                "test_run_id": test_run[0],
+                "test_case_id": test_run[1],
+                "test_case_name": test_run[9],
+                "test_case_description": test_run[10],
+                "status": test_run[2],
+                "exception": test_run[3],
+                "duration": test_run[4],
+                "stdout": test_run[5],
+                "stderr": test_run[6],
+                "run_date": test_run[7].isoformat() if test_run[7] else None,
+                "execution_id": test_run[8],
+                "is_running": is_running,
+                "is_completed": is_completed,
+                "steps": formatted_steps,
+                "total_steps": len(formatted_steps)
+            }
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get test run status: {str(e)}"
         )
     finally:
         if conn:

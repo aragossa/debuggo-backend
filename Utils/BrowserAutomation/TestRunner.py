@@ -1507,6 +1507,201 @@ class TestRunner:
             self.logger.error(f"Failed to create test run: {e}")
             raise
 
+    def start_test_case_async(self, test_case_id: int, environment_vars=None):
+        """
+        Start test case execution asynchronously and return test_run_id immediately.
+        
+        Args:
+            test_case_id: ID of the test case to run
+            environment_vars: Optional dictionary with environment variables
+            
+        Returns:
+            dict: Contains test_run_id and status
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Starting async test case execution for ID: {test_case_id}")
+        
+        try:
+            # Create test run record immediately
+            test_run_id = self._create_test_run(test_case_id, status="running")
+            self.logger.info(f"[PID:{pid}] Created test run with ID: {test_run_id}")
+            
+            # Start background execution
+            import threading
+            thread = threading.Thread(
+                target=self._execute_test_case_background,
+                args=(test_run_id, test_case_id, environment_vars)
+            )
+            thread.daemon = True
+            thread.start()
+            
+            return {
+                "test_run_id": test_run_id,
+                "status": "started",
+                "message": "Test execution started in background"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to start async test execution: {e}")
+            raise
+
+    def _execute_test_case_background(self, test_run_id: int, test_case_id: int, environment_vars=None):
+        """
+        Execute test case in background and update test run record with results.
+        
+        Args:
+            test_run_id: ID of the test run
+            test_case_id: ID of the test case to run
+            environment_vars: Optional dictionary with environment variables
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Background execution started for test run {test_run_id}")
+        start_time = datetime.now()
+        
+        try:
+            # Execute the original test case logic
+            result = self._run_test_case_internal(test_run_id, test_case_id, environment_vars)
+            
+            # Update test run with success result
+            duration = (datetime.now() - start_time).total_seconds()
+            self._update_test_run(
+                test_run_id, 
+                result.get("status", "completed"), 
+                result.get("exception"), 
+                duration,
+                result.get("stdout"),
+                result.get("stderr")
+            )
+            
+            self.logger.info(f"[PID:{pid}] Background execution completed for test run {test_run_id}")
+            
+        except Exception as e:
+            # Update test run with failure result
+            duration = (datetime.now() - start_time).total_seconds()
+            self._update_test_run(
+                test_run_id, 
+                "failed", 
+                str(e), 
+                duration,
+                None,
+                str(e)
+            )
+            self.logger.error(f"[PID:{pid}] Background execution failed for test run {test_run_id}: {e}")
+
+    def _run_test_case_internal(self, test_run_id: int, test_case_id: int, environment_vars=None):
+        """
+        Internal method that contains the original test case execution logic.
+        This is extracted from the original run_test_case method.
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Internal execution started for test run {test_run_id}, test case {test_case_id}")
+        
+        # Initialize environment helper with provided variables
+        env = EnvHelper(environment_vars)
+        
+        # Log environment variables for debugging
+        if environment_vars:
+            self.logger.info(f"[PID:{pid}] Environment variables provided: {list(environment_vars.keys())}")
+        else:
+            self.logger.info(f"[PID:{pid}] No environment variables provided")
+        
+        try:
+            # Get test case info
+            test_case_name, test_case_description = self._get_test_case(test_case_id)
+            
+            # Get test steps
+            steps = self._get_test_steps(test_case_id)
+            if not steps:
+                self.logger.warning(f"[PID:{pid}] No test steps found for test case {test_case_id}")
+                return {
+                    "test_run_id": test_run_id,
+                    "status": "completed",
+                    "exception": "No test steps found",
+                    "stdout": None,
+                    "stderr": "No test steps found for this test case"
+                }
+            
+            # Ensure browser is initialized
+            self._ensure_browser_initialized()
+            
+            self.logger.info(f"[PID:{pid}] Executing {len(steps)} test steps for test case: {test_case_name}")
+            
+            # Execute each step
+            step_order = 0
+            for step in steps:
+                # Check for stop execution flag
+                if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
+                    self.logger.info(f"[PID:{pid}] Stop execution flag found, stopping test case {test_case_id}")
+                    self._redis.delete(f"test_case_stop_execution:{test_case_id}")
+                    return {
+                        "test_run_id": test_run_id,
+                        "status": "stopped",
+                        "exception": "Test execution stopped by user",
+                        "stdout": None,
+                        "stderr": "Test execution was stopped by user request"
+                    }
+                
+                step_order += 1
+                
+                step_id, action, element_path, description, expected_result, value, path_type = step
+                self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
+                
+                # Record step start
+                step_start_time = datetime.now()
+                step_result_id = self._log_step_execution_result(
+                    test_run_id, step_id, step_order, "running",
+                    step_description=description, step_action=action,
+                    step_element_path=element_path, step_value=value
+                )
+                
+                try:
+                    # Execute the step
+                    self.execute_step(action, element_path, value, path_type, env)
+                    
+                    # Calculate execution time
+                    execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                    
+                    # Update step result to success
+                    self._update_step_execution_result(
+                        step_result_id, "success", None, None, None, execution_time_ms
+                    )
+                    
+                    self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
+                    
+                except Exception as step_error:
+                    # Calculate execution time
+                    execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                    
+                    # Update step result to failed
+                    self._update_step_execution_result(
+                        step_result_id, "failed", str(step_error), None, None, execution_time_ms
+                    )
+                    
+                    self.logger.error(f"[PID:{pid}] Step {step_order} failed: {step_error}")
+                    
+                    # Continue to next step instead of stopping entire test
+                    continue
+            
+            self.logger.info(f"[PID:{pid}] All steps completed for test case {test_case_id}")
+            
+            return {
+                "test_run_id": test_run_id,
+                "status": "completed",
+                "exception": None,
+                "stdout": f"Test case '{test_case_name}' executed successfully",
+                "stderr": None
+            }
+            
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Test case execution failed: {e}")
+            return {
+                "test_run_id": test_run_id,
+                "status": "failed",
+                "exception": str(e),
+                "stdout": None,
+                "stderr": str(e)
+            }
+
     def _update_test_run(self, test_run_id: int, status: str, exception: str = None, 
                         duration: float = None, stdout: str = None, stderr: str = None):
         """Update an existing test run record"""

@@ -22,8 +22,11 @@ async def login_google(request: Request):
     # Store state in session
     request.session['oauth_state'] = state
     
-    # Redirect to Google's OAuth page with our state
-    redirect_uri = request.url_for("auth_google_callback")
+    # Use configured redirect URI instead of dynamic construction
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://debuggo.app/api/auth/google/callback")
+    print("Environment GOOGLE_REDIRECT_URI:", os.getenv("GOOGLE_REDIRECT_URI"))
+    print("Using redirect_uri:", redirect_uri)
+    print("Google client config:", google.client_kwargs)
     return await google.authorize_redirect(request, redirect_uri, state=state)
 
 @router.get("/auth/google/callback")
