@@ -189,9 +189,24 @@ class TestRunner:
         if hasattr(self, 'browser') and self.browser:
             self.logger.info(f"[PID:{pid}] Cleaning up browser for user:{self.user_id}, test:{self.test_case_id}")
             try:
+                # Get session ID before closing for logging
+                session_id = None
+                if hasattr(self.browser, 'driver') and self.browser.driver:
+                    try:
+                        session_id = self.browser.driver.session_id
+                        self.logger.info(f"[PID:{pid}] Closing Selenium session: {session_id}")
+                    except:
+                        pass
+                
+                # Force close the driver directly
+                if hasattr(self.browser, 'driver') and self.browser.driver:
+                    self.browser.driver.quit()
+                    self.logger.info(f"[PID:{pid}] Called driver.quit() directly for session: {session_id}")
+                
+                # Also call the browser's close method
                 self.browser.close()
                 self.browser = None
-                self.logger.info(f"[PID:{pid}] Browser closed successfully")
+                self.logger.info(f"[PID:{pid}] Browser closed successfully, session {session_id} should be terminated")
             except Exception as e:
                 self.logger.error(f"[PID:{pid}] Error closing browser: {str(e)}")
             finally:
@@ -1721,6 +1736,10 @@ class TestRunner:
                 final_stderr = None
                 self.logger.info(f"[PID:{pid}] All steps completed successfully for test case {test_case_id}")
             
+            # Cleanup browser session immediately after test execution completes
+            self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after test execution")
+            self._cleanup_browser()
+            
             return {
                 "test_run_id": test_run_id,
                 "status": final_status,
@@ -1732,6 +1751,10 @@ class TestRunner:
         except Exception as e:
             # Clean up any remaining steps in 'running' status even on exception
             self._cleanup_running_steps(test_run_id)
+            
+            # Cleanup browser session immediately even on exception
+            self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after test execution failure")
+            self._cleanup_browser()
             
             self.logger.error(f"[PID:{pid}] Test case execution failed: {e}")
             return {
@@ -2022,6 +2045,11 @@ class TestRunner:
                 self._update_generation_end_time(test_case_id)
                 
                 self.logger.info(f"[PID:{pid}] Set stop flag in Redis for test case {test_case_id}")
+                
+                # Cleanup browser session immediately when generation is stopped
+                self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after stopping generation")
+                self._cleanup_browser()
+                
                 return True
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to set stop flag in Redis: {e}")
