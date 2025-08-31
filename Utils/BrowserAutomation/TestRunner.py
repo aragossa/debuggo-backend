@@ -2117,6 +2117,119 @@ class TestRunner:
         
         return False
 
+    def stop_all_test_executions(self, user_id: str = None, client_id: str = None) -> dict:
+        """
+        Stop all currently running test executions.
+        
+        Args:
+            user_id: Optional user ID to filter executions
+            client_id: Optional client ID to filter executions
+            
+        Returns:
+            dict: Status information about stopped executions
+        """
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Stopping all test executions for user {user_id}, client {client_id}")
+        
+        stopped_count = 0
+        error_count = 0
+        
+        try:
+            if not self._redis:
+                return {"status": "error", "message": "Redis not available", "stopped_count": 0}
+            
+            # Get all running test case keys
+            running_pattern = "test_case_running:*"
+            running_keys = self._redis.keys(running_pattern)
+            
+            self.logger.info(f"[PID:{pid}] Found {len(running_keys)} running test cases")
+            
+            for key in running_keys:
+                try:
+                    # Extract test case ID from key
+                    test_case_id = key.decode('utf-8').replace('test_case_running:', '')
+                    
+                    # Optionally filter by user/client if provided
+                    if user_id or client_id:
+                        # Query database to check ownership
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        
+                        query = """
+                            SELECT tc.id FROM test_cases tc 
+                            JOIN users u ON tc.created_by = u.id 
+                            WHERE tc.id = %s
+                        """
+                        params = [test_case_id]
+                        
+                        if user_id:
+                            query += " AND u.id = %s"
+                            params.append(user_id)
+                        if client_id:
+                            query += " AND u.client_id = %s"
+                            params.append(client_id)
+                        
+                        cursor.execute(query, params)
+                        result = cursor.fetchone()
+                        
+                        return_db_connection(conn)
+                        
+                        if not result:
+                            continue  # Skip this test case - doesn't belong to user/client
+                    
+                    # Set stop flag for this test case
+                    self._redis.set(f"test_case_stop_execution:{test_case_id}", "1", ex=3600)
+                    
+                    # Clear running status
+                    self._redis.delete(f"test_case_running:{test_case_id}")
+                    
+                    # Also update database records to mark running tests as stopped
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        
+                        # Update any running test_runs for this test case to stopped
+                        cursor.execute("""
+                            UPDATE test_runs 
+                            SET result = 'stopped', duration = EXTRACT(EPOCH FROM (NOW() - run_date))::real
+                            WHERE test_case_id = %s AND result = 'running'
+                        """, (test_case_id,))
+                        
+                        updated_rows = cursor.rowcount
+                        conn.commit()
+                        return_db_connection(conn)
+                        
+                        if updated_rows > 0:
+                            self.logger.info(f"[PID:{pid}] Updated {updated_rows} database records for test case {test_case_id}")
+                        
+                    except Exception as db_error:
+                        self.logger.error(f"[PID:{pid}] Failed to update database for test case {test_case_id}: {db_error}")
+                        if conn:
+                            return_db_connection(conn)
+                    
+                    stopped_count += 1
+                    self.logger.info(f"[PID:{pid}] Set stop flag for test case {test_case_id}")
+                    
+                except Exception as e:
+                    error_count += 1
+                    self.logger.error(f"[PID:{pid}] Failed to stop test case from key {key}: {e}")
+            
+            return {
+                "status": "success",
+                "message": f"Stopped {stopped_count} test executions",
+                "stopped_count": stopped_count,
+                "error_count": error_count
+            }
+            
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to stop all test executions: {e}")
+            return {
+                "status": "error", 
+                "message": f"Failed to stop all test executions: {str(e)}",
+                "stopped_count": stopped_count,
+                "error_count": error_count
+            }
+
     def _save_step_with_session(self, cursor, conn, test_case_id, step_order, element_purpose, action, element_locator, value, by_strategy):
         """
         Save a test step using an existing database session connection.

@@ -613,6 +613,92 @@ async def run_test_case(
         if conn:
             return_db_connection(conn)
 
+@app.get("/api/running-tests")
+async def get_running_tests(current_user: User = Depends(get_current_user)):
+    """
+    Get all currently running test cases and executions for the user's client.
+    Returns active test runs and their current status.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get running test cases from Redis and database
+        running_tests = []
+        
+        # Check Redis for active test case runs
+        import redis
+        try:
+            r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+            # Scan for running test case keys
+            for key in r.scan_iter(match=f"test_case_running:*"):
+                test_case_id = key.split(":")[-1]
+                # Verify test case belongs to user's client and get details
+                cursor.execute("""
+                    SELECT tc.id, tc.name, tc.description, tr.id as test_run_id, 
+                           tr.run_date, tr.execution_id, te.name as execution_name
+                    FROM test_cases tc
+                    LEFT JOIN test_runs tr ON tc.id = tr.test_case_id AND tr.result = 'running'
+                    LEFT JOIN test_executions te ON tr.execution_id = te.id
+                    WHERE tc.id = %s AND tc.client_id = %s
+                    ORDER BY tr.run_date DESC
+                    LIMIT 1
+                """, (test_case_id, str(current_user.client_id)))
+                
+                result = cursor.fetchone()
+                if result:
+                    running_tests.append({
+                        "test_case_id": result[0],
+                        "test_case_name": result[1],
+                        "test_case_description": result[2],
+                        "test_run_id": result[3],
+                        "started_at": result[4].isoformat() if result[4] else None,
+                        "execution_id": result[5],
+                        "execution_name": result[6],
+                        "status": "running"
+                    })
+        except Exception as redis_error:
+            print(f"Redis error in get_running_tests: {redis_error}")
+        
+        # Also check database for running test runs
+        cursor.execute("""
+            SELECT tr.id, tr.test_case_id, tc.name, tc.description, 
+                   tr.run_date, tr.execution_id, te.name as execution_name
+            FROM test_runs tr
+            JOIN test_cases tc ON tr.test_case_id = tc.id
+            LEFT JOIN test_executions te ON tr.execution_id = te.id
+            WHERE tr.result = 'running' AND tc.client_id = %s
+            ORDER BY tr.run_date DESC
+        """, (str(current_user.client_id),))
+        
+        db_running = cursor.fetchall()
+        for row in db_running:
+            # Avoid duplicates from Redis check
+            if not any(t["test_run_id"] == row[0] for t in running_tests):
+                running_tests.append({
+                    "test_case_id": row[1],
+                    "test_case_name": row[2], 
+                    "test_case_description": row[3],
+                    "test_run_id": row[0],
+                    "started_at": row[4].isoformat() if row[4] else None,
+                    "execution_id": row[5],
+                    "execution_name": row[6],
+                    "status": "running"
+                })
+        
+        return {"running_tests": running_tests}
+    
+    except Exception as e:
+        print(f"Error in get_running_tests: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get running tests: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
 @app.get("/api/test_run/{test_run_id}/status")
 async def get_test_run_status(
     test_run_id: int,
@@ -2941,23 +3027,18 @@ async def get_test_step_screenshot(
             try:
                 # Clean base64 data by removing whitespace and line breaks
                 cleaned_base64 = screenshot_base64.replace('\n', '').replace('\r', '').replace(' ', '').strip()
-                logger.info(f"Screenshot decode - Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
-                logger.info(f"Screenshot decode - First 20 chars of base64: {cleaned_base64[:20]}")
-                
+                  
                 # Check if base64 data has valid padding
                 missing_padding = len(cleaned_base64) % 4
                 if missing_padding:
                     cleaned_base64 += '=' * (4 - missing_padding)
-                    # logger.info(f"Screenshot decode - Added padding, new length: {len(cleaned_base64)}")
-                
+ 
                 screenshot_binary = base64.b64decode(cleaned_base64)
-                logger.info(f"Screenshot decode - Binary data size: {len(screenshot_binary)} bytes")
-                
+    
                 # Check PNG signature (cannot use backslashes in f-string)
                 png_signature = b'\x89PNG\r\n\x1a\n'
                 is_valid_png = screenshot_binary[:8] == png_signature
-                logger.info(f"Screenshot decode - PNG signature check: {is_valid_png}")
-                
+ 
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)
                 
@@ -3436,6 +3517,42 @@ async def stop_test_case_execution(id: int, request: Request):
         return {"status": "success", "message": "Test case execution stop requested"}
     else:
         return {"status": "error", "message": "Failed to stop test case execution"}
+
+@app.post("/api/stop-all-tests")
+async def stop_all_test_executions(current_user: User = Depends(get_current_user)):
+    """
+    Stop all currently running test executions for the current user's client
+    """
+    logger.info(f"Received request to stop all test executions for user {current_user.id}")
+    
+    try:
+        # Create TestRunner instance
+        runner = TestRunner(user_id=str(current_user.id))
+        
+        # Stop all test executions for this user's client
+        result = runner.stop_all_test_executions(
+            user_id=str(current_user.id),
+            client_id=str(current_user.client_id)
+        )
+        
+        if result["status"] == "success":
+            return {
+                "status": "success", 
+                "message": result["message"],
+                "stopped_count": result["stopped_count"]
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=result["message"]
+            )
+            
+    except Exception as e:
+        logger.error(f"Failed to stop all test executions: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stop all test executions: {str(e)}"
+        )
 
 # AI Model Management Endpoints
 
