@@ -580,24 +580,28 @@ async def run_test_case(
         if request_data and "environment_id" in request_data:
             environment_id_param = request_data.get("environment_id")
             conn = get_db_connection()
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT e.base_url, e.login, e.password
-                    FROM environments e
-                    JOIN projects p ON e.project_id = p.id
-                    WHERE e.id = %s AND p.client_id = %s
-                    """,
-                    (environment_id_param, str(current_user.client_id))
-                )
-                env_data = cursor.fetchone()
-                
-                if env_data:
-                    environment_vars = {
-                        "base_url": env_data[0],
-                        "login": env_data[1],
-                        "password": env_data[2]
-                    }
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT e.base_url, e.login, e.password
+                        FROM environments e
+                        JOIN projects p ON e.project_id = p.id
+                        WHERE e.id = %s AND p.client_id = %s
+                        """,
+                        (environment_id_param, str(current_user.client_id))
+                    )
+                    env_data = cursor.fetchone()
+                    
+                    if env_data:
+                        environment_vars = {
+                            "base_url": env_data[0],
+                            "login": env_data[1],
+                            "password": env_data[2]
+                        }
+            finally:
+                return_db_connection(conn)
+                conn = None  # Prevent double return in outer finally
         
         # Start test execution asynchronously and get test_run_id immediately
         result = runner.start_test_case_async(id, environment_vars, execution_id)
@@ -627,8 +631,10 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
         
         # Check Redis for active test case runs
         import redis
+        from Utils.System import System
+        system = System()
         try:
-            r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+            r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
             # Scan for running test case keys
             for key in r.scan_iter(match=f"test_case_running:*"):
                 test_case_id = key.split(":")[-1]
@@ -3039,7 +3045,7 @@ async def get_test_step_screenshot(
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)
                 
-                   return StreamingResponse(
+                return StreamingResponse(
                     io.BytesIO(screenshot_binary),
                     media_type="image/png",
                     headers={
