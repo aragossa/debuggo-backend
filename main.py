@@ -46,8 +46,10 @@ from fetch_test_steps import get_test_data_from_db_helper
 from test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
 from Services.TestExecutionService import TestExecutionService
+import signal
+import atexit
 
 # Initialize connection pool
 db_pool = None
@@ -55,6 +57,47 @@ db_pool = None
 # Initialize logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Global shutdown flag
+shutdown_flag = False
+
+def cleanup_resources():
+    """Clean up all resources before shutdown."""
+    global shutdown_flag
+    if shutdown_flag:
+        return  # Already cleaning up
+    
+    shutdown_flag = True
+    logger.info("🧹 Starting graceful shutdown and resource cleanup...")
+    
+    try:
+        # Close database pool
+        logger.info("📦 Closing database connection pool...")
+        close_db_pool()
+        
+        # TODO: Add Kafka consumer shutdown here
+        # if hasattr(app.state, 'kafka_consumer'):
+        #     app.state.kafka_consumer.stop()
+        
+        # TODO: Cancel any background tasks
+        # for task in asyncio.all_tasks():
+        #     task.cancel()
+        
+        logger.info("✅ Resource cleanup completed successfully")
+    except Exception as e:
+        logger.error(f"❌ Error during cleanup: {e}")
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals from Docker/system."""
+    logger.info(f"🚨 Received signal {signum} ({'SIGTERM' if signum == 15 else 'SIGINT'}), initiating graceful shutdown")
+    cleanup_resources()
+    logger.info("👋 Exiting application")
+    sys.exit(0)
+
+# Register signal handlers for proper Docker shutdown
+signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
+signal.signal(signal.SIGTERM, signal_handler)  # Docker stop
+atexit.register(cleanup_resources)             # Fallback cleanup
 
 class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
@@ -133,14 +176,17 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     except JWTError:
         raise credentials_exception
 
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
+        # Debug logging
+        logger.info(f"Connection status: closed={conn.closed}, autocommit={conn.autocommit}")
+        if conn.closed:
+            logger.error("Connection is already closed when received from context manager")
+            raise HTTPException(status_code=500, detail="Database connection error")
+        
         user = get_user_by_email(conn, email)
         if user is None:
             raise credentials_exception
         return user
-    finally:
-        return_db_connection(conn)
 
 # app = FastAPI()
 kafka_consumer = None
@@ -518,6 +564,7 @@ async def run_test_case(
     """
     Endpoint to start test execution asynchronously and return test_run_id immediately.
     If environment_id is provided, the test will use the environment variables.
+    If execution_id is provided, the test run will be linked to that execution.
     """
     conn = None
     try:
@@ -525,10 +572,15 @@ async def run_test_case(
         runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
         
         environment_vars = {}
+        execution_id = None
+        
+        # Extract execution_id from request data
+        if request_data and "execution_id" in request_data:
+            execution_id = request_data.get("execution_id")
         
         # If environment_id is provided, fetch environment variables
         if request_data and "environment_id" in request_data:
-            environment_id = request_data.get("environment_id")
+            environment_id_param = request_data.get("environment_id")
             conn = get_db_connection()
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -538,7 +590,7 @@ async def run_test_case(
                     JOIN projects p ON e.project_id = p.id
                     WHERE e.id = %s AND p.client_id = %s
                     """,
-                    (environment_id, str(current_user.client_id))
+                    (environment_id_param, str(current_user.client_id))
                 )
                 env_data = cursor.fetchone()
                 
@@ -550,7 +602,7 @@ async def run_test_case(
                     }
         
         # Start test execution asynchronously and get test_run_id immediately
-        result = runner.start_test_case_async(id, environment_vars)
+        result = runner.start_test_case_async(id, environment_vars, execution_id)
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(
@@ -4117,14 +4169,55 @@ async def assign_test_run_to_execution(
             detail=f"Failed to assign test run to execution: {str(e)}"
         )
 
+@app.get("/api/system/pool-status")
+async def get_pool_status_endpoint():
+    """
+    Get current database connection pool status for monitoring.
+    """
+    try:
+        status = get_pool_status()
+        return status
+    except Exception as e:
+        logger.error(f"Error getting pool status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get pool status: {str(e)}"
+        )
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="127.0.0.1",
-        port=9000,
-        workers=1,  # Use single worker to avoid process-level concurrency
-        timeout_keep_alive=30,
-        access_log=True,
-        reload=True
-    )
+    import os
+    
+    # Production vs Development configuration
+    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    
+    if is_production:
+        # Production configuration for Docker
+        logger.info("🚀 Starting in PRODUCTION mode")
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",  # Bind to all interfaces in Docker
+            port=9000,
+            workers=1,  # Keep single worker in Docker for now
+            timeout_keep_alive=60,
+            timeout_graceful_shutdown=30,  # Give time for cleanup
+            access_log=True,
+            log_level="info",
+            reload=False,
+            server_header=False,
+            date_header=False
+        )
+    else:
+        # Development configuration
+        logger.info("🛠️ Starting in DEVELOPMENT mode")
+        uvicorn.run(
+            "main:app",
+            host="127.0.0.1",
+            port=9000,
+            workers=1,
+            timeout_keep_alive=30,
+            timeout_graceful_shutdown=15,
+            access_log=True,
+            log_level="debug",
+            reload=False
+        )

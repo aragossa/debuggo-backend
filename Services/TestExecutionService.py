@@ -2,7 +2,7 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Optional, Any
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from Utils.Connectors.db_utils import get_db_connection, return_db_connection, get_db_connection_context
 import psycopg2.extras
 
 
@@ -14,10 +14,9 @@ class TestExecutionService:
 
     def create_execution(self, name: str, description: str, project_id: str, client_id: str, created_by: int) -> Dict[str, Any]:
         """Create a new test execution"""
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             query = """
                 INSERT INTO test_executions (name, description, project_id, client_id, created_by, status)
@@ -40,10 +39,9 @@ class TestExecutionService:
 
     def get_executions_by_project(self, project_id: str, client_id: str) -> List[Dict[str, Any]]:
         """Get all executions for a specific project with test runs count"""
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             query = """SELECT te.*, u.full_name as created_by_name, p.name as project_name, COUNT(tr.id) as test_runs_count
                 FROM test_executions te
@@ -73,12 +71,45 @@ class TestExecutionService:
             if conn:
                 return_db_connection(conn)
 
-    def get_execution_by_id(self, execution_id: int, client_id: str) -> Optional[Dict[str, Any]]:
-        """Get a specific execution by ID"""
-        conn = None
+    def get_project_executions(self, project_id: str, client_id: str) -> List[Dict[str, Any]]:
+        """Get all executions for a specific project with test runs count"""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            query = """SELECT te.*, u.full_name as created_by_name, p.name as project_name, COUNT(tr.id) as test_runs_count
+                FROM test_executions te
+                LEFT JOIN users u ON te.created_by = u.id
+                LEFT JOIN projects p ON te.project_id = p.id
+                LEFT JOIN test_runs tr ON tr.execution_id = te.id
+                WHERE te.project_id = %s AND te.client_id = %s
+                GROUP BY te.id, u.full_name, p.name
+                ORDER BY te.created_at DESC"""
+            
+            cursor.execute(query, (project_id, client_id))
+            results = cursor.fetchall()
+            executions = [dict(row) for row in results]
+            
+            # Convert datetime objects to ISO strings
+            for execution in executions:
+                for key, value in execution.items():
+                    if isinstance(value, datetime):
+                        execution[key] = value.isoformat()
+            
+            self.logger.info(f"Retrieved {len(executions)} executions for project {project_id}")
+            return executions
+        except Exception as e:
+            self.logger.error(f"Error getting executions for project {project_id}: {e}")
+            raise
+        finally:
+            if conn:
+                return_db_connection(conn)
+
+    def get_execution_by_id(self, execution_id: str, client_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific execution by ID"""
+        try:
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             query = """SELECT te.*, u.full_name as created_by_name, p.name as project_name
                 FROM test_executions te
@@ -104,12 +135,12 @@ class TestExecutionService:
             if conn:
                 return_db_connection(conn)
 
-    def update_execution_status(self, execution_id: int, status: str, client_id: str) -> bool:
+    def update_execution_status(self, execution_id: str, status: str, client_id: str) -> bool:
         """Update execution status and set appropriate timestamps"""
         conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor()
             
             # Set timestamp field based on status
             if status == 'In Progress':
@@ -142,10 +173,9 @@ class TestExecutionService:
 
     def delete_execution(self, execution_id: int, client_id: str) -> bool:
         """Delete an execution (only if no test runs are associated)"""
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             # Check if there are any test runs associated with this execution
             count_query = """SELECT COUNT(*) as count FROM test_runs WHERE execution_id = %s"""
@@ -161,20 +191,14 @@ class TestExecutionService:
             conn.commit()
             return cursor.rowcount > 0
         except Exception as e:
-            if conn:
-                conn.rollback()
             self.logger.error(f"Error deleting execution {execution_id}: {e}")
             raise
-        finally:
-            if conn:
-                return_db_connection(conn)
 
-    def get_in_progress_executions(self, project_id: str, client_id: str) -> List[Dict[str, Any]]:
+    def get_executions_for_dropdown(self, project_id: str, client_id: str) -> List[Dict[str, Any]]:
         """Get all executions for a project (for execution selection dropdown)"""
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
             query = """SELECT id, name, status, created_at
                 FROM test_executions 
@@ -199,6 +223,37 @@ class TestExecutionService:
         finally:
             if conn:
                 return_db_connection(conn)
+
+    def get_in_progress_executions(self, project_id: str, client_id: str) -> List[Dict[str, Any]]:
+        """Get all in-progress executions for a specific project"""
+        try:
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            query = """SELECT te.*, u.full_name as created_by_name, p.name as project_name, COUNT(tr.id) as test_runs_count
+                FROM test_executions te
+                LEFT JOIN users u ON te.created_by = u.id
+                LEFT JOIN projects p ON te.project_id = p.id
+                LEFT JOIN test_runs tr ON tr.execution_id = te.id
+                WHERE te.project_id = %s AND te.client_id = %s AND te.status = 'In Progress'
+                GROUP BY te.id, u.full_name, p.name
+                ORDER BY te.created_at DESC"""
+            
+            cursor.execute(query, (project_id, client_id))
+            results = cursor.fetchall()
+            executions = [dict(row) for row in results]
+            
+            # Convert datetime objects to ISO strings
+            for execution in executions:
+                for key, value in execution.items():
+                    if isinstance(value, datetime):
+                        execution[key] = value.isoformat()
+            
+            self.logger.info(f"Retrieved {len(executions)} in-progress executions for project {project_id}")
+            return executions
+        except Exception as e:
+            self.logger.error(f"Error getting in-progress executions for project {project_id}: {e}")
+            raise
 
     def get_execution_test_runs(self, execution_id: int, client_id: str) -> Dict[str, Any]:
         """Get all test runs for a specific execution grouped by test case"""

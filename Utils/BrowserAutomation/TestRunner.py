@@ -726,7 +726,7 @@ class TestRunner:
                 # Calculate duration and log success
                 duration = (datetime.now() - start_time).total_seconds()
                 stdout_content = stdout_capture.getvalue()
-                self._update_test_run(test_run_id, "success", duration=duration, stdout=stdout_content)
+                self._update_test_run(test_run_id, "completed", duration=duration, stdout=stdout_content)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
                 
                 # Clean up Redis flags
@@ -738,7 +738,7 @@ class TestRunner:
                     self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {e}")
                 
                 return {
-                    "status": "success", 
+                    "status": "completed", 
                     "duration": duration,
                     "test_run_id": test_run_id,
                     "step_results": self._get_step_execution_results(test_run_id)
@@ -835,19 +835,29 @@ class TestRunner:
     def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None):
         """
         Generate test steps using AI analysis of page HTML.
+        Uses single connection per session to optimize database usage.
         
         Args:
             test_case_id: ID of the test case
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
         """
-        # Record start time
-        start_time = datetime.now()
+        pid = os.getpid()
+        self.logger.info(f"[PID:{pid}] Starting optimized test step generation for test case {test_case_id}")
         
-        # Update the test case with the start time and clear any stale end time
+        # Use single database connection for entire session
         try:
-            with self.get_db_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
+            with self.get_db_connection() as session_conn:
+                session_cursor = session_conn.cursor()
+                
+                # Record start time and get test case details in single transaction
+                start_time = datetime.now()
+                test_name = ""
+                test_description = ""
+                model_id = None
+                
+                try:
+                    # Batch initial database operations
+                    session_cursor.execute(
                         """
                         UPDATE test_cases 
                         SET steps_generation_start_time = %s, steps_generation_end_time = NULL
@@ -855,19 +865,9 @@ class TestRunner:
                         """,
                         (start_time, test_case_id)
                     )
-                    connection.commit()
-        except Exception as e:
-            self.logger.error(f"Failed to update test case with start time: {e}")
-        pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] Starting test step generation for test case {test_case_id}")
-        
-        # Get test case details from database
-        test_name = ""
-        test_description = ""
-        try:
-            with self.get_db_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
+                    
+                    # Get test case details in same transaction
+                    session_cursor.execute(
                         """
                         SELECT name, description 
                         FROM test_cases 
@@ -875,15 +875,55 @@ class TestRunner:
                         """,
                         (test_case_id,)
                     )
-                    result = cursor.fetchone()
+                    result = session_cursor.fetchone()
                     if result:
                         test_name = result[0] or ""
                         test_description = result[1] or ""
                         self.logger.info(f"[PID:{pid}] Retrieved test case: {test_name}")
                     else:
                         self.logger.warning(f"[PID:{pid}] Test case {test_case_id} not found in database")
+                        return
+                    
+                    # Get AI model details if provided (batch with other operations)
+                    if ai_model_id:
+                        session_cursor.execute(
+                            """
+                            SELECT model_id FROM ai_models 
+                            WHERE id = %s AND is_active = TRUE
+                            """, 
+                            (ai_model_id,)
+                        )
+                        model = session_cursor.fetchone()
+                        if model:
+                            model_id = model[0]
+                            provider = model_id.split('-')[0] if '-' in model_id else model_id
+                            self.logger.info(f"[PID:{pid}] Using AI model: {model_id} (provider: {provider})")
+                            if self.html_analyzer:
+                                self.html_analyzer.switch_provider(provider)
+                    
+                    # Commit initial setup
+                    session_conn.commit()
+                    
+                except Exception as e:
+                    session_conn.rollback()
+                    self.logger.error(f"[PID:{pid}] Failed to initialize test generation: {e}")
+                    return
+                
+                # Continue with test generation using the same connection
+                return self._generate_test_steps_with_session_connection(
+                    test_case_id, session_conn, session_cursor, test_name, test_description, 
+                    environment_vars, model_id
+                )
+                
         except Exception as e:
-            self.logger.error(f"[PID:{pid}] Failed to retrieve test case details: {e}")
+            self.logger.error(f"[PID:{pid}] Database connection error during test generation: {e}")
+            
+    def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
+                                                   test_name, test_description, environment_vars, model_id):
+        """
+        Generate test steps using a single database connection session.
+        """
+        pid = os.getpid()
         
         # Set the generating status in Redis
         try:
@@ -924,31 +964,6 @@ class TestRunner:
                     self.logger.info(f"[PID:{pid}] Initialized HTML analyzer")
                 
                 html_analyzer = self.html_analyzer
-                
-                # If AI model ID is provided, get the model details and set the provider
-                if ai_model_id:
-                    try:
-                        conn = get_db_connection()
-                        with conn.cursor() as cursor:
-                            cursor.execute(
-                                """
-                                SELECT model_id FROM ai_models 
-                                WHERE id = %s AND is_active = TRUE
-                                """, 
-                                (ai_model_id,)
-                            )
-                            model = cursor.fetchone()
-                            if model:
-                                model_id = model[0]
-                                # Extract provider from model_id (e.g., "gemini-2.5-pro" -> "gemini")
-                                provider = model_id.split('-')[0] if '-' in model_id else model_id
-                                self.logger.info(f"[PID:{pid}] Using AI model: {model_id} (provider: {provider})")
-                                html_analyzer.switch_provider(provider)
-                    except Exception as e:
-                        self.logger.error(f"[PID:{pid}] Error setting AI model: {e}")
-                    finally:
-                        if 'conn' in locals() and conn:
-                            return_db_connection(conn)
                 
                 # Navigate to the base URL
                 base_url = env.get_base_url()
@@ -1065,8 +1080,9 @@ class TestRunner:
                         if action == "navigate" and value and not element_locator:
                             self.logger.info(f"[PID:{pid}] Executing navigate step to: {value}")
                             
-                            # Save the step to the database first - use original values with placeholders
-                            step_id = self._save_step(
+                            # Save the step to the database first using session connection
+                            step_id = self._save_step_with_session(
+                                session_cursor, session_conn,
                                 test_case_id=test_case_id,
                                 step_order=step_order,
                                 element_purpose=element_purpose,
@@ -1087,42 +1103,20 @@ class TestRunner:
                                     failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
                                     self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
                                     
-                                    # Update the screenshot_path in the test_steps table
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute("""
-                                                UPDATE test_steps 
-                                                SET screenshot_path = %s
-                                                WHERE id = %s
-                                            """, (failure_screenshot, step_id))
-                                            connection.commit()
-                                    
-                                    # Save the screenshot to the database
+                                    # Save screenshot using session connection
                                     with open(failure_screenshot, "rb") as image_file:
                                         encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute("""
-                                                INSERT INTO screenshots (test_step_id, screenshot, description)
-                                                VALUES (%s, %s, %s)
-                                            """, (step_id, encoded_string, f"Error screenshot for step {step_order}"))
-                                            connection.commit()
+                                    self._update_step_with_screenshot_session(
+                                        session_cursor, session_conn, step_id, 
+                                        failure_screenshot, encoded_string, 
+                                        f"Error screenshot for step {step_order}"
+                                    )
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to capture error screenshot: {str(screenshot_error)}")
                                 
-                                # Update the step in the database to mark it as failed
+                                # Update the step in the database to mark it as failed using session connection
                                 try:
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute(
-                                                """
-                                                UPDATE test_steps 
-                                                SET error_message = %s
-                                                WHERE id = %s
-                                                """,
-                                                (str(e), step_id)
-                                            )
-                                            connection.commit()
+                                    self._update_step_error_session(session_cursor, session_conn, step_id, str(e))
                                 except Exception as db_error:
                                     self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
                                 
@@ -1261,26 +1255,14 @@ class TestRunner:
                                     failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
                                     self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
                                     
-                                    # Update the screenshot_path in the test_steps table
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute("""
-                                                UPDATE test_steps 
-                                                SET screenshot_path = %s
-                                                WHERE id = %s
-                                            """, (failure_screenshot, step_id))
-                                            connection.commit()
-                                    
-                                    # Save the screenshot to the database
+                                    # Save screenshot using session connection
                                     with open(failure_screenshot, "rb") as image_file:
                                         encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute("""
-                                                INSERT INTO screenshots (test_step_id, screenshot, description)
-                                                VALUES (%s, %s, %s)
-                                            """, (step_id, encoded_string, f"Error screenshot for step {step_order}"))
-                                            connection.commit()
+                                    self._update_step_with_screenshot_session(
+                                        session_cursor, session_conn, step_id, 
+                                        failure_screenshot, encoded_string, 
+                                        f"Error screenshot for step {step_order}"
+                                    )
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
                                 
@@ -1427,26 +1409,14 @@ class TestRunner:
                         screenshot_path = self.browser.take_screenshot()
                         self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
                         
-                        # Update the screenshot_path in the test_steps table
-                        with self.get_db_connection() as connection:
-                            with connection.cursor() as cursor:
-                                cursor.execute("""
-                                    UPDATE test_steps 
-                                    SET screenshot_path = %s
-                                    WHERE id = %s
-                                """, (screenshot_path, step_id))
-                                connection.commit()
-                        
-                        # Save the screenshot to the database
+                        # Save screenshot using session connection
                         with open(screenshot_path, "rb") as image_file:
                             encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                        with self.get_db_connection() as connection:
-                            with connection.cursor() as cursor:
-                                cursor.execute("""
-                                    INSERT INTO screenshots (test_step_id, screenshot, description)
-                                    VALUES (%s, %s, %s)
-                                """, (step_id, encoded_string, f"Screenshot for step {step_order}"))
-                                connection.commit()
+                        self._update_step_with_screenshot_session(
+                            session_cursor, session_conn, step_id, 
+                            screenshot_path, encoded_string, 
+                            f"Screenshot for step {step_order}"
+                        )
                         step_order += 1
                 except Exception as step_gen_error:
                     self.logger.error(f"[PID:{pid}] Error during step generation: {str(step_gen_error)}")
@@ -1456,13 +1426,13 @@ class TestRunner:
                     self._update_generation_end_time(test_case_id)
                     raise
 
-            # Update end time on successful completion
-            self._update_generation_end_time(test_case_id)
-            self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
+                # Update end time on successful completion using session connection
+                self._update_generation_end_time_with_session(session_cursor, session_conn, test_case_id)
+                self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
-            # Update end time even on error
+            # Update end time even on error using fallback method
             self._update_generation_end_time(test_case_id)
             raise
 
@@ -1484,7 +1454,7 @@ class TestRunner:
         except Exception as e:
             self.logger.error(f"Failed to update test case with end time: {e}")
 
-    def _create_test_run(self, test_case_id: int, status: str = "running"):
+    def _create_test_run(self, test_case_id: int, status: str = "running", execution_id=None):
         """Create a new test run record and return the test_run_id"""
         try:
             connection = get_db_connection()
@@ -1492,14 +1462,15 @@ class TestRunner:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         """
-                        INSERT INTO test_runs (test_case_id, result, run_date)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO test_runs (test_case_id, result, run_date, execution_id)
+                        VALUES (%s, %s, %s, %s)
                         RETURNING id
                         """,
-                        (test_case_id, status, datetime.now())
+                        (test_case_id, status, datetime.now(), execution_id)
                     )
                     test_run_id = cursor.fetchone()[0]
                     connection.commit()
+                    self.logger.info(f"Created test run {test_run_id} for test case {test_case_id}, execution: {execution_id}")
                     return test_run_id
             finally:
                 return_db_connection(connection)
@@ -1507,24 +1478,25 @@ class TestRunner:
             self.logger.error(f"Failed to create test run: {e}")
             raise
 
-    def start_test_case_async(self, test_case_id: int, environment_vars=None):
+    def start_test_case_async(self, test_case_id: int, environment_vars=None, execution_id=None):
         """
         Start test case execution asynchronously and return test_run_id immediately.
         
         Args:
             test_case_id: ID of the test case to run
             environment_vars: Optional dictionary with environment variables
+            execution_id: Optional ID of the execution to link this test run to
             
         Returns:
             dict: Contains test_run_id and status
         """
         pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] Starting async test case execution for ID: {test_case_id}")
+        self.logger.info(f"[PID:{pid}] Starting async test case execution for ID: {test_case_id}, execution_id: {execution_id}")
         
         try:
-            # Create test run record immediately
-            test_run_id = self._create_test_run(test_case_id, status="running")
-            self.logger.info(f"[PID:{pid}] Created test run with ID: {test_run_id}")
+            # Create test run record immediately with execution_id
+            test_run_id = self._create_test_run(test_case_id, status="running", execution_id=execution_id)
+            self.logger.info(f"[PID:{pid}] Created test run with ID: {test_run_id}, linked to execution: {execution_id}")
             
             # Start background execution
             import threading
@@ -1624,6 +1596,25 @@ class TestRunner:
             # Ensure browser is initialized
             self._ensure_browser_initialized()
             
+            # Navigate to base_url from environment variables before executing steps
+            base_url = env.base_url
+            if base_url:
+                self.logger.info(f"[PID:{pid}] Navigating to base_url from environment: {base_url}")
+                try:
+                    self.browser.navigate(base_url)
+                    self.logger.info(f"[PID:{pid}] Successfully navigated to base_url: {base_url}")
+                except Exception as e:
+                    self.logger.error(f"[PID:{pid}] Failed to navigate to base_url {base_url}: {str(e)}")
+                    return {
+                        "test_run_id": test_run_id,
+                        "status": "failed",
+                        "exception": f"Failed to navigate to base_url: {str(e)}",
+                        "stdout": None,
+                        "stderr": f"Failed to navigate to base_url {base_url}: {str(e)}"
+                    }
+            else:
+                self.logger.warning(f"[PID:{pid}] No base_url found in environment variables")
+            
             self.logger.info(f"[PID:{pid}] Executing {len(steps)} test steps for test case: {test_case_name}")
             
             # Execute each step and track results
@@ -1678,9 +1669,9 @@ class TestRunner:
                     except Exception as screenshot_error:
                         self.logger.warning(f"[PID:{pid}] Failed to capture screenshot for step {step_order}: {screenshot_error}")
                     
-                    # Update step result to success with screenshot data
+                    # Update step result to passed with screenshot data
                     self._update_step_execution_result(
-                        step_result_id, "success", None, screenshot_path, screenshot_base64, execution_time_ms
+                        step_result_id, "passed", None, screenshot_path, screenshot_base64, execution_time_ms
                     )
                     
                     self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
@@ -2097,3 +2088,82 @@ class TestRunner:
             self.logger.error(f"[PID:{pid}] Failed to set stop execution flag in Redis: {e}")
         
         return False
+
+    def _save_step_with_session(self, cursor, conn, test_case_id, step_order, element_purpose, action, element_locator, value, by_strategy):
+        """
+        Save a test step using an existing database session connection.
+        Returns the step_id of the saved step.
+        """
+        try:
+            cursor.execute(
+                """
+                INSERT INTO test_steps (test_case_id, step_number, description, action, target, element_path, value, "order") 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) 
+                RETURNING id
+                """,
+                (test_case_id, step_order, element_purpose, action, element_locator, element_locator, value, step_order)
+            )
+            step_id = cursor.fetchone()[0]
+            conn.commit()
+            return step_id
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Failed to save step with session: {e}")
+            raise
+
+    def _update_step_with_screenshot_session(self, cursor, conn, step_id, screenshot_path, encoded_screenshot, description=""):
+        """
+        Update a test step with screenshot information using existing session connection.
+        """
+        try:
+            # Update step with screenshot path
+            cursor.execute("""
+                UPDATE test_steps 
+                SET screenshot_path = %s
+                WHERE id = %s
+            """, (screenshot_path, step_id))
+            
+            # Insert screenshot data
+            cursor.execute("""
+                INSERT INTO screenshots (test_step_id, screenshot, description)
+                VALUES (%s, %s, %s)
+            """, (step_id, encoded_screenshot, description))
+            
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Failed to update step with screenshot using session: {e}")
+            raise
+
+    def _update_step_error_session(self, cursor, conn, step_id, error_message):
+        """
+        Update a test step with error message using existing session connection.
+        """
+        try:
+            cursor.execute("""
+                UPDATE test_steps 
+                SET error_message = %s
+                WHERE id = %s
+            """, (error_message, step_id))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Failed to update step error using session: {e}")
+            raise
+
+    def _update_generation_end_time_with_session(self, cursor, conn, test_case_id):
+        """
+        Update the steps_generation_end_time for the test case using existing session connection.
+        """
+        try:
+            end_time = datetime.now()
+            cursor.execute("""
+                UPDATE test_cases 
+                SET steps_generation_end_time = %s
+                WHERE id = %s
+            """, (end_time, test_case_id))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Failed to update generation end time using session: {e}")
+            raise

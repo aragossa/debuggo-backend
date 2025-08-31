@@ -130,20 +130,17 @@ class BrowserAutomation:
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Error waiting for page load: {str(e)}")
 
-    def find_element(self, selector, by='xpath'):
+    def find_element(self, selector, by='xpath', action=None):
         """
-        Find an element using either CSS selector or XPath.
-
-        Args:
-            selector (str): Element selector
-            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
+        Find element using either CSS selector or XPath with fallback strategies.
+        Action-aware strategy for better performance.
         """
         try:
             # Handle None or empty by parameter
             if not by:
                 by = 'xpath'  # Default to xpath if by is None or empty
             
-            # Set the appropriate By strategy based on by parameter
+            # Set the appropriate By strategy based by parameter
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
 
             # First try to find the element with presence_of_element_located
@@ -208,15 +205,28 @@ class BrowserAutomation:
                             self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
                             raise TimeoutException(f"Element not found: {selector}")
                 else:
-                    # Try one more time with a different wait condition
-                    try:
-                        self.logger.info(f"[PID:{self.pid}] Trying with element_to_be_clickable...")
-                        element = WebDriverWait(self.driver, self.timeout).until(
-                            EC.element_to_be_clickable((by_strategy, selector))
-                        )
-                        return element
-                    except:
-                        # Last resort: try with JavaScript
+                    # Choose appropriate wait condition based on action
+                    if action == 'click':
+                        try:
+                            self.logger.info(f"[PID:{self.pid}] Trying with element_to_be_clickable for click action...")
+                            element = WebDriverWait(self.driver, self.timeout).until(
+                                EC.element_to_be_clickable((by_strategy, selector))
+                            )
+                            return element
+                        except:
+                            pass
+                    else:
+                        # For type, wait, etc. - just need element to be present and visible
+                        try:
+                            self.logger.info(f"[PID:{self.pid}] Trying with visibility_of_element_located for {action or 'unknown'} action...")
+                            element = WebDriverWait(self.driver, self.timeout).until(
+                                EC.visibility_of_element_located((by_strategy, selector))
+                            )
+                            return element
+                        except:
+                            pass
+                    
+                    # Last resort: try with JavaScript
                         self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
                         if by.lower() == 'xpath':
                             # For XPath, we need to use document.evaluate
@@ -248,61 +258,54 @@ class BrowserAutomation:
         Click an element using either CSS selector or XPath.
 
         Args:
-            selector (str): Element selector
-            by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
+            selector (str): The CSS selector or XPath to find the element.
+            by (str): Either 'css' or 'xpath' to specify the selector type.
         """
+        element = self.find_element(selector, by, action='click')
+        
+        # Try standard click first
         try:
-            # First try to find the element using our enhanced find_element method
-            element = self.find_element(selector, by)
-            
-            # Try standard click first
-            try:
-                element.click()
-                self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
-                return
-            except Exception as e:
-                self.logger.warning(f"[PID:{self.pid}] Standard click failed, trying alternative methods: {str(e)}")
-            
-            # If standard click fails, try JavaScript click
-            try:
-                self.logger.info(f"[PID:{self.pid}] Trying JavaScript click...")
-                self.driver.execute_script("arguments[0].click();", element)
-                self.logger.info(f"[PID:{self.pid}] Clicked element with JavaScript: {selector}")
-                return
-            except Exception as js_error:
-                self.logger.warning(f"[PID:{self.pid}] JavaScript click failed: {str(js_error)}")
-            
-            # If JavaScript click fails, try Actions
-            try:
-                self.logger.info(f"[PID:{self.pid}] Trying Actions click...")
-                from selenium.webdriver.common.action_chains import ActionChains
-                actions = ActionChains(self.driver)
-                actions.move_to_element(element).click().perform()
-                self.logger.info(f"[PID:{self.pid}] Clicked element with Actions: {selector}")
-                return
-            except Exception as actions_error:
-                self.logger.warning(f"[PID:{self.pid}] Actions click failed: {str(actions_error)}")
-            
-            # If all methods fail, try to scroll to the element and then click
-            try:
-                self.logger.info(f"[PID:{self.pid}] Trying scroll and click...")
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
-                time.sleep(0.5)  # Give time for the page to settle after scrolling
-                element.click()
-                self.logger.info(f"[PID:{self.pid}] Clicked element after scrolling: {selector}")
-                return
-            except Exception as scroll_error:
-                self.logger.error(f"[PID:{self.pid}] All click methods failed: {str(scroll_error)}")
-                raise
-                
+            element.click()
+            self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
+            return
         except Exception as e:
-            self.logger.error(f"[PID:{self.pid}] Failed to click element {selector}: {str(e)}")
-      
-
+            self.logger.warning(f"[PID:{self.pid}] Standard click failed, trying alternative methods: {str(e)}")
+        
+        # If standard click fails, try JavaScript click
+        try:
+            self.logger.info(f"[PID:{self.pid}] Trying JavaScript click...")
+            self.driver.execute_script("arguments[0].click();", element)
+            self.logger.info(f"[PID:{self.pid}] Clicked element with JavaScript: {selector}")
+            return
+        except Exception as js_error:
+            self.logger.warning(f"[PID:{self.pid}] JavaScript click failed: {str(js_error)}")
+        
+        # If JavaScript click fails, try Actions
+        try:
+            self.logger.info(f"[PID:{self.pid}] Trying Actions click...")
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(self.driver)
+            actions.move_to_element(element).click().perform()
+            self.logger.info(f"[PID:{self.pid}] Clicked element with Actions: {selector}")
+            return
+        except Exception as actions_error:
+            self.logger.warning(f"[PID:{self.pid}] Actions click failed: {str(actions_error)}")
+        
+        # If all methods fail, try to scroll to the element and then click
+        try:
+            self.logger.info(f"[PID:{self.pid}] Trying scroll and click...")
+            self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
+            time.sleep(0.5)  # Give time for the page to settle after scrolling
+            element.click()
+            self.logger.info(f"[PID:{self.pid}] Clicked element after scrolling: {selector}")
+            return
+        except Exception as scroll_error:
+            self.logger.error(f"[PID:{self.pid}] All click methods failed: {str(scroll_error)}")
+            raise
+                
     def type_text(self, selector, text, by='xpath'):
         try:
-            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
-            element = self.find_element(selector, by_strategy)
+            element = self.find_element(selector, by, action='type')
             element.clear()
             element.send_keys(text)
             self.logger.info(f"[PID:{self.pid}] Typed text: {text} into element: {selector}")
