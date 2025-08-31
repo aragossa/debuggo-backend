@@ -1626,8 +1626,10 @@ class TestRunner:
             
             self.logger.info(f"[PID:{pid}] Executing {len(steps)} test steps for test case: {test_case_name}")
             
-            # Execute each step
+            # Execute each step and track results
             step_order = 0
+            failed_steps = 0
+            total_steps = len(steps)
             for step in steps:
                 # Check for stop execution flag
                 if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
@@ -1661,9 +1663,24 @@ class TestRunner:
                     # Calculate execution time
                     execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
                     
-                    # Update step result to success
+                    # Capture screenshot after successful step execution
+                    screenshot_path = None
+                    screenshot_base64 = None
+                    try:
+                        screenshot_path = self.browser.take_screenshot(f"step_{step_order}_{action}")
+                        self.logger.info(f"[PID:{pid}] Screenshot captured: {screenshot_path}")
+                        
+                        # Convert screenshot to base64 for database storage
+                        if screenshot_path and os.path.exists(screenshot_path):
+                            with open(screenshot_path, "rb") as image_file:
+                                screenshot_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+                                
+                    except Exception as screenshot_error:
+                        self.logger.warning(f"[PID:{pid}] Failed to capture screenshot for step {step_order}: {screenshot_error}")
+                    
+                    # Update step result to success with screenshot data
                     self._update_step_execution_result(
-                        step_result_id, "success", None, None, None, execution_time_ms
+                        step_result_id, "success", None, screenshot_path, screenshot_base64, execution_time_ms
                     )
                     
                     self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
@@ -1672,27 +1689,59 @@ class TestRunner:
                     # Calculate execution time
                     execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
                     
-                    # Update step result to failed
+                    # Capture screenshot for failed step as well
+                    screenshot_path = None
+                    screenshot_base64 = None
+                    try:
+                        screenshot_path = self.browser.take_screenshot(f"step_{step_order}_{action}_error")
+                        self.logger.info(f"[PID:{pid}] Error screenshot captured: {screenshot_path}")
+                        
+                        # Convert screenshot to base64 for database storage
+                        if screenshot_path and os.path.exists(screenshot_path):
+                            with open(screenshot_path, "rb") as image_file:
+                                screenshot_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+                                
+                    except Exception as screenshot_error:
+                        self.logger.warning(f"[PID:{pid}] Failed to capture error screenshot for step {step_order}: {screenshot_error}")
+                    
+                    # Update step result to failed with screenshot data
                     self._update_step_execution_result(
-                        step_result_id, "failed", str(step_error), None, None, execution_time_ms
+                        step_result_id, "failed", str(step_error), screenshot_path, screenshot_base64, execution_time_ms
                     )
                     
                     self.logger.error(f"[PID:{pid}] Step {step_order} failed: {step_error}")
+                    failed_steps += 1
                     
                     # Continue to next step instead of stopping entire test
                     continue
             
-            self.logger.info(f"[PID:{pid}] All steps completed for test case {test_case_id}")
+            # Clean up any remaining steps in 'running' status
+            self._cleanup_running_steps(test_run_id)
+            
+            # Determine final test run status based on step results
+            if failed_steps > 0:
+                final_status = "failed" 
+                final_stdout = f"Test case '{test_case_name}' completed with {failed_steps}/{total_steps} steps failed"
+                final_stderr = f"{failed_steps} out of {total_steps} steps failed"
+                self.logger.warning(f"[PID:{pid}] Test case {test_case_id} completed with {failed_steps} failed steps")
+            else:
+                final_status = "completed"
+                final_stdout = f"Test case '{test_case_name}' executed successfully"
+                final_stderr = None
+                self.logger.info(f"[PID:{pid}] All steps completed successfully for test case {test_case_id}")
             
             return {
                 "test_run_id": test_run_id,
-                "status": "completed",
+                "status": final_status,
                 "exception": None,
-                "stdout": f"Test case '{test_case_name}' executed successfully",
-                "stderr": None
+                "stdout": final_stdout,
+                "stderr": final_stderr
             }
             
         except Exception as e:
+            # Clean up any remaining steps in 'running' status even on exception
+            self._cleanup_running_steps(test_run_id)
+            
             self.logger.error(f"[PID:{pid}] Test case execution failed: {e}")
             return {
                 "test_run_id": test_run_id,
@@ -1987,6 +2036,39 @@ class TestRunner:
             self.logger.error(f"[PID:{pid}] Failed to set stop flag in Redis: {e}")
         
         return False
+
+    def _cleanup_running_steps(self, test_run_id: int):
+        """
+        Clean up any steps that are still in 'running' status for a completed test run.
+        Sets them to 'skipped' status to indicate they weren't executed.
+        
+        Args:
+            test_run_id: ID of the test run
+        """
+        try:
+            connection = get_db_connection()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE test_step_execution_results 
+                        SET status = 'skipped', 
+                            error_message = 'Step not executed - test run completed',
+                            execution_time_ms = 0
+                        WHERE test_run_id = %s AND status = 'running'
+                        """,
+                        (test_run_id,)
+                    )
+                    
+                    rows_updated = cursor.rowcount
+                    if rows_updated > 0:
+                        self.logger.info(f"Cleaned up {rows_updated} running steps for test run {test_run_id}")
+                    
+                    connection.commit()
+            finally:
+                connection.close()
+        except Exception as e:
+            self.logger.error(f"Error cleaning up running steps for test run {test_run_id}: {e}")
 
     def stop_test_case_execution(self, test_case_id: int) -> bool:
         """

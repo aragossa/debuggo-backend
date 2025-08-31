@@ -2786,7 +2786,7 @@ async def get_test_step_screenshot(
     Retrieve the screenshot for a specific test step.
     Returns the screenshot as binary PNG data.
     """
-    # logger.info(f"Screenshot request started for step_id: {step_id}")
+    logger.info(f"Screenshot request started for step_id: {step_id}, user client_id: {current_user.client_id}")
     conn = None
     try:
         conn = get_db_connection()
@@ -2806,6 +2806,7 @@ async def get_test_step_screenshot(
                 (step_id, str(current_user.client_id))
             )
             result = cursor.fetchone()
+            logger.info(f"Screenshot query result for step {step_id}: {'Found' if result else 'Not found'}")
             
             # If not found in new system, try old screenshots table
             if not result:
@@ -2827,6 +2828,7 @@ async def get_test_step_screenshot(
                 pass
             
             if not result:
+                logger.warning(f"No screenshot found for step {step_id} with client_id {current_user.client_id}")
                 # Return JSON response indicating no screenshot available
                 return JSONResponse(content={
                     "screenshot_available": False,
@@ -2887,8 +2889,8 @@ async def get_test_step_screenshot(
             try:
                 # Clean base64 data by removing whitespace and line breaks
                 cleaned_base64 = screenshot_base64.replace('\n', '').replace('\r', '').replace(' ', '').strip()
-                # logger.info(f"Screenshot decode - Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
-                # logger.info(f"Screenshot decode - First 20 chars of base64: {cleaned_base64[:20]}")
+                logger.info(f"Screenshot decode - Original base64 length: {len(screenshot_base64)}, cleaned length: {len(cleaned_base64)}")
+                logger.info(f"Screenshot decode - First 20 chars of base64: {cleaned_base64[:20]}")
                 
                 # Check if base64 data has valid padding
                 missing_padding = len(cleaned_base64) % 4
@@ -2897,17 +2899,29 @@ async def get_test_step_screenshot(
                     # logger.info(f"Screenshot decode - Added padding, new length: {len(cleaned_base64)}")
                 
                 screenshot_binary = base64.b64decode(cleaned_base64)
-                # logger.info(f"Screenshot decode - Binary data size: {len(screenshot_binary)} bytes")
-                # logger.info(f"Screenshot decode - First 8 bytes: {list(screenshot_binary[:8])}")
+                logger.info(f"Screenshot decode - Binary data size: {len(screenshot_binary)} bytes")
+                
+                # Check PNG signature (cannot use backslashes in f-string)
+                png_signature = b'\x89PNG\r\n\x1a\n'
+                is_valid_png = screenshot_binary[:8] == png_signature
+                logger.info(f"Screenshot decode - PNG signature check: {is_valid_png}")
                 
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)
                 
                 # Return StreamingResponse with the image data
+                logger.info(f"Returning screenshot as StreamingResponse for step {step_id}")
+                logger.info(f"Screenshot binary first 16 bytes: {screenshot_binary[:16]}")
+                logger.info(f"Screenshot binary last 16 bytes: {screenshot_binary[-16:]}")
+                
                 return StreamingResponse(
                     io.BytesIO(screenshot_binary),
                     media_type="image/png",
-                    headers={"Content-Disposition": "inline; filename=screenshot.png"}
+                    headers={
+                        "Content-Disposition": "inline; filename=screenshot.png",
+                        "Cache-Control": "no-cache",
+                        "Content-Length": str(len(screenshot_binary))
+                    }
                 )
             except Exception as decode_error:
                 logger.error(f"Error decoding base64 screenshot: {decode_error}")
@@ -2965,10 +2979,10 @@ async def get_test_run_steps(
             cursor.execute(
                 """
                 SELECT ts.id, ts.step_order, ts.description, ts.action, ts.element_path, ts.value,
-                       CASE WHEN s.id IS NOT NULL THEN true ELSE false END as has_screenshot,
-                       tser.status, tser.error_message, tser.execution_time_ms, tser.completed_at
+                       CASE WHEN (tser.screenshot_base64 IS NOT NULL OR tser.screenshot_path IS NOT NULL) THEN true ELSE false END as has_screenshot,
+                       tser.status, tser.error_message, tser.execution_time_ms, tser.completed_at,
+                       tser.screenshot_path, tser.screenshot_base64
                 FROM test_steps ts
-                LEFT JOIN screenshots s ON ts.id = s.test_step_id
                 LEFT JOIN test_step_execution_results tser ON ts.id = tser.test_step_id AND tser.test_run_id = %s
                 WHERE ts.test_case_id = %s
                 ORDER BY ts.step_order
@@ -2979,6 +2993,7 @@ async def get_test_run_steps(
             for row in cursor.fetchall():
                 steps.append({
                     "id": row[0],
+                    "test_step_id": row[0],  # Add explicit test_step_id for screenshot API
                     "step_order": row[1],
                     "description": row[2],
                     "action": row[3],
@@ -2988,7 +3003,9 @@ async def get_test_run_steps(
                     "status": row[7] if row[7] else "not_executed",
                     "error_message": row[8],
                     "execution_time_ms": row[9],
-                    "completed_at": row[10]
+                    "completed_at": row[10],
+                    "screenshot_path": row[11],
+                    "screenshot_base64": bool(row[12]) if row[12] else False  # Boolean flag for frontend
                 })
             
             return {"steps": steps, "test_case_id": test_case_id, "run_id": run_id}
