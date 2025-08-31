@@ -178,9 +178,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
     with get_db_connection_context() as conn:
         # Debug logging
-        logger.info(f"Connection status: closed={conn.closed}, autocommit={conn.autocommit}")
         if conn.closed:
-            logger.error("Connection is already closed when received from context manager")
             raise HTTPException(status_code=500, detail="Database connection error")
         
         user = get_user_by_email(conn, email)
@@ -2924,7 +2922,6 @@ async def get_test_step_screenshot(
     Retrieve the screenshot for a specific test step.
     Returns the screenshot as binary PNG data.
     """
-    logger.info(f"Screenshot request started for step_id: {step_id}, user client_id: {current_user.client_id}")
     conn = None
     try:
         conn = get_db_connection()
@@ -3042,12 +3039,7 @@ async def get_test_step_screenshot(
                 # Create a BytesIO object to serve as file-like object
                 screenshot_io = io.BytesIO(screenshot_binary)
                 
-                # Return StreamingResponse with the image data
-                logger.info(f"Returning screenshot as StreamingResponse for step {step_id}")
-                logger.info(f"Screenshot binary first 16 bytes: {screenshot_binary[:16]}")
-                logger.info(f"Screenshot binary last 16 bytes: {screenshot_binary[-16:]}")
-                
-                return StreamingResponse(
+                   return StreamingResponse(
                     io.BytesIO(screenshot_binary),
                     media_type="image/png",
                     headers={
