@@ -2138,12 +2138,13 @@ class TestRunner:
             if not self._redis:
                 return {"status": "error", "message": "Redis not available", "stopped_count": 0}
             
-            # Get all running test case keys
+            # Get all running test case keys from Redis
             running_pattern = "test_case_running:*"
             running_keys = self._redis.keys(running_pattern)
             
-            self.logger.info(f"[PID:{pid}] Found {len(running_keys)} running test cases")
+            self.logger.info(f"[PID:{pid}] Found {len(running_keys)} running test cases in Redis")
             
+            # Process Redis keys first
             for key in running_keys:
                 try:
                     # Extract test case ID from key
@@ -2213,6 +2214,65 @@ class TestRunner:
                 except Exception as e:
                     error_count += 1
                     self.logger.error(f"[PID:{pid}] Failed to stop test case from key {key}: {e}")
+            
+            # Also check for stale database records without Redis keys
+            self.logger.info(f"[PID:{pid}] Checking for stale database records without Redis keys...")
+            
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                # Find test runs with 'running' status
+                query = """
+                    SELECT DISTINCT tr.test_case_id, tc.name
+                    FROM test_runs tr
+                    JOIN test_cases tc ON tr.test_case_id = tc.id
+                    WHERE tr.result = 'running'
+                """
+                params = []
+                
+                # Apply client filter if provided
+                if client_id:
+                    query += " AND tc.client_id = %s"
+                    params.append(client_id)
+                
+                cursor.execute(query, params)
+                stale_records = cursor.fetchall()
+                
+                self.logger.info(f"[PID:{pid}] Found {len(stale_records)} database records with 'running' status")
+                
+                for test_case_id, test_name in stale_records:
+                    # Check if Redis key exists
+                    redis_key = f"test_case_running:{test_case_id}"
+                    if not self._redis.exists(redis_key):
+                        # This is a stale record - no Redis key but database shows 'running'
+                        self.logger.info(f"[PID:{pid}] Found stale record for test case {test_case_id} ({test_name})")
+                        
+                        # Update database to mark as stopped
+                        try:
+                            cursor.execute("""
+                                UPDATE test_runs 
+                                SET result = 'stopped', duration = EXTRACT(EPOCH FROM (NOW() - run_date))::real
+                                WHERE test_case_id = %s AND result = 'running'
+                            """, (test_case_id,))
+                            
+                            updated_rows = cursor.rowcount
+                            if updated_rows > 0:
+                                stopped_count += updated_rows
+                                self.logger.info(f"[PID:{pid}] Cleaned up {updated_rows} stale database records for test case {test_case_id}")
+                        
+                        except Exception as cleanup_error:
+                            error_count += 1
+                            self.logger.error(f"[PID:{pid}] Failed to cleanup stale record for test case {test_case_id}: {cleanup_error}")
+                
+                conn.commit()
+                return_db_connection(conn)
+                
+            except Exception as db_error:
+                error_count += 1
+                self.logger.error(f"[PID:{pid}] Failed to check for stale database records: {db_error}")
+                if 'conn' in locals():
+                    return_db_connection(conn)
             
             return {
                 "status": "success",
