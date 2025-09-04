@@ -27,6 +27,7 @@ import requests
 from models.user import User, UserCreate, UserLogin, Token, OAuthUserInfo
 from models.client import Client, ClientCreate
 from models.test import GenerateStepsRequest
+from models.checklist import Checklist, ChecklistCreate, ChecklistUpdate, ChecklistItem, ChecklistItemCreate, ChecklistItemUpdate, ChecklistWithoutItems
 from Utils.System import System
 from Utils.BrowserAutomation.TestRunner import TestRunner
 from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
@@ -4298,6 +4299,344 @@ async def get_pool_status_endpoint():
             status_code=500,
             detail=f"Failed to get pool status: {str(e)}"
         )
+
+# ===== CHECKLIST ENDPOINTS =====
+
+@app.get("/api/checklists", response_model=List[ChecklistWithoutItems])
+async def get_user_checklists(current_user: User = Depends(get_current_user)):
+    """
+    Get all checklists for the current user.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, user_id, title, description, is_active, created_at, updated_at
+                FROM checklists 
+                WHERE user_id = %s 
+                ORDER BY created_at DESC
+            """, (current_user.id,))
+            
+            checklists = []
+            for row in cur.fetchall():
+                checklist_dict = dict(row)
+                checklist_dict['created_at'] = checklist_dict['created_at'].isoformat()
+                checklist_dict['updated_at'] = checklist_dict['updated_at'].isoformat()
+                checklists.append(checklist_dict)
+            
+            return checklists
+
+@app.get("/api/checklists/{checklist_id}", response_model=Checklist)
+async def get_checklist_with_items(
+    checklist_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get a specific checklist with all its items.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Get checklist
+            cur.execute("""
+                SELECT id, user_id, title, description, is_active, created_at, updated_at
+                FROM checklists 
+                WHERE id = %s AND user_id = %s
+            """, (checklist_id, current_user.id))
+            
+            checklist_row = cur.fetchone()
+            if not checklist_row:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist not found"
+                )
+            
+            # Get checklist items
+            cur.execute("""
+                SELECT id, checklist_id, title, description, is_enabled, is_checked, 
+                       order_index, created_at, updated_at
+                FROM checklist_items 
+                WHERE checklist_id = %s 
+                ORDER BY order_index ASC, created_at ASC
+            """, (checklist_id,))
+            
+            items = []
+            for item_row in cur.fetchall():
+                item_dict = dict(item_row)
+                item_dict['created_at'] = item_dict['created_at'].isoformat()
+                item_dict['updated_at'] = item_dict['updated_at'].isoformat()
+                items.append(item_dict)
+            
+            checklist_dict = dict(checklist_row)
+            checklist_dict['created_at'] = checklist_dict['created_at'].isoformat()
+            checklist_dict['updated_at'] = checklist_dict['updated_at'].isoformat()
+            checklist_dict['items'] = items
+            
+            return checklist_dict
+
+@app.post("/api/checklists", response_model=ChecklistWithoutItems)
+async def create_checklist(
+    checklist_data: ChecklistCreate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a new checklist for the current user.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO checklists (user_id, title, description, is_active)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, user_id, title, description, is_active, created_at, updated_at
+            """, (current_user.id, checklist_data.title, checklist_data.description, checklist_data.is_active))
+            
+            checklist_row = cur.fetchone()
+            conn.commit()
+            
+            checklist_dict = dict(checklist_row)
+            checklist_dict['created_at'] = checklist_dict['created_at'].isoformat()
+            checklist_dict['updated_at'] = checklist_dict['updated_at'].isoformat()
+            
+            return checklist_dict
+
+@app.put("/api/checklists/{checklist_id}", response_model=ChecklistWithoutItems)
+async def update_checklist(
+    checklist_id: int,
+    checklist_data: ChecklistUpdate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update a checklist's basic information.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check if checklist exists and belongs to user
+            cur.execute("""
+                SELECT id FROM checklists 
+                WHERE id = %s AND user_id = %s
+            """, (checklist_id, current_user.id))
+            
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist not found"
+                )
+            
+            # Build update query dynamically
+            update_fields = []
+            update_values = []
+            
+            if checklist_data.title is not None:
+                update_fields.append("title = %s")
+                update_values.append(checklist_data.title)
+            
+            if checklist_data.description is not None:
+                update_fields.append("description = %s")
+                update_values.append(checklist_data.description)
+            
+            if checklist_data.is_active is not None:
+                update_fields.append("is_active = %s")
+                update_values.append(checklist_data.is_active)
+            
+            if not update_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No fields to update"
+                )
+            
+            update_values.append(checklist_id)
+            update_values.append(current_user.id)
+            
+            cur.execute(f"""
+                UPDATE checklists 
+                SET {', '.join(update_fields)}
+                WHERE id = %s AND user_id = %s
+                RETURNING id, user_id, title, description, is_active, created_at, updated_at
+            """, update_values)
+            
+            checklist_row = cur.fetchone()
+            conn.commit()
+            
+            checklist_dict = dict(checklist_row)
+            checklist_dict['created_at'] = checklist_dict['created_at'].isoformat()
+            checklist_dict['updated_at'] = checklist_dict['updated_at'].isoformat()
+            
+            return checklist_dict
+
+@app.delete("/api/checklists/{checklist_id}")
+async def delete_checklist(
+    checklist_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a checklist and all its items.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cur:
+            # Check if checklist exists and belongs to user
+            cur.execute("""
+                SELECT id FROM checklists 
+                WHERE id = %s AND user_id = %s
+            """, (checklist_id, current_user.id))
+            
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist not found"
+                )
+            
+            # Delete checklist (items will be deleted by cascade)
+            cur.execute("""
+                DELETE FROM checklists 
+                WHERE id = %s AND user_id = %s
+            """, (checklist_id, current_user.id))
+            
+            conn.commit()
+            
+            return {"message": "Checklist deleted successfully"}
+
+@app.post("/api/checklists/{checklist_id}/items", response_model=ChecklistItem)
+async def create_checklist_item(
+    checklist_id: int,
+    item_data: ChecklistItemCreate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Add a new item to a checklist.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check if checklist exists and belongs to user
+            cur.execute("""
+                SELECT id FROM checklists 
+                WHERE id = %s AND user_id = %s
+            """, (checklist_id, current_user.id))
+            
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist not found"
+                )
+            
+            # Create checklist item
+            cur.execute("""
+                INSERT INTO checklist_items (checklist_id, title, description, is_enabled, is_checked, order_index)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id, checklist_id, title, description, is_enabled, is_checked, order_index, created_at, updated_at
+            """, (checklist_id, item_data.title, item_data.description, 
+                  item_data.is_enabled, item_data.is_checked, item_data.order_index))
+            
+            item_row = cur.fetchone()
+            conn.commit()
+            
+            item_dict = dict(item_row)
+            item_dict['created_at'] = item_dict['created_at'].isoformat()
+            item_dict['updated_at'] = item_dict['updated_at'].isoformat()
+            
+            return item_dict
+
+@app.put("/api/checklist-items/{item_id}", response_model=ChecklistItem)
+async def update_checklist_item(
+    item_id: int,
+    item_data: ChecklistItemUpdate,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update a checklist item.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Check if item exists and belongs to user's checklist
+            cur.execute("""
+                SELECT ci.id FROM checklist_items ci
+                JOIN checklists c ON ci.checklist_id = c.id
+                WHERE ci.id = %s AND c.user_id = %s
+            """, (item_id, current_user.id))
+            
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist item not found"
+                )
+            
+            # Build update query dynamically
+            update_fields = []
+            update_values = []
+            
+            if item_data.title is not None:
+                update_fields.append("title = %s")
+                update_values.append(item_data.title)
+            
+            if item_data.description is not None:
+                update_fields.append("description = %s")
+                update_values.append(item_data.description)
+            
+            if item_data.is_enabled is not None:
+                update_fields.append("is_enabled = %s")
+                update_values.append(item_data.is_enabled)
+            
+            if item_data.is_checked is not None:
+                update_fields.append("is_checked = %s")
+                update_values.append(item_data.is_checked)
+            
+            if item_data.order_index is not None:
+                update_fields.append("order_index = %s")
+                update_values.append(item_data.order_index)
+            
+            if not update_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No fields to update"
+                )
+            
+            update_values.append(item_id)
+            
+            cur.execute(f"""
+                UPDATE checklist_items 
+                SET {', '.join(update_fields)}
+                WHERE id = %s
+                RETURNING id, checklist_id, title, description, is_enabled, is_checked, order_index, created_at, updated_at
+            """, update_values)
+            
+            item_row = cur.fetchone()
+            conn.commit()
+            
+            item_dict = dict(item_row)
+            item_dict['created_at'] = item_dict['created_at'].isoformat()
+            item_dict['updated_at'] = item_dict['updated_at'].isoformat()
+            
+            return item_dict
+
+@app.delete("/api/checklist-items/{item_id}")
+async def delete_checklist_item(
+    item_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a checklist item.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cur:
+            # Check if item exists and belongs to user's checklist
+            cur.execute("""
+                SELECT ci.id FROM checklist_items ci
+                JOIN checklists c ON ci.checklist_id = c.id
+                WHERE ci.id = %s AND c.user_id = %s
+            """, (item_id, current_user.id))
+            
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Checklist item not found"
+                )
+            
+            # Delete checklist item
+            cur.execute("""
+                DELETE FROM checklist_items 
+                WHERE id = %s
+            """, (item_id,))
+            
+            conn.commit()
+            
+            return {"message": "Checklist item deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
