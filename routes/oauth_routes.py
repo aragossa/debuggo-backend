@@ -5,7 +5,7 @@ from Utils.oauth import oauth, google, get_user_info_from_google
 from models.user import OAuthUserInfo, Token
 from models.crud import get_or_create_oauth_user
 from Utils.auth import create_access_token
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from Utils.Connectors.db_utils import get_db_connection_context
 import secrets
 import os
 
@@ -74,8 +74,7 @@ async def auth_google_callback(request: Request):
         )
         
         # Get or create user in database
-        conn = get_db_connection()
-        try:
+        with get_db_connection_context() as conn:
             user = get_or_create_oauth_user(conn, oauth_user)
             
             # Create access token
@@ -101,14 +100,6 @@ async def auth_google_callback(request: Request):
             frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
             redirect_url = f"{frontend_url}?token={access_token}"
             return RedirectResponse(url=redirect_url)
-            
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error creating user: {str(e)}"
-            )
-        finally:
-            return_db_connection(conn)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

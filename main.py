@@ -290,50 +290,43 @@ def get_db_dependencies():
 
 @app.post("/api/register", response_model=User)
 async def register_user(user_data: UserCreate):
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
         return create_user(conn, user_data)
-    finally:
-        return_db_connection(conn)
 
 @app.post("/api/login", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
         cur = conn.cursor()
         cur.execute(
-            """
-            SELECT id, email, password_hash, full_name, is_active
-            FROM users WHERE email = %s
-            """,
+            "SELECT id, email, full_name, profile_picture, role, client_id FROM users WHERE email = %s",
             (form_data.username,)
         )
-        user_data = cur.fetchone()
-        
-        if not user_data or not verify_password(form_data.password, user_data[2]):
+        user = cur.fetchone()
+        cur.close()
+
+        if not user or not verify_password(form_data.password, user[1]):  
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-
-        # Update last login time
-        cur.execute(
-            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
-            (user_data[0],)
-        )
-        conn.commit()
-
-        # Create access token with longer expiration (24 hours instead of 60 minutes)
-        access_token_expires = timedelta(hours=24)
+        
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user_data[1]}, expires_delta=access_token_expires
+            data={"sub": user[1]}, expires_delta=access_token_expires  
         )
         
-        return {"access_token": access_token, "token_type": "bearer"}
-    finally:
-        cur.close()
-        return_db_connection(conn)
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_info": {
+                "id": user[0],
+                "email": user[1],
+                "full_name": user[2],
+                "profile_picture": user[3],
+                "role": user[4]
+            }
+        }
 
 # Refresh token endpoint removed to simplify authentication
 
@@ -349,28 +342,29 @@ async def get_users(current_user: User = Depends(get_current_user)):
             detail="Only admin users can view all users"
         )
     
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT u.id, u.email, u.full_name, u.role, u.client_id, c.name as client_name
+                SELECT u.id, u.email, u.full_name, u.profile_picture, u.role, u.client_id, c.name as client_name
                 FROM users u
                 LEFT JOIN clients c ON u.client_id = c.id
                 ORDER BY u.email
             """)
-            users = []
-            for row in cur.fetchall():
-                users.append({
-                    'id': row[0],
-                    'email': row[1],
-                    'full_name': row[2],
-                    'role': row[3],
-                    'client_id': row[4],
-                    'client_name': row[5]
+            users = cur.fetchall()
+            
+            users_list = []
+            for user in users:
+                users_list.append({
+                    "id": user[0],
+                    "email": user[1],
+                    "full_name": user[2],
+                    "profile_picture": user[3],
+                    "role": user[4],
+                    "client_id": user[5],
+                    "client_name": user[6] if user[6] else None
                 })
-            return users
-    finally:
-        return_db_connection(conn)
+                
+            return users_list
 
 @app.post("/api/generate_test_cases_from_data", response_model=Dict)
 async def generate_test_cases(
@@ -431,8 +425,7 @@ async def generate_test_cases(
 
 @app.get("/api/tests/tree")
 async def get_tests_tree(current_user: User = Depends(get_current_user)):
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
         with conn.cursor() as cur:
             # Convert UUID to string for the query
             client_id = str(current_user.client_id) if current_user.client_id else None
@@ -536,8 +529,6 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
             }
             
             return [root]
-    finally:
-        return_db_connection(conn)
 
 @app.get("/api/get_test_cases/{id}")
 async def get_test_cases(id: int, current_user: User = Depends(get_current_user)):
@@ -546,12 +537,9 @@ async def get_test_cases(id: int, current_user: User = Depends(get_current_user)
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not associated with any client"
         )
-    conn = get_db_connection()
-    try:
+    with get_db_connection_context() as conn:
         from fetch_test_steps import get_test_data_from_db_helper
         return get_test_data_from_db_helper(conn, id, str(current_user.client_id))
-    finally:
-        return_db_connection(conn)
 
 @app.post("/api/run_test_case/{id}", response_model=Dict)
 async def run_test_case(
@@ -579,8 +567,7 @@ async def run_test_case(
         # If environment_id is provided, fetch environment variables
         if request_data and "environment_id" in request_data:
             environment_id_param = request_data.get("environment_id")
-            conn = get_db_connection()
-            try:
+            with get_db_connection_context() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
@@ -599,9 +586,6 @@ async def run_test_case(
                             "login": env_data[1],
                             "password": env_data[2]
                         }
-            finally:
-                return_db_connection(conn)
-                conn = None  # Prevent double return in outer finally
         
         # Start test execution asynchronously and get test_run_id immediately
         result = runner.start_test_case_async(id, environment_vars, execution_id)
@@ -621,9 +605,7 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
     Get all currently running test cases and executions for the user's client.
     Returns active test runs and their current status.
     """
-    conn = None
-    try:
-        conn = get_db_connection()
+    with get_db_connection_context() as conn:
         cursor = conn.cursor()
         
         # Get running test cases from Redis and database
@@ -692,16 +674,6 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
                 })
         
         return {"running_tests": running_tests}
-    
-    except Exception as e:
-        print(f"Error in get_running_tests: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get running tests: {str(e)}"
-        )
-    finally:
-        if conn:
-            return_db_connection(conn)
 
 @app.get("/api/test_run/{test_run_id}/status")
 async def get_test_run_status(
