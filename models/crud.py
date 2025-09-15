@@ -51,8 +51,12 @@ def create_user(conn, user_data: UserCreate) -> User:
         # Create new user
         hashed_password = get_password_hash(user_data.password)
         
-        # Convert client_id to string if it exists
-        client_id_param = str(user_data.client_id) if user_data.client_id else None
+        # Convert client_id to string if it exists, otherwise create a new client
+        if user_data.client_id:
+            client_id_param = str(user_data.client_id)
+        else:
+            # Create a client for the new user if none provided
+            client_id_param = create_client_for_user(conn, user_data.email, user_data.full_name)
         
         cur.execute(
             """
@@ -64,6 +68,9 @@ def create_user(conn, user_data: UserCreate) -> User:
         )
         user_data = cur.fetchone()
         conn.commit()
+        
+        # Create default project structure for new user
+        create_default_project_structure(conn, client_id_param, user_data[0])
         
         return User(
             id=user_data[0],
@@ -198,6 +205,9 @@ def get_or_create_oauth_user(conn, user_info: OAuthUserInfo) -> User:
         updated_user = cur.fetchone()
         conn.commit()
         
+        # Create default project structure for new OAuth user
+        create_default_project_structure(conn, client_id, updated_user[0])
+        
         return User(
             id=updated_user[0],
             email=updated_user[1],
@@ -230,6 +240,77 @@ def create_client_for_user(conn, email: str, full_name: str = None) -> str:
         conn.commit()
     
     return client_id
+
+def create_default_project_structure(conn, client_id: str, user_id: int) -> str:
+    """Create default project structure for new user"""
+    with conn.cursor() as cur:
+        # Create Default Project
+        project_id = str(uuid.uuid4())
+        cur.execute(
+            """
+            INSERT INTO projects (id, name, description, client_id)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (project_id, "Default Project", "Default project for new user", client_id)
+        )
+        project_id = cur.fetchone()[0]
+        
+        # Create Default Folder (group type test case)
+        cur.execute(
+            """
+            INSERT INTO test_cases (name, description, parent_id, type, "order", project_id, client_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            ("Default Folder", "Default folder for organizing tests", None, "group", 1, project_id, client_id)
+        )
+        folder_id = cur.fetchone()[0]
+        
+        # Create Dummy Test Case inside the folder
+        cur.execute(
+            """
+            INSERT INTO test_cases (name, description, parent_id, type, "order", project_id, client_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            ("Sample Test Case", "This is a sample test case to get you started", folder_id, "test", 1, project_id, client_id)
+        )
+        test_case_id = cur.fetchone()[0]
+        
+        # Create sample test steps for the dummy test
+        sample_steps = [
+            {
+                'action': 'navigate',
+                'element_path': 'https://example.com',
+                'value': '',
+                'description': 'Navigate to example website'
+            },
+            {
+                'action': 'wait',
+                'element_path': '',
+                'value': '2',
+                'description': 'Wait for page to load'
+            },
+            {
+                'action': 'assert',
+                'element_path': 'title',
+                'value': 'Example Domain',
+                'description': 'Verify page title'
+            }
+        ]
+        
+        for i, step in enumerate(sample_steps, 1):
+            cur.execute(
+                """
+                INSERT INTO test_steps (test_case_id, step_order, action, element_path, value, description)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (test_case_id, i, step['action'], step['element_path'], step['value'], step['description'])
+            )
+        
+        conn.commit()
+        return project_id
 
 def get_client_test_cases(conn, client_id: str):
     with conn.cursor(cursor_factory=DictCursor) as cur:
