@@ -230,19 +230,23 @@ async def lifespan(app: FastAPI):
         from Utils.Connectors.db_utils import db_pool as utils_db_pool
         db_pool = utils_db_pool
     except Exception as e:
-        print(f"Failed to initialize database pool: {e}")
+        logger.info(f"Failed to initialize database pool: {e}")
         raise
 
     # Initialize Kafka consumer
     kafka_bootstrap_servers = f"{system.kafka_host}:{system.kafka_port}"
+    logger.info(f"🐛 DEBUG: Initializing Kafka with bootstrap_servers: {kafka_bootstrap_servers}")
+    logger.info(f"🐛 DEBUG: system.kafka_host = {system.kafka_host}")
+    logger.info(f"🐛 DEBUG: system.kafka_port = {system.kafka_port}")
+    
     try:
         kafka_consumer = KafkaMessageConsumer(kafka_bootstrap_servers, 'user_requests', 'debuggo-group')
         consumer_thread = Thread(target=kafka_consumer.consume_messages, daemon=True)
         consumer_thread.start()
-        print(f"Kafka consumer initialized and connected to {kafka_bootstrap_servers}")
+        logger.info(f"Kafka consumer initialized and connected to {kafka_bootstrap_servers}")
     except Exception as e:
-        print(f"Warning: Failed to initialize Kafka consumer: {e}")
-        print("Application will continue without Kafka integration")
+        logger.error(f"Warning: Failed to initialize Kafka consumer: {e}")
+        logger.error("Application will continue without Kafka integration")
         kafka_consumer = None
         consumer_thread = None
     
@@ -250,7 +254,7 @@ async def lifespan(app: FastAPI):
     try:
         TestRunner()  # This will initialize the Redis connection
     except Exception as e:
-        print(f"Failed to initialize TestRunner: {e}")
+        logger.error(f"Failed to initialize TestRunner: {e}")
         raise
     
     yield
@@ -399,6 +403,7 @@ async def generate_test_cases(
         # Initialize Kafka producer with required parameters
         system = System()
         bootstrap_servers = f"{system.kafka_host}:{system.kafka_port}"
+        logger.info(f"🐛 DEBUG: Producer bootstrap_servers: {bootstrap_servers}")
         topic = 'user_requests'
 
         # Send message to Kafka
@@ -645,7 +650,7 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
                         "status": "running"
                     })
         except Exception as redis_error:
-            print(f"Redis error in get_running_tests: {redis_error}")
+            logger.error(f"Redis error in get_running_tests: {redis_error}")
         
         # Also check database for running test runs
         cursor.execute("""
@@ -805,7 +810,7 @@ async def generate_steps(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating test case project: {e}")
+        logger.error(f"Error updating test case project: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update test case project: {str(e)}"
@@ -884,7 +889,7 @@ async def generate_steps(
         
         return {"status": "started"}
     except Exception as e:
-        print(f"Error generating test steps: {e}")
+        logger.error(f"Error generating test steps: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate test steps: {str(e)}"
@@ -931,7 +936,7 @@ async def confirm_generate_steps(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error deleting existing test steps: {e}")
+        logger.error(f"Error deleting existing test steps: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete existing test steps: {str(e)}"
@@ -1010,7 +1015,7 @@ async def confirm_generate_steps(
         
         return {"status": "started"}
     except Exception as e:
-        print(f"Error generating test steps: {e}")
+        logger.error(f"Error generating test steps: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate test steps: {str(e)}"
@@ -1076,7 +1081,7 @@ async def update_test_step(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating test step: {e}")
+        logger.error(f"Error updating test step: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
@@ -1115,7 +1120,7 @@ async def update_step_orders(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating step orders: {e}")
+        logger.error(f"Error updating step orders: {e}")
         return JSONResponse(
             status_code=500,
             content={"error": f"Failed to update step orders: {str(e)}"}
@@ -1457,7 +1462,7 @@ async def list_projects(current_user: User = Depends(get_current_user)):
                 for project in projects
             ]
     except Exception as e:
-        print(f"Error listing projects: {e}")
+        logger.error(f"Error listing projects: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list projects: {str(e)}"
@@ -1524,7 +1529,7 @@ async def create_project(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error creating project: {e}")
+        logger.error(f"Error creating project: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to create project: {str(e)}"
@@ -1570,7 +1575,7 @@ async def get_project(
                 "updated_at": project[5].isoformat() if project[5] else None
             }
     except Exception as e:
-        print(f"Error getting project: {e}")
+        logger.error(f"Error getting project: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get project: {str(e)}"
@@ -1640,7 +1645,7 @@ async def update_project(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating project: {e}")
+        logger.error(f"Error updating project: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update project: {str(e)}"
@@ -1689,7 +1694,7 @@ async def delete_project(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error deleting project: {e}")
+        logger.error(f"Error deleting project: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete project: {str(e)}"
@@ -1732,7 +1737,7 @@ async def get_project_test_tree(
                     detail="Project not found"
                 )
             
-            print(f"Fetching test tree for project_id: {project_id}, client_id: {client_id_str}")
+            logger.info(f"Fetching test tree for project_id: {project_id}, client_id: {client_id_str}")
             
             # Let's also check all test cases for this project
             cursor.execute(
@@ -1799,7 +1804,7 @@ async def get_project_test_tree(
             
             return root_items
     except Exception as e:
-        print(f"Error getting project test tree: {e}")
+        logger.error(f"Error getting project test tree: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get project test tree: {str(e)}"
@@ -1860,7 +1865,7 @@ async def get_project_environments(
                 for environment in environments
             ]
     except Exception as e:
-        print(f"Error getting project environments: {e}")
+        logger.error(f"Error getting project environments: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get project environments: {str(e)}"
@@ -1931,7 +1936,7 @@ async def create_environment(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error creating environment: {e}")
+        logger.error(f"Error creating environment: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to create environment: {str(e)}"
@@ -2005,7 +2010,7 @@ async def update_environment(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error updating environment: {e}")
+        logger.error(f"Error updating environment: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update environment: {str(e)}"
@@ -2063,7 +2068,7 @@ async def delete_environment(
     except Exception as e:
         if conn:
             conn.rollback()
-        print(f"Error deleting environment: {e}")
+        logger.error(f"Error deleting environment: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete environment: {str(e)}"
@@ -2105,14 +2110,14 @@ async def delete_test_step(
             raise HTTPException(status_code=404, detail="Test step not found")
         
         # Debug print statements to understand the values
-        print(f"Test step client_id: {step['client_id']}, type: {type(step['client_id'])}")
-        print(f"User client_id: {client_id}, type: {type(client_id)}")
+        logger.info(f"Test step client_id: {step['client_id']}, type: {type(step['client_id'])}")
+        logger.info(f"User client_id: {client_id}, type: {type(client_id)}")
         
         # Convert both to string for comparison if they're not already strings
         test_step_client_id = str(step['client_id'])
         user_client_id = str(client_id)
         
-        print(f"Comparing: '{test_step_client_id}' == '{user_client_id}'")
+        logger.info(f"Comparing: '{test_step_client_id}' == '{user_client_id}'")
         
         # Check if the user has permission to delete this test step
         if test_step_client_id != user_client_id:
@@ -2150,8 +2155,8 @@ async def delete_test_step(
         conn.rollback()
         # Include more detailed error information for debugging
         error_detail = f"Failed to delete test step: {e}"
-        print(f"Error in delete_test_step: {error_detail}")
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Error in delete_test_step: {error_detail}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
     finally:
         return_db_connection(conn)
@@ -2188,14 +2193,14 @@ async def delete_test_case(
             raise HTTPException(status_code=404, detail="Test case not found")
         
         # Debug print statements to understand the values
-        print(f"Test case client_id: {test_case['client_id']}, type: {type(test_case['client_id'])}")
-        print(f"User client_id: {client_id}, type: {type(client_id)}")
+        logger.info(f"Test case client_id: {test_case['client_id']}, type: {type(test_case['client_id'])}")
+        logger.info(f"User client_id: {client_id}, type: {type(client_id)}")
         
         # Convert both to string for comparison if they're not already strings
         test_case_client_id = str(test_case['client_id'])
         user_client_id = str(client_id)
         
-        print(f"Comparing: '{test_case_client_id}' == '{user_client_id}'")
+        logger.info(f"Comparing: '{test_case_client_id}' == '{user_client_id}'")
         
         # Check if the user has permission to delete this test case
         if test_case_client_id != user_client_id:
@@ -2219,8 +2224,8 @@ async def delete_test_case(
         conn.rollback()
         # Include more detailed error information for debugging
         error_detail = f"Failed to delete test case: {e}"
-        print(f"Error in delete_test_case: {error_detail}")
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Error in delete_test_case: {error_detail}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_detail)
     finally:
         return_db_connection(conn)
@@ -2397,10 +2402,10 @@ async def create_test_group(
             project_id_str = str(request_data.project_id) if request_data.project_id else None
             client_id_str = str(current_user.client_id) if current_user.client_id else None
             
-            print(f"Debug - Request data: {request_data}")
-            print(f"Debug - Project ID (raw): {request_data.project_id}, type: {type(request_data.project_id)}")
-            print(f"Debug - Project ID (string): {project_id_str}")
-            print(f"Debug - Client ID: {client_id_str}")
+            logger.info(f"Debug - Request data: {request_data}")
+            logger.info(f"Debug - Project ID (raw): {request_data.project_id}, type: {type(request_data.project_id)}")
+            logger.info(f"Debug - Project ID (string): {project_id_str}")
+            logger.info(f"Debug - Client ID: {client_id_str}")
             
             # Insert the new group
             cur.execute(
@@ -2420,8 +2425,8 @@ async def create_test_group(
             conn.commit()
             
             # Log the created group
-            print(f"Debug - Created group: {group}")
-            print(f"Debug - Group project_id: {group[7]}")
+            logger.info(f"Debug - Created group: {group}")
+            logger.info(f"Debug - Group project_id: {group[7]}")
             
             # Format the response
             return {
@@ -2436,7 +2441,7 @@ async def create_test_group(
             }
     except Exception as e:
         conn.rollback()
-        print(f"Error creating test group: {str(e)}")
+        logger.error(f"Error creating test group: {str(e)}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2484,8 +2489,8 @@ async def update_test_group(
             group_client_id = str(group[2]) if group[2] else None
             user_client_id = str(current_user.client_id) if current_user.client_id else None
             
-            print(f"Debug - Group client_id: {group_client_id}")
-            print(f"Debug - User client_id: {user_client_id}")
+            logger.info(f"Debug - Group client_id: {group_client_id}")
+            logger.info(f"Debug - User client_id: {user_client_id}")
             
             # Skip permission check if client_id is None (for development/testing)
             if group_client_id and user_client_id and group_client_id != user_client_id:
@@ -2564,8 +2569,8 @@ async def delete_test_group(
             group_client_id = str(group[2]) if group[2] else None
             user_client_id = str(current_user.client_id) if current_user.client_id else None
             
-            print(f"Debug - Group client_id: {group_client_id}")
-            print(f"Debug - User client_id: {user_client_id}")
+            logger.info(f"Debug - Group client_id: {group_client_id}")
+            logger.info(f"Debug - User client_id: {user_client_id}")
             
             # Skip permission check if client_id is None (for development/testing)
             if group_client_id and user_client_id and group_client_id != user_client_id:
@@ -2644,8 +2649,8 @@ async def create_test_case(
             project_id_str = str(request_data.project_id) if request_data.project_id else None
             client_id_str = str(current_user.client_id) if current_user.client_id else None
             
-            print(f"Debug - Project ID: {project_id_str}")
-            print(f"Debug - Client ID: {client_id_str}")
+            logger.info(f"Debug - Project ID: {project_id_str}")
+            logger.info(f"Debug - Client ID: {client_id_str}")
             
             # Insert the new test case
             cur.execute(
@@ -2679,7 +2684,7 @@ async def create_test_case(
             }
     except Exception as e:
         conn.rollback()
-        print(f"Error creating test case: {str(e)}")
+        logger.error(f"Error creating test case: {str(e)}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2720,8 +2725,8 @@ async def move_test_case(
             test_case_client_id = str(test_case[1]) if test_case[1] else None
             user_client_id = str(current_user.client_id) if current_user.client_id else None
             
-            print(f"Debug - Test case client_id: {test_case_client_id}")
-            print(f"Debug - User client_id: {user_client_id}")
+            logger.info(f"Debug - Test case client_id: {test_case_client_id}")
+            logger.info(f"Debug - User client_id: {user_client_id}")
             
             # Skip permission check if client_id is None (for development/testing)
             if test_case_client_id and user_client_id and test_case_client_id != user_client_id:
@@ -2756,7 +2761,7 @@ async def move_test_case(
             # Convert target group client_id to string for comparison
             target_group_client_id = str(target_group[2]) if target_group[2] else None
             
-            print(f"Debug - Target group client_id: {target_group_client_id}")
+            logger.info(f"Debug - Target group client_id: {target_group_client_id}")
             
             # Skip permission check if client_id is None (for development/testing)
             if target_group_client_id and user_client_id and target_group_client_id != user_client_id:
@@ -2796,7 +2801,7 @@ async def move_test_case(
                 }
             except Exception as sql_error:
                 conn.rollback()
-                print(f"SQL Error: {str(sql_error)}")
+                logger.error(f"SQL Error: {str(sql_error)}")
                 traceback.print_exc()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2804,7 +2809,7 @@ async def move_test_case(
                 )
     except Exception as e:
         conn.rollback()
-        print(f"Error in move_test_case: {str(e)}")
+        logger.error(f"Error in move_test_case: {str(e)}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2882,7 +2887,7 @@ async def update_test_case(
             }
     except Exception as e:
         conn.rollback()
-        print(f"Error updating test case: {str(e)}")
+        logger.error(f"Error updating test case: {str(e)}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3345,7 +3350,7 @@ async def test_case_generation_status(
                     if isinstance(next_step, bytes):
                         next_step = next_step.decode('utf-8')
                 except Exception as e:
-                    print(f"Error getting step information from Redis: {e}")
+                    logger.error(f"Error getting step information from Redis: {e}")
             
             # Get the current test steps
             cursor.execute(
@@ -3376,7 +3381,7 @@ async def test_case_generation_status(
                 "next_step": next_step
             }
     except Exception as e:
-        print(f"Error checking test case generation status: {e}")
+        logger.error(f"Error checking test case generation status: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
@@ -3419,7 +3424,7 @@ async def stop_test_case_generation(
             
             return {"status": "stopped"}
     except Exception as e:
-        print(f"Error stopping test case generation: {e}")
+        logger.error(f"Error stopping test case generation: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=500,

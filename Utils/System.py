@@ -23,7 +23,8 @@ class System:
             return
 
         # Load environment variables from .env file
-        load_dotenv()
+        # Don't override existing environment variables (preserve command-line overrides)
+        load_dotenv(override=False)
 
         # Database configuration
         self.db_host = os.getenv('DB_HOST', 'localhost')

@@ -15,7 +15,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
+# Don't override existing environment variables (preserve command-line overrides)
+load_dotenv(override=False)
 
 # Initialize database connection pool
 db_pool = None
