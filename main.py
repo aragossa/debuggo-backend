@@ -103,6 +103,7 @@ class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
     value: Optional[str] = None
     element_path: Optional[str] = None
+    description: Optional[str] = None
 
 class StepOrderUpdate(BaseModel):
     test_case_id: int
@@ -142,11 +143,13 @@ class CreateTestCaseRequest(BaseModel):
     description: Optional[str] = None
     parent_id: Optional[int] = None
     project_id: Optional[UUID4] = None
+    test_type: str = 'ui'  # Default to 'ui' type
 
 class UpdateTestCaseRequest(BaseModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[int] = None
+    test_type: Optional[str] = None
 
 class CreateTestExecutionRequest(BaseModel):
     name: str
@@ -441,13 +444,13 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                 cur.execute(
                     """
                     WITH RECURSIVE TestCaseHierarchy AS (
-                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at
+                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at, test_type
                         FROM test_cases
                         WHERE parent_id IS NULL
                         
                         UNION ALL
                         
-                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at
+                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at, tc.test_type
                         FROM test_cases tc
                         JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                     )
@@ -462,7 +465,8 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                         t.updated_at,
                         c.id as client_id,
                         c.name as client_name,
-                        t.project_id
+                        t.project_id,
+                        t.test_type
                     FROM TestCaseHierarchy t
                     JOIN clients c ON t.client_id = c.id
                     ORDER BY t.parent_id NULLS FIRST, t."order"
@@ -472,13 +476,13 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                 cur.execute(
                     """
                     WITH RECURSIVE TestCaseHierarchy AS (
-                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at
+                        SELECT id, name, description, parent_id, type, "order", client_id, project_id, created_at, updated_at, test_type
                         FROM test_cases
                         WHERE parent_id IS NULL AND client_id = %s AND project_id = %s
                         
                         UNION ALL
                         
-                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at
+                        SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.client_id, tc.project_id, tc.created_at, tc.updated_at, tc.test_type
                         FROM test_cases tc
                         JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                         WHERE tc.client_id = %s AND tc.project_id = %s
@@ -494,7 +498,8 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                         t.updated_at,
                         c.id as client_id,
                         c.name as client_name,
-                        t.project_id
+                        t.project_id,
+                        t.test_type
                     FROM TestCaseHierarchy t
                     JOIN clients c ON t.client_id = c.id
                     WHERE c.id = %s
@@ -519,21 +524,80 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                     'updated_at': row[7].isoformat() if row[7] else None,
                     'client_id': row[8],
                     'client_name': row[9],
-                    'project_id': row[10]
+                    'project_id': row[10],
+                    'test_type': row[11]
                 })
             
             # Use the build_tree function from test_case_builder
             tree_data = build_tree(test_cases_list)
             
-            # Create root node
-            root = {
-                'id': 'root',
-                'name': 'Test Cases',
-                'type': 'root',
-                'children': tree_data
-            }
+            # Group by test type with recursive handling of groups
+            def categorize_items(items):
+                """Recursively categorize items into UI and API groups"""
+                ui_items = []
+                api_items = []
+                
+                for item in items:
+                    if item.get('type') == 'test':
+                        # Individual test case - categorize by test_type
+                        if item.get('test_type') == 'api':
+                            api_items.append(item)
+                        else:  # Default to UI for backward compatibility
+                            ui_items.append(item)
+                    elif item.get('type') == 'group':
+                        # Group - analyze its children to determine placement
+                        if 'children' in item and item['children']:
+                            ui_children, api_children = categorize_items(item['children'])
+                            
+                            # Create copies of the group for each type that has children
+                            if ui_children:
+                                ui_group_copy = {
+                                    **item,
+                                    'children': ui_children
+                                }
+                                ui_items.append(ui_group_copy)
+                            
+                            if api_children:
+                                api_group_copy = {
+                                    **item, 
+                                    'children': api_children
+                                }
+                                api_items.append(api_group_copy)
+                        else:
+                            # Empty group - default to UI
+                            ui_items.append(item)
+                    else:
+                        # Other types (root, etc.) - default to UI
+                        ui_items.append(item)
+                
+                return ui_items, api_items
             
-            return [root]
+            ui_cases, api_cases = categorize_items(tree_data)
+            
+            # Create type-based groups
+            grouped_items = []
+            
+            if ui_cases:
+                ui_group = {
+                    'id': 'ui_group',
+                    'name': 'UI Tests',
+                    'type': 'type_group',
+                    'test_type': 'ui',
+                    'children': ui_cases
+                }
+                grouped_items.append(ui_group)
+            
+            if api_cases:
+                api_group = {
+                    'id': 'api_group', 
+                    'name': 'API Tests',
+                    'type': 'type_group',
+                    'test_type': 'api',
+                    'children': api_cases
+                }
+                grouped_items.append(api_group)
+            
+            return grouped_items
 
 @app.get("/api/get_test_cases/{id}")
 async def get_test_cases(id: int, current_user: User = Depends(get_current_user)):
@@ -546,6 +610,68 @@ async def get_test_cases(id: int, current_user: User = Depends(get_current_user)
         from fetch_test_steps import get_test_data_from_db_helper
         return get_test_data_from_db_helper(conn, id, str(current_user.client_id))
 
+@app.get("/api/get_test_runs/{test_case_id}")
+async def get_test_runs(test_case_id: int, current_user: User = Depends(get_current_user)):
+    """Get all test runs for a specific test case."""
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not associated with any client"
+        )
+    
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                # Verify test case belongs to user's client
+                cursor.execute(
+                    """
+                    SELECT id FROM test_cases 
+                    WHERE id = %s AND client_id = %s
+                    """,
+                    (test_case_id, str(current_user.client_id))
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Test case not found or access denied"
+                    )
+                
+                # Fetch test runs
+                cursor.execute(
+                    """
+                    SELECT id, run_date, result, exception, duration, 
+                           stdout, stderr, additional_info
+                    FROM test_runs
+                    WHERE test_case_id = %s
+                    ORDER BY run_date DESC
+                    """,
+                    (test_case_id,)
+                )
+                
+                runs = []
+                for row in cursor.fetchall():
+                    runs.append({
+                        'id': row[0],
+                        'run_date': row[1].isoformat() if row[1] else None,
+                        'result': row[2],
+                        'exception': row[3],
+                        'duration': row[4],
+                        'stdout': row[5],
+                        'stderr': row[6],
+                        'additional_info': row[7]
+                    })
+                
+                return runs
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching test runs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch test runs: {str(e)}"
+        )
+
 @app.post("/api/run_test_case/{id}", response_model=Dict)
 async def run_test_case(
     id: int, 
@@ -554,13 +680,33 @@ async def run_test_case(
 ):
     """
     Endpoint to start test execution asynchronously and return test_run_id immediately.
+    Routes to appropriate executor based on test case type (UI or API).
     If environment_id is provided, the test will use the environment variables.
     If execution_id is provided, the test run will be linked to that execution.
     """
     conn = None
     try:
-        # Get the singleton instance of TestRunner
-        runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
+        # First, check the test case type to determine which executor to use
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT test_type, project_id
+                    FROM test_cases
+                    WHERE id = %s AND client_id = %s
+                    """,
+                    (id, str(current_user.client_id))
+                )
+                test_case_data = cursor.fetchone()
+                
+                if not test_case_data:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Test case {id} not found or access denied"
+                    )
+                
+                test_type = test_case_data[0] or 'ui'  # Default to 'ui' for backward compatibility
+                project_id = test_case_data[1]
         
         environment_vars = {}
         execution_id = None
@@ -576,7 +722,7 @@ async def run_test_case(
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT e.base_url, e.login, e.password
+                        SELECT e.base_url, e.login, e.password, e.custom_variables
                         FROM environments e
                         JOIN projects p ON e.project_id = p.id
                         WHERE e.id = %s AND p.client_id = %s
@@ -589,12 +735,45 @@ async def run_test_case(
                         environment_vars = {
                             "base_url": env_data[0],
                             "login": env_data[1],
-                            "password": env_data[2]
+                            "password": env_data[2],
+                            "custom_variables": env_data[3] or {}
                         }
         
-        # Start test execution asynchronously and get test_run_id immediately
-        result = runner.start_test_case_async(id, environment_vars, execution_id)
-        return JSONResponse(content=result)
+        # Route to appropriate executor based on test type
+        if test_type == 'api' or test_type == 'api_test':
+            # Use API test executor
+            from Services.ApiTestExecutor import ApiTestExecutor
+            
+            if not environment_vars:
+                raise HTTPException(
+                    status_code=400,
+                    detail="API tests require an environment to be selected"
+                )
+            
+            executor = ApiTestExecutor(
+                test_case_id=id,
+                environment_vars=environment_vars
+            )
+            
+            # Execute API test synchronously (can be made async later)
+            result = executor.execute_test_case(execution_id=execution_id)
+            
+            return JSONResponse(content={
+                "success": result['success'],
+                "test_run_id": result.get('test_run_id'),
+                "message": "API test execution completed",
+                "error": result.get('error')
+            })
+        else:
+            # Use UI test runner (existing implementation)
+            runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
+            
+            # Start test execution asynchronously and get test_run_id immediately
+            result = runner.start_test_case_async(id, environment_vars, execution_id)
+            return JSONResponse(content=result)
+            
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1021,6 +1200,260 @@ async def confirm_generate_steps(
             detail=f"Failed to generate test steps: {str(e)}"
         )
 
+@app.post("/api/test-cases/{test_case_id}/generate-api-steps")
+async def generate_api_test_steps(
+    test_case_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate API test steps for a test case using AI asynchronously via Kafka.
+    This endpoint is specifically for API test cases.
+    """
+    try:
+        # Verify test case exists and is an API test
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT tc.test_type, tc.project_id, tc.name, tc.description
+                    FROM test_cases tc
+                    WHERE tc.id = %s AND tc.client_id = %s
+                """, (test_case_id, str(current_user.client_id)))
+                
+                test_case = cursor.fetchone()
+                if not test_case:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Test case not found or access denied"
+                    )
+                
+                test_type = test_case[0]
+                project_id = test_case[1]
+                test_name = test_case[2]
+                test_description = test_case[3]
+                
+                if test_type not in ['api', 'api_test']:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This endpoint is only for API test cases"
+                    )
+        
+        # Try to get the API schema for this project from database
+        schema_content = None
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT content, name, schema_type
+                    FROM api_schemas
+                    WHERE project_id = %s AND client_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (project_id, str(current_user.client_id)))
+                
+                schema_row = cursor.fetchone()
+                if schema_row:
+                    schema_content = schema_row[0]
+                    schema_name = schema_row[1]
+                    schema_type = schema_row[2]
+                    logger.info(f"Using API schema '{schema_name}' ({schema_type}) for project {project_id}")
+        
+        # If no schema found, use test case description
+        if not schema_content:
+            logger.info(f"No API schema found for project {project_id}, using test case description")
+            schema_content = f"""
+Test Case: {test_name}
+Description: {test_description}
+
+Generate API test steps for this test case based on the description.
+Analyze the test case description to determine the correct endpoints and methods.
+Include authentication steps if mentioned in the description.
+
+Important: Use the exact endpoint paths mentioned in the test case description.
+If no specific endpoint is mentioned, use standard REST patterns.
+"""
+        
+        # Send message to Kafka for async processing
+        from kafka import KafkaProducer
+        import json
+        
+        kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+        producer = KafkaProducer(
+            bootstrap_servers=kafka_bootstrap_servers,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+        )
+        
+        message = {
+            'request_type': 'generate_api_test_steps',
+            'test_case_id': test_case_id,
+            'schema_content': schema_content,
+            'client_id': str(current_user.client_id),
+            'project_id': str(project_id)
+        }
+        
+        producer.send('user_requests', value=message)
+        producer.flush()
+        producer.close()
+        
+        logger.info(f"Sent API test steps generation request to Kafka for test case {test_case_id}")
+        
+        return JSONResponse(content={
+            "success": True,
+            "message": "API test steps generation started. Steps will be generated asynchronously.",
+            "test_case_id": test_case_id
+        })
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error queuing API test steps generation: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to queue API test steps generation: {str(e)}"
+        )
+
+@app.post("/api/projects/{project_id}/api-schemas/upload")
+async def upload_api_schema(
+    project_id: str,
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    description: str = Form(None),
+    schema_type: str = Form("openapi"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload an API schema (OpenAPI, Swagger, Postman) for a project.
+    The schema will be used to generate accurate API test steps.
+    """
+    try:
+        # Verify project exists and user has access
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id FROM projects
+                    WHERE id = %s AND client_id = %s
+                """, (project_id, str(current_user.client_id)))
+                
+                if not cursor.fetchone():
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Project not found or access denied"
+                    )
+        
+        # Read file content
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        
+        # Validate JSON
+        try:
+            json.loads(content_str)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid JSON format"
+            )
+        
+        # Save to database
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO api_schemas (
+                        project_id, client_id, name, description, 
+                        schema_type, content, created_by
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    project_id,
+                    str(current_user.client_id),
+                    name,
+                    description,
+                    schema_type,
+                    content_str,
+                    current_user.id
+                ))
+                
+                schema_id = cursor.fetchone()[0]
+                conn.commit()
+        
+        logger.info(f"Uploaded API schema {schema_id} for project {project_id}")
+        
+        return JSONResponse(content={
+            "success": True,
+            "schema_id": schema_id,
+            "message": f"API schema '{name}' uploaded successfully"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading API schema: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload API schema: {str(e)}"
+        )
+
+@app.get("/api/projects/{project_id}/api-schemas")
+async def list_api_schemas(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """List all API schemas for a project."""
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id, name, description, schema_type, created_at
+                    FROM api_schemas
+                    WHERE project_id = %s AND client_id = %s
+                    ORDER BY created_at DESC
+                """, (project_id, str(current_user.client_id)))
+                
+                rows = cursor.fetchall()
+                schemas = []
+                for row in rows:
+                    schemas.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "description": row[2],
+                        "schema_type": row[3],
+                        "created_at": row[4].isoformat() if row[4] else None
+                    })
+                
+                return JSONResponse(content={"schemas": schemas})
+                
+    except Exception as e:
+        logger.error(f"Error listing API schemas: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list API schemas: {str(e)}"
+        )
+
+@app.delete("/api/api-schemas/{schema_id}")
+async def delete_api_schema(
+    schema_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete an API schema."""
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM api_schemas
+                    WHERE id = %s AND client_id = %s
+                """, (schema_id, str(current_user.client_id)))
+                
+                conn.commit()
+                
+                return JSONResponse(content={
+                    "success": True,
+                    "message": "API schema deleted successfully"
+                })
+                
+    except Exception as e:
+        logger.error(f"Error deleting API schema: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete API schema: {str(e)}"
+        )
+
 @app.patch("/api/update_test_step/{id}")
 async def update_test_step(
     id: int,
@@ -1064,6 +1497,9 @@ async def update_test_step(
             if update_data.element_path is not None:
                 update_fields.append("element_path = %s")
                 params.append(update_data.element_path)
+            if update_data.description is not None:
+                update_fields.append("description = %s")
+                params.append(update_data.description)
             
             if not update_fields:
                 raise HTTPException(status_code=400, detail="No fields to update")
@@ -1073,6 +1509,11 @@ async def update_test_step(
             params.append(id)
             cursor.execute(query, tuple(params))
             conn.commit()
+            
+            # Return connection before response
+            if conn:
+                return_db_connection(conn)
+                conn = None
             
             return JSONResponse(
                 content={"message": "Test step updated successfully"},
@@ -1742,7 +2183,7 @@ async def get_project_test_tree(
             # Let's also check all test cases for this project
             cursor.execute(
                 """
-                SELECT id, name, parent_id, type, client_id, project_id
+                SELECT id, name, parent_id, type, client_id, project_id, test_type
                 FROM test_cases
                 WHERE project_id = %s
                 ORDER BY id
@@ -1756,19 +2197,19 @@ async def get_project_test_tree(
                 """
                 WITH RECURSIVE TestCaseHierarchy AS (
                     -- Base case: get all root nodes
-                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at
+                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type
                     FROM test_cases
                     WHERE parent_id IS NULL AND project_id = %s
                     
                     UNION ALL
                     
                     -- Recursive case: get all children
-                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at
+                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at, tc.test_type
                     FROM test_cases tc
                     JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                     WHERE tc.project_id = %s
                 )
-                SELECT id, name, description, parent_id, type, "order", created_at, updated_at
+                SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type
                 FROM TestCaseHierarchy
                 ORDER BY parent_id NULLS FIRST, "order", name
                 """,
@@ -1790,6 +2231,7 @@ async def get_project_test_tree(
                     "order": tc[5],
                     "created_at": tc[6].isoformat() if tc[6] else None,
                     "updated_at": tc[7].isoformat() if tc[7] else None,
+                    "test_type": tc[8],
                     "children": []
                 }
                 test_case_map[tc[0]] = test_case
@@ -1802,7 +2244,73 @@ async def get_project_test_tree(
                     if parent:
                         parent["children"].append(test_case)
             
-            return root_items
+            # Group by test type with recursive handling of groups
+            def categorize_items(items):
+                """Recursively categorize items into UI and API groups"""
+                ui_items = []
+                api_items = []
+                
+                for item in items:
+                    if item.get('type') == 'test':
+                        # Individual test case - categorize by test_type
+                        if item.get('test_type') == 'api':
+                            api_items.append(item)
+                        else:  # Default to UI for backward compatibility
+                            ui_items.append(item)
+                    elif item.get('type') == 'group':
+                        # Group - analyze its children to determine placement
+                        if 'children' in item and item['children']:
+                            ui_children, api_children = categorize_items(item['children'])
+                            
+                            # Create copies of the group for each type that has children
+                            if ui_children:
+                                ui_group_copy = {
+                                    **item,
+                                    'children': ui_children
+                                }
+                                ui_items.append(ui_group_copy)
+                            
+                            if api_children:
+                                api_group_copy = {
+                                    **item, 
+                                    'children': api_children
+                                }
+                                api_items.append(api_group_copy)
+                        else:
+                            # Empty group - default to UI
+                            ui_items.append(item)
+                    else:
+                        # Other types (root, etc.) - default to UI
+                        ui_items.append(item)
+                
+                return ui_items, api_items
+            
+            ui_cases, api_cases = categorize_items(root_items)
+            
+            # Create type-based groups
+            grouped_items = []
+            
+            if ui_cases:
+                ui_group = {
+                    'id': 'ui_group',
+                    'name': 'UI Tests',
+                    'type': 'type_group',
+                    'test_type': 'ui',
+                    'children': ui_cases
+                }
+                grouped_items.append(ui_group)
+            
+            if api_cases:
+                api_group = {
+                    'id': 'api_group', 
+                    'name': 'API Tests',
+                    'type': 'type_group',
+                    'test_type': 'api',
+                    'children': api_cases
+                }
+                grouped_items.append(api_group)
+            
+            return grouped_items
     except Exception as e:
         logger.error(f"Error getting project test tree: {e}")
         raise HTTPException(
@@ -2655,16 +3163,17 @@ async def create_test_case(
             # Insert the new test case
             cur.execute(
                 """
-                INSERT INTO test_cases (name, description, parent_id, type, "order", client_id, project_id)
-                VALUES (%s, %s, %s, 'test', 1, %s, %s)
-                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                INSERT INTO test_cases (name, description, parent_id, type, "order", client_id, project_id, test_type)
+                VALUES (%s, %s, %s, 'test', 1, %s, %s, %s)
+                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
                 """,
                 (
                     request_data.name,
                     request_data.description,
                     request_data.parent_id,
                     client_id_str,
-                    project_id_str
+                    project_id_str,
+                    request_data.test_type
                 )
             )
             test_case = cur.fetchone()
@@ -2680,7 +3189,8 @@ async def create_test_case(
                 "order": test_case[5],
                 "created_at": test_case[6].isoformat() if test_case[6] else None,
                 "updated_at": test_case[7].isoformat() if test_case[7] else None,
-                "project_id": test_case[8]
+                "project_id": test_case[8],
+                "test_type": test_case[9]
             }
     except Exception as e:
         conn.rollback()
@@ -2842,33 +3352,42 @@ async def update_test_case(
             
             # Update the test case
             if request_data.parent_id is not None:
+                update_fields = ["name = %s", "description = %s", "parent_id = %s", "updated_at = NOW()"]
+                update_values = [request_data.name, request_data.description, request_data.parent_id]
+                
+                if request_data.test_type is not None:
+                    update_fields.append("test_type = %s")
+                    update_values.append(request_data.test_type)
+                
+                update_values.append(id)
+                
                 cur.execute(
-                    """
+                    f"""
                     UPDATE test_cases 
-                    SET name = %s, description = %s, parent_id = %s, updated_at = NOW()
+                    SET {', '.join(update_fields)}
                     WHERE id = %s
-                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
                     """,
-                    (
-                        request_data.name,
-                        request_data.description,
-                        request_data.parent_id,
-                        id
-                    )
+                    update_values
                 )
             else:
+                update_fields = ["name = %s", "description = %s", "updated_at = NOW()"]
+                update_values = [request_data.name, request_data.description]
+                
+                if request_data.test_type is not None:
+                    update_fields.append("test_type = %s")
+                    update_values.append(request_data.test_type)
+                
+                update_values.append(id)
+                
                 cur.execute(
-                    """
+                    f"""
                     UPDATE test_cases 
-                    SET name = %s, description = %s, updated_at = NOW()
+                    SET {', '.join(update_fields)}
                     WHERE id = %s
-                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
                     """,
-                    (
-                        request_data.name,
-                        request_data.description,
-                        id
-                    )
+                    update_values
                 )
             updated_test_case = cur.fetchone()
             conn.commit()
@@ -2883,7 +3402,8 @@ async def update_test_case(
                 "order": updated_test_case[5],
                 "created_at": updated_test_case[6].isoformat() if updated_test_case[6] else None,
                 "updated_at": updated_test_case[7].isoformat() if updated_test_case[7] else None,
-                "project_id": updated_test_case[8]
+                "project_id": updated_test_case[8],
+                "test_type": updated_test_case[9]
             }
     except Exception as e:
         conn.rollback()

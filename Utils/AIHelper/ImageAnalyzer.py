@@ -44,7 +44,7 @@ class ImageAnalyzer(AIHelper):
                 result = cursor.fetchone()[0]
                 return result if result else 1  # Return 0 if no test_case_id exists
 
-    def insert_test_case(self, name, description, parent_id, type_, order_, test_case_id=None, client_id=None, project_id=None):
+    def insert_test_case(self, name, description, parent_id, type_, order_, test_case_id=None, client_id=None, project_id=None, test_type='ui'):
         """Insert a test case and return its ID."""
         # Set parent_id to None if it is 0 (indicating no parent)
         if parent_id == 0:
@@ -67,9 +67,9 @@ class ImageAnalyzer(AIHelper):
 
                 self.logger.info('Inserting test case')
                 cursor.execute('''
-                    INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id, client_id, project_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-                ''', (name, description, parent_id, type_, order_, test_case_id, client_id, project_id))
+                    INSERT INTO test_cases (name, description, parent_id, type, "order", test_case_id, client_id, project_id, test_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                ''', (name, description, parent_id, type_, order_, test_case_id, client_id, project_id, test_type))
 
                 connection.commit()  # Explicitly commit the transaction
                 return cursor.fetchone()[0]
@@ -103,7 +103,8 @@ class ImageAnalyzer(AIHelper):
                     type_=test_type,
                     order_=idx,
                     client_id=client_id,
-                    project_id=project_id
+                    project_id=project_id,
+                    test_type='ui'  # Image-based test cases are always UI tests
                 )
 
                 if new_id is None:

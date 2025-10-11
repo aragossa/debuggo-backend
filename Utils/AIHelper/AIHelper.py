@@ -113,51 +113,43 @@ class AIHelper:
     def get_analyze_txt_promt(self, text_content):
         json_structure = """
            [
-               {
-                   "name": "UI TESTS or API TESTS",
-                   "type": "root",
-                   "children": [
-                       {
-                           "name": "Test Group 1",
-                           "type": "group",
-                           "children": [
-                               {
-                                   "name": "Test case name",
-                                   "description": "Test description",
-                                   "expected_result": "Test expected result",
-                                   "type": "test"
-                               },
-                               {
-                                   "id": 4,
-                                   "name": "Test case name",
-                                   "description": "Test description",
-                                   "expected_result": "Test expected result",
-                                   "type": "test"
-                               }
-                           ]
-                       },
-                       {
-                           "id": 5,
-                           "name": "Test Group 2",
-                           "type": "group",
-                           "children": [
-                               {
-                                   "id": 6,
-                                   "name": "Test case name",
-                                   "description": "Test description",
-                                   "expected_result": "Test expected result",
-                                   "type": "test"
-                               }
-                           ]
-                       }
-                   ]
-               }
-           ]
+            {
+                "name": "Test Group 1",
+                "type": "group",
+                "children": [
+                    {
+                        "name": "Test case name",
+                        "description": "Test description",
+                        "expected_result": "Test expected result",
+                        "type": "test"
+                    },
+                    {
+                        "id": 4,
+                        "name": "Test case name",
+                        "description": "Test description",
+                        "expected_result": "Test expected result",
+                        "type": "test"
+                    }
+                ]
+            },
+            {
+                "id": 5,
+                "name": "Test Group 2",
+                "type": "group",
+                "children": [
+                    {
+                        "id": 6,
+                        "name": "Test case name",
+                        "description": "Test description",
+                        "expected_result": "Test expected result",
+                        "type": "test"
+                    }
+                ]
+            }
+        ]
            """
         text_prompt = (
             f"Act as QA engineer. Analyze attached schema export file and generate as much as possible test cases for this API.\n"
-            f"For API tests try to find requests that can be used together and build a test case with chain of requests\n"
-            f"If you see here UI TESTS either API TESTS create 2 root UI TESTS and API TESTS\n"
             f"The response must be a valid JSON array following this exact structure, with NO additional text or explanation:\n"
             f"{json_structure}\n\n"
             f"Here is the schema file to analyze: {text_content}"
