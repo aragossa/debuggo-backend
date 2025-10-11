@@ -320,6 +320,20 @@ class ApiTestExecutor:
         
         result = text
         
+        # Substitute built-in dynamic variables
+        import time
+        import uuid
+        if '{{timestamp}}' in result:
+            result = result.replace('{{timestamp}}', str(int(time.time())))
+        if '{{datetime}}' in result:
+            from datetime import datetime
+            result = result.replace('{{datetime}}', datetime.now().isoformat())
+        if '{{uuid}}' in result:
+            result = result.replace('{{uuid}}', str(uuid.uuid4()))
+        if '{{random}}' in result:
+            import random
+            result = result.replace('{{random}}', str(random.randint(1000, 9999)))
+        
         # Substitute environment variables
         for key, value in self.environment_vars.items():
             if key != 'custom_variables':  # Skip the custom_variables dict
