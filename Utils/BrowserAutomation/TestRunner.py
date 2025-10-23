@@ -365,6 +365,11 @@ class TestRunner:
             env_helper (EnvHelper): Optional environment helper for variable processing
         """
         try:
+            # Ensure browser is initialized before executing any step
+            if not self.browser:
+                self.logger.warning(f"[PID:{self.pid}] Browser not initialized, initializing now...")
+                self._ensure_browser_initialized()
+            
             # Process variables in element_path and value using the EnvHelper
             if env_helper:
                 if element_path:

@@ -142,32 +142,62 @@ class KafkaMessageConsumer:
             schema_content = request.get('schema_content')
             client_id = request.get('client_id')
             project_id = request.get('project_id')
+            environment_id = request.get('environment_id')  # Optional - may be None
             
             if not all([test_case_id, schema_content, client_id, project_id]):
                 self.logger.error("Missing required fields for API test steps generation")
                 return
             
             self.logger.info(f"Processing API test steps generation for test case {test_case_id}")
+            if environment_id:
+                self.logger.info(f"Using environment ID: {environment_id}")
             
             # Import here to avoid circular dependencies
             from Services.ApiSchemaService import ApiSchemaService
             
-            # Generate steps
+            # Generate steps using NEW iterative method
             service = ApiSchemaService()
-            success = service.generate_test_steps_for_flow(
+            result = service.generate_test_steps_iteratively(
                 test_case_id=test_case_id,
                 schema_content=schema_content,
                 client_id=client_id,
-                project_id=project_id
+                project_id=project_id,
+                environment_id=environment_id
             )
             
-            if success:
-                self.logger.info(f"Successfully generated API test steps for test case {test_case_id}")
+            # Handle different result statuses
+            if result == "paused":
+                # Generation paused for conflict resolution - DON'T clear Redis flag
+                self.logger.info(f"⏸️ Test generation paused for conflict resolution (test case {test_case_id})")
+                self.logger.info(f"🔒 Redis flag kept active - will resume after user resolves conflict")
             else:
-                self.logger.error(f"Failed to generate API test steps for test case {test_case_id}")
+                # Clear Redis generation flag only on success (True) or failure (False)
+                import redis
+                from Utils.System import System
+                system = System()
+                try:
+                    r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+                    r.delete(f"api_test_generating:{test_case_id}")
+                    self.logger.info(f"Cleared generation flag for test case {test_case_id}")
+                except Exception as redis_error:
+                    self.logger.error(f"Redis error: {redis_error}")
+                
+                if result:
+                    self.logger.info(f"Successfully generated API test steps for test case {test_case_id}")
+                else:
+                    self.logger.error(f"Failed to generate API test steps for test case {test_case_id}")
                 
         except Exception as e:
             self.logger.error(f"Error processing API test steps generation: {e}", exc_info=True)
+            # Clear Redis flag on error too
+            import redis
+            from Utils.System import System
+            system = System()
+            try:
+                r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+                r.delete(f"api_test_generating:{test_case_id}")
+            except:
+                pass
 
     def stop(self):
         self.running = False

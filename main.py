@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.extras
 from psycopg2.pool import SimpleConnectionPool
 import jwt
+import redis
 from kafka import KafkaProducer, KafkaConsumer
 import threading
 from threading import Thread
@@ -796,7 +797,6 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
         running_tests = []
         
         # Check Redis for active test case runs
-        import redis
         from Utils.System import System
         system = System()
         try:
@@ -827,6 +827,31 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
                         "execution_id": result[5],
                         "execution_name": result[6],
                         "status": "running"
+                    })
+            
+            # Scan for API test generation keys
+            for key in r.scan_iter(match=f"api_test_generating:*"):
+                test_case_id = key.split(":")[-1]
+                test_name = r.get(key)
+                # Verify test case belongs to user's client
+                cursor.execute("""
+                    SELECT tc.id, tc.name, tc.description
+                    FROM test_cases tc
+                    WHERE tc.id = %s AND tc.client_id = %s
+                """, (test_case_id, str(current_user.client_id)))
+                
+                result = cursor.fetchone()
+                if result:
+                    running_tests.append({
+                        "test_case_id": result[0],
+                        "test_case_name": result[1],
+                        "test_case_description": result[2],
+                        "test_run_id": None,
+                        "started_at": None,
+                        "execution_id": None,
+                        "execution_name": None,
+                        "status": "generating",
+                        "activity_type": "api_generation"
                     })
         except Exception as redis_error:
             logger.error(f"Redis error in get_running_tests: {redis_error}")
@@ -999,6 +1024,30 @@ async def generate_steps(
             return_db_connection(conn)
     
     try:
+        # Delete all existing test steps before generating new ones
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                # Verify the test case exists
+                cursor.execute(
+                    "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                    (id, str(current_user.client_id))
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(status_code=404, detail="Test case not found")
+                
+                # Delete all test steps
+                cursor.execute(
+                    "DELETE FROM test_steps WHERE test_case_id = %s",
+                    (id,)
+                )
+                deleted_count = cursor.rowcount
+                conn.commit()
+                logger.info(f"🗑️ Deleted {deleted_count} existing test steps for test case {id}")
+        finally:
+            if conn:
+                return_db_connection(conn)
+        
         # Get the singleton instance of TestRunner
         runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
         
@@ -1203,6 +1252,7 @@ async def confirm_generate_steps(
 @app.post("/api/test-cases/{test_case_id}/generate-api-steps")
 async def generate_api_test_steps(
     test_case_id: int,
+    request_data: dict = Body(...),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -1210,6 +1260,9 @@ async def generate_api_test_steps(
     This endpoint is specifically for API test cases.
     """
     try:
+        # Extract environment_id from request body
+        environment_id = request_data.get('environment_id') if request_data else None
+        
         # Verify test case exists and is an API test
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
@@ -1274,8 +1327,11 @@ If no specific endpoint is mentioned, use standard REST patterns.
         # Send message to Kafka for async processing
         from kafka import KafkaProducer
         import json
+        from Utils.System import System
         
-        kafka_bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+        # Use System configuration which handles Docker vs local environments
+        system = System()
+        kafka_bootstrap_servers = f"{system.kafka_host}:{system.kafka_port}"
         producer = KafkaProducer(
             bootstrap_servers=kafka_bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
@@ -1286,12 +1342,23 @@ If no specific endpoint is mentioned, use standard REST patterns.
             'test_case_id': test_case_id,
             'schema_content': schema_content,
             'client_id': str(current_user.client_id),
-            'project_id': str(project_id)
+            'project_id': str(project_id),
+            'environment_id': environment_id
         }
         
         producer.send('user_requests', value=message)
         producer.flush()
         producer.close()
+        
+        # Mark test case as generating in Redis
+        from Utils.System import System
+        system = System()
+        try:
+            r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+            r.setex(f"api_test_generating:{test_case_id}", 3600, test_name)  # Expire after 1 hour
+            logger.info(f"Marked test case {test_case_id} as generating in Redis")
+        except Exception as redis_error:
+            logger.error(f"Redis error: {redis_error}")
         
         logger.info(f"Sent API test steps generation request to Kafka for test case {test_case_id}")
         
@@ -1308,6 +1375,241 @@ If no specific endpoint is mentioned, use standard REST patterns.
         raise HTTPException(
             status_code=500,
             detail=f"Failed to queue API test steps generation: {str(e)}"
+        )
+
+# ==================== API Conflict Notification Endpoints ====================
+
+@app.get("/api/conflict-notifications/pending")
+async def get_pending_conflict_notifications(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all pending conflict notifications for the current user.
+    These are conflicts between API documentation and actual behavior that require user decision.
+    """
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT 
+                        cn.id,
+                        cn.test_case_id,
+                        tc.name as test_case_name,
+                        cn.step_number,
+                        cn.conflict_type,
+                        cn.request_method,
+                        cn.request_endpoint,
+                        cn.request_body,
+                        cn.expected_status,
+                        cn.actual_status,
+                        cn.actual_response,
+                        cn.conflict_description,
+                        cn.suggested_resolution,
+                        cn.corrected_expected_status,
+                        cn.corrected_expected_response,
+                        cn.created_at
+                    FROM api_conflict_notifications cn
+                    JOIN test_cases tc ON cn.test_case_id = tc.id
+                    WHERE cn.user_id = %s 
+                      AND cn.client_id = %s
+                      AND cn.status = 'pending'
+                    ORDER BY cn.created_at DESC
+                """, (current_user.id, str(current_user.client_id)))
+                
+                notifications = []
+                for row in cursor.fetchall():
+                    notifications.append({
+                        'id': row[0],
+                        'test_case_id': row[1],
+                        'test_case_name': row[2],
+                        'step_number': row[3],
+                        'conflict_type': row[4],
+                        'request': {
+                            'method': row[5],
+                            'endpoint': row[6],
+                            'body': row[7]
+                        },
+                        'expected_status': row[8],
+                        'actual_status': row[9],
+                        'actual_response': row[10],
+                        'conflict_description': row[11],
+                        'suggested_resolution': row[12],
+                        'corrected_expected_status': row[13],
+                        'corrected_expected_response': row[14],
+                        'created_at': row[15].isoformat() if row[15] else None
+                    })
+                
+                return JSONResponse(content={
+                    'success': True,
+                    'notifications': notifications,
+                    'count': len(notifications)
+                })
+                
+    except Exception as e:
+        logger.error(f"Error fetching conflict notifications: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch conflict notifications: {str(e)}"
+        )
+
+@app.post("/api/conflict-notifications/{notification_id}/approve")
+async def approve_conflict_resolution(
+    notification_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Approve a conflict resolution and resume test generation with corrected expected result.
+    """
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                # Verify notification exists and belongs to user
+                cursor.execute("""
+                    SELECT test_case_id, status
+                    FROM api_conflict_notifications
+                    WHERE id = %s AND user_id = %s AND client_id = %s
+                """, (notification_id, current_user.id, str(current_user.client_id)))
+                
+                result = cursor.fetchone()
+                if not result:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Conflict notification not found or access denied"
+                    )
+                
+                test_case_id, current_status = result
+                
+                if current_status != 'pending':
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Notification already {current_status}"
+                    )
+                
+                # Update notification status to approved
+                cursor.execute("""
+                    UPDATE api_conflict_notifications
+                    SET status = 'approved',
+                        resolved_at = CURRENT_TIMESTAMP,
+                        user_decision = 'approved'
+                    WHERE id = %s
+                """, (notification_id,))
+                
+                conn.commit()
+                
+                # Trigger test generation to resume
+                from Services.ApiSchemaService import ApiSchemaService
+                from kafka import KafkaProducer
+                import json
+                
+                # Get schema content for this test case
+                cursor.execute("""
+                    SELECT s.content, tc.project_id
+                    FROM test_cases tc
+                    JOIN api_schemas s ON s.project_id = tc.project_id
+                    WHERE tc.id = %s AND tc.client_id = %s
+                    ORDER BY s.created_at DESC
+                    LIMIT 1
+                """, (test_case_id, str(current_user.client_id)))
+                
+                schema_row = cursor.fetchone()
+                if schema_row:
+                    # Send message to Kafka to resume generation
+                    system = System()
+                    producer = KafkaProducer(
+                        bootstrap_servers=f'{system.kafka_host}:{system.kafka_port}',
+                        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                    )
+                    
+                    message = {
+                        'request_type': 'generate_api_test_steps',
+                        'test_case_id': test_case_id,
+                        'schema_content': schema_row[0],
+                        'project_id': str(schema_row[1]),
+                        'client_id': str(current_user.client_id)
+                    }
+                    
+                    producer.send('user_requests', value=message)
+                    producer.flush()
+                    producer.close()
+                    
+                    logger.info(f"Resumed test generation for test case {test_case_id} after conflict resolution")
+                
+                return JSONResponse(content={
+                    'success': True,
+                    'message': 'Conflict resolution approved. Test generation will resume.',
+                    'notification_id': notification_id,
+                    'test_case_id': test_case_id
+                })
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error approving conflict resolution: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to approve conflict resolution: {str(e)}"
+        )
+
+@app.post("/api/conflict-notifications/{notification_id}/reject")
+async def reject_conflict_resolution(
+    notification_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Reject a conflict resolution and cancel test generation for this test case.
+    """
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                # Verify notification exists and belongs to user
+                cursor.execute("""
+                    SELECT test_case_id, status
+                    FROM api_conflict_notifications
+                    WHERE id = %s AND user_id = %s AND client_id = %s
+                """, (notification_id, current_user.id, str(current_user.client_id)))
+                
+                result = cursor.fetchone()
+                if not result:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Conflict notification not found or access denied"
+                    )
+                
+                test_case_id, current_status = result
+                
+                if current_status != 'pending':
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Notification already {current_status}"
+                    )
+                
+                # Update notification status to rejected/cancelled
+                cursor.execute("""
+                    UPDATE api_conflict_notifications
+                    SET status = 'cancelled',
+                        resolved_at = CURRENT_TIMESTAMP,
+                        user_decision = 'rejected'
+                    WHERE id = %s
+                """, (notification_id,))
+                
+                conn.commit()
+                
+                logger.info(f"Test generation cancelled for test case {test_case_id} - user rejected conflict resolution")
+                
+                return JSONResponse(content={
+                    'success': True,
+                    'message': 'Conflict resolution rejected. Test generation cancelled.',
+                    'notification_id': notification_id,
+                    'test_case_id': test_case_id
+                })
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rejecting conflict resolution: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reject conflict resolution: {str(e)}"
         )
 
 @app.post("/api/projects/{project_id}/api-schemas/upload")
@@ -2527,6 +2829,56 @@ async def update_environment(
         if conn:
             return_db_connection(conn)
 
+@app.post("/api/environments/{environment_id}/select")
+async def select_environment(
+    environment_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Track environment selection for analytics and potential pre-loading.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify environment exists and belongs to user's client
+            cursor.execute(
+                """
+                SELECT e.id, e.name, e.base_url FROM environments e
+                JOIN projects p ON e.project_id = p.id
+                WHERE e.id = %s AND p.client_id = %s
+                """,
+                (environment_id, str(current_user.client_id))
+            )
+            environment = cursor.fetchone()
+            
+            if not environment:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Environment not found"
+                )
+            
+            # Log environment selection (optional - can be used for analytics)
+            logger.info(f"User {current_user.id} selected environment {environment_id} ({environment[1]})")
+            
+            return {
+                "status": "success",
+                "environment_id": environment[0],
+                "environment_name": environment[1],
+                "base_url": environment[2]
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error tracking environment selection: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to track environment selection: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
 @app.delete("/api/environments/{environment_id}")
 async def delete_environment(
     environment_id: int,
@@ -3709,7 +4061,8 @@ async def get_test_run_step_execution_results(
                        COALESCE(tser.step_action, ts.action) as action,
                        COALESCE(tser.step_element_path, ts.element_path) as element_path,
                        COALESCE(tser.step_value, ts.value) as value,
-                       tr.test_case_id
+                       tr.test_case_id,
+                       tser.additional_info
                 FROM test_step_execution_results tser
                 LEFT JOIN test_steps ts ON tser.test_step_id = ts.id
                 JOIN test_runs tr ON tser.test_run_id = tr.id
@@ -3724,6 +4077,10 @@ async def get_test_run_step_execution_results(
             for row in cursor.fetchall():
                 if test_case_id is None:
                     test_case_id = row[13]  # Get test_case_id from first row
+                
+                # Parse additional_info if it exists
+                additional_info = row[14] if row[14] else {}
+                
                 step_results.append({
                     "id": row[0],
                     "test_step_id": row[1],
@@ -3738,7 +4095,11 @@ async def get_test_run_step_execution_results(
                     "action": row[10],
                     "element_path": row[11],
                     "value": row[12],
-                    "has_screenshot": bool(row[5])
+                    "has_screenshot": bool(row[5]),
+                    "actual_url": additional_info.get('actual_url') if additional_info else None,
+                    "method": additional_info.get('method') if additional_info else None,
+                    "request_headers": additional_info.get('request_headers') if additional_info else None,
+                    "request_body": additional_info.get('request_body') if additional_info else None
                 })
             
             return {
@@ -3853,9 +4214,22 @@ async def test_case_generation_status(
             if not cursor.fetchone():
                 raise HTTPException(status_code=404, detail="Test case not found")
             
-            # Check if the test case is currently generating steps
+            # Check if the test case is currently generating steps (UI or API)
             runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
-            is_generating = runner.is_generating_steps(id)
+            is_generating_ui = runner.is_generating_steps(id)
+            
+            # Also check for API test generation
+            is_generating_api = False
+            try:
+                system = System()
+                r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+                api_gen_key = r.get(f"api_test_generating:{id}")
+                is_generating_api = api_gen_key is not None
+                logger.info(f"API generation check for test case {id}: {is_generating_api} (key: {api_gen_key})")
+            except Exception as redis_error:
+                logger.error(f"Redis error checking API generation: {redis_error}")
+            
+            is_generating = is_generating_ui or is_generating_api
             
             # Get current and next step information from Redis
             current_step = ""
@@ -4016,7 +4390,7 @@ async def stop_test_case_execution(id: int, request: Request):
 @app.post("/api/stop-all-tests")
 async def stop_all_test_executions(current_user: User = Depends(get_current_user)):
     """
-    Stop all currently running test executions for the current user's client
+    Stop all currently running test executions and API test generation for the current user's client
     """
     logger.info(f"Received request to stop all test executions for user {current_user.id}")
     
@@ -4030,11 +4404,40 @@ async def stop_all_test_executions(current_user: User = Depends(get_current_user
             client_id=str(current_user.client_id)
         )
         
+        # Also clear all API test generation Redis flags for this client's test cases
+        from Utils.System import System
+        system = System()
+        generation_stopped_count = 0
+        
+        try:
+            r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+            
+            # Get all test cases for this client
+            with get_db_connection_context() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id FROM test_cases WHERE client_id = %s
+                """, (str(current_user.client_id),))
+                test_case_ids = [row[0] for row in cursor.fetchall()]
+            
+            # Clear Redis flags for each test case
+            for test_case_id in test_case_ids:
+                key = f"api_test_generating:{test_case_id}"
+                if r.delete(key):
+                    generation_stopped_count += 1
+                    logger.info(f"Cleared API generation flag for test case {test_case_id}")
+                    
+        except Exception as redis_error:
+            logger.error(f"Redis error while clearing generation flags: {redis_error}")
+        
         if result["status"] == "success":
+            total_stopped = result["stopped_count"] + generation_stopped_count
             return {
                 "status": "success", 
-                "message": result["message"],
-                "stopped_count": result["stopped_count"]
+                "message": f"Stopped {result['stopped_count']} test executions and {generation_stopped_count} test generations",
+                "stopped_count": total_stopped,
+                "executions_stopped": result["stopped_count"],
+                "generations_stopped": generation_stopped_count
             }
         else:
             raise HTTPException(

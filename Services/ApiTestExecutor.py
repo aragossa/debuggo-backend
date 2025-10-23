@@ -67,7 +67,16 @@ class ApiTestExecutor:
             # Execute steps sequentially
             results = []
             for step in steps:
+                # Track execution time
+                import time
+                start_time = time.time()
+                
                 step_result = self._execute_step(step)
+                
+                # Calculate execution time in milliseconds
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                step_result['execution_time_ms'] = execution_time_ms
+                
                 results.append(step_result)
                 
                 # Save step execution result to database
@@ -161,8 +170,15 @@ class ApiTestExecutor:
             expected_status = step_data.get('expected_status', 200)
             extract_variables = step_data.get('extract_variables', {})
             
+            # Log available variables before substitution
+            self.logger.info(f"🔍 Available session variables: {list(self.session_variables.keys())}")
+            if self.session_variables:
+                self.logger.info(f"📦 Session variable values: {self.session_variables}")
+            
             # Substitute variables in endpoint
+            self.logger.info(f"🔧 Original endpoint: {endpoint}")
             endpoint = self._substitute_variables(endpoint)
+            self.logger.info(f"🔧 After substitution: {endpoint}")
             
             # Build full URL
             base_url = self.environment_vars.get('base_url', '').rstrip('/')
@@ -244,7 +260,11 @@ class ApiTestExecutor:
                 'success': True,
                 'step_order': step['step_order'],
                 'response_status': response.status_code,
-                'response_body': response.text[:500]
+                'response_body': response.text[:500],
+                'actual_url': url,
+                'method': method,
+                'request_headers': headers,
+                'request_body': body
             }
             
         except requests.exceptions.RequestException as e:
@@ -252,14 +272,18 @@ class ApiTestExecutor:
             return {
                 'success': False,
                 'step_order': step['step_order'],
-                'error': f"Network error: {str(e)}"
+                'error': f"Network error: {str(e)}",
+                'actual_url': url if 'url' in locals() else None,
+                'method': method if 'method' in locals() else None
             }
         except Exception as e:
             self.logger.error(f"Error executing API request: {str(e)}")
             return {
                 'success': False,
                 'step_order': step['step_order'],
-                'error': str(e)
+                'error': str(e),
+                'actual_url': url if 'url' in locals() else None,
+                'method': method if 'method' in locals() else None
             }
     
     def _execute_wait(self, step: Dict[str, Any], step_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -286,7 +310,13 @@ class ApiTestExecutor:
         headers = headers.copy()
         
         # Get authorization headers from environment custom_variables
-        env_auth_headers = self.environment_vars.get('custom_variables', {}).get('authorization_headers', [])
+        custom_vars = self.environment_vars.get('custom_variables', {})
+        # Ensure custom_variables is a dict, not a list
+        if not isinstance(custom_vars, dict):
+            self.logger.warning(f"custom_variables is not a dict, skipping authorization headers")
+            return headers
+        
+        env_auth_headers = custom_vars.get('authorization_headers', [])
         
         if isinstance(env_auth_headers, list):
             for header in env_auth_headers:
@@ -319,29 +349,44 @@ class ApiTestExecutor:
             return text
         
         result = text
+        original = text
         
-        # Substitute built-in dynamic variables
+        # Substitute built-in dynamic variables (support both {{}} and %% syntax)
         import time
         import uuid
-        if '{{timestamp}}' in result:
-            result = result.replace('{{timestamp}}', str(int(time.time())))
-        if '{{datetime}}' in result:
+        if '{{timestamp}}' in result or '%timestamp%' in result:
+            timestamp = str(int(time.time()))
+            result = result.replace('{{timestamp}}', timestamp)
+            result = result.replace('%timestamp%', timestamp)
+        if '{{datetime}}' in result or '%datetime%' in result:
             from datetime import datetime
-            result = result.replace('{{datetime}}', datetime.now().isoformat())
-        if '{{uuid}}' in result:
-            result = result.replace('{{uuid}}', str(uuid.uuid4()))
-        if '{{random}}' in result:
+            dt = datetime.now().isoformat()
+            result = result.replace('{{datetime}}', dt)
+            result = result.replace('%datetime%', dt)
+        if '{{uuid}}' in result or '%uuid%' in result:
+            uuid_str = str(uuid.uuid4())
+            result = result.replace('{{uuid}}', uuid_str)
+            result = result.replace('%uuid%', uuid_str)
+        if '{{random}}' in result or '%random%' in result:
             import random
-            result = result.replace('{{random}}', str(random.randint(1000, 9999)))
+            rand = str(random.randint(1000, 9999))
+            result = result.replace('{{random}}', rand)
+            result = result.replace('%random%', rand)
         
-        # Substitute environment variables
+        # Substitute environment variables (support both {{}} and %% syntax)
         for key, value in self.environment_vars.items():
             if key != 'custom_variables':  # Skip the custom_variables dict
                 result = result.replace(f'{{{{{key}}}}}', str(value))
+                result = result.replace(f'%{key}%', str(value))
         
         # Substitute session variables (extracted during test execution)
         for key, value in self.session_variables.items():
             result = result.replace(f'{{{{{key}}}}}', str(value))
+            result = result.replace(f'%{key}%', str(value))
+        
+        # Debug log if substitution occurred
+        if result != original and '%' in original:
+            self.logger.debug(f"🔄 Variable substitution: '{original}' → '{result}'")
         
         return result
     
@@ -368,6 +413,8 @@ class ApiTestExecutor:
         """Extract variables from API response using JSONPath or simple key access."""
         try:
             response_data = response.json()
+            self.logger.info(f"🔍 Extracting variables from response...")
+            self.logger.info(f"📋 Extract config: {extract_config}")
             
             for var_name, path in extract_config.items():
                 # Simple implementation - supports basic dot notation
@@ -375,7 +422,7 @@ class ApiTestExecutor:
                 value = self._get_nested_value(response_data, path)
                 if value is not None:
                     self.session_variables[var_name] = value
-                    self.logger.info(f"Extracted {var_name}: {str(value)[:50]}...")
+                    self.logger.info(f"✅ Extracted {var_name} = {str(value)[:50]}...")
                     
                     # Create token aliases for common authentication token names
                     # This ensures {{access_token}}, {{token}}, and {{auth_token}} all work
@@ -385,6 +432,10 @@ class ApiTestExecutor:
                             if alias != var_name:
                                 self.session_variables[alias] = value
                         self.logger.info(f"🔑 Created token aliases: {', '.join(token_names)}")
+                else:
+                    self.logger.warning(f"❌ Could not extract {var_name} using path: {path}")
+            
+            self.logger.info(f"📦 Current session variables: {list(self.session_variables.keys())}")
                     
         except Exception as e:
             self.logger.warning(f"Could not extract variables from response: {str(e)}")
@@ -489,19 +540,35 @@ class ApiTestExecutor:
                     if len(response_body) > 5000:
                         response_body = response_body[:5000] + '... (truncated)'
                     
+                    # Prepare additional_info with actual URL and request details
+                    import json
+                    additional_info = {
+                        'actual_url': step_result.get('actual_url'),
+                        'method': step_result.get('method'),
+                        'request_headers': step_result.get('request_headers'),
+                        'request_body': step_result.get('request_body'),
+                        'response_status': response_status,
+                        'response_body': response_body
+                    }
+                    
+                    # Get execution time
+                    execution_time_ms = step_result.get('execution_time_ms')
+                    
                     # Save to test_step_execution_results table
                     cursor.execute("""
                         INSERT INTO test_step_execution_results (
                             test_run_id, test_step_id, step_order, status, error_message, 
-                            screenshot_path
-                        ) VALUES (%s, %s, %s, %s, %s, %s)
+                            screenshot_path, additional_info, execution_time_ms
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         self.test_run_id,
                         step_id,
                         step.get('step_order', 1),
                         result_status,
                         f"Status: {response_status}\n\nResponse:\n{response_body}" if response_status else error_message,
-                        None  # No screenshot for API tests
+                        None,  # No screenshot for API tests
+                        json.dumps(additional_info),
+                        execution_time_ms
                     ))
                     
                     conn.commit()

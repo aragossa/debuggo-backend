@@ -30,7 +30,7 @@ class AIHelper:
         self.deepseek_api_key = system.deepseek_api_key
         self.logger = self._setup_logger()
         self.logger.info(f"Initialized AIHelper with provider: {self.provider}")
-        self.db_connection = System.get_db_connection()
+        # Don't store DB connection - get it when needed to avoid pool exhaustion
 
     def _setup_logger(self):
         logger = logging.getLogger('AIHelper')
@@ -516,29 +516,34 @@ IMPORTANT:
                 self.logger.info(f"Provider is not Gemini, using default model ID: {default_model_id}")
                 return default_model_id
             
-            # Get a connection from the pool
-            conn = self.db_connection
-            if not conn:
-                self.logger.warning("No database connection available, using default model ID")
+            # Get a connection from the pool (and return it immediately after use)
+            try:
+                conn = System.get_db_connection()
+            except Exception as e:
+                self.logger.warning(f"Failed to get database connection: {e}, using default model ID")
                 return default_model_id
-                
-            with conn.cursor() as cur:
-                # Query the database for the active default model
-                cur.execute("""
-                    SELECT model_id FROM ai_models 
-                    WHERE is_active = TRUE AND is_default = TRUE
-                    LIMIT 1
-                """)
-                
-                result = cur.fetchone()
-                
-                if result and result[0]:
-                    model_id = result[0]
-                    self.logger.info(f"Using model ID from database: {model_id}")
-                    return model_id
-                else:
-                    self.logger.warning(f"No default active model found in database, using default model ID: {default_model_id}")
-                    return default_model_id
+            
+            try:
+                with conn.cursor() as cur:
+                    # Query the database for the active default model
+                    cur.execute("""
+                        SELECT model_id FROM ai_models 
+                        WHERE is_active = TRUE AND is_default = TRUE
+                        LIMIT 1
+                    """)
+                    
+                    result = cur.fetchone()
+                    
+                    if result and result[0]:
+                        model_id = result[0]
+                        self.logger.info(f"Using model ID from database: {model_id}")
+                        return model_id
+                    else:
+                        self.logger.warning(f"No default active model found in database, using default model ID: {default_model_id}")
+                        return default_model_id
+            finally:
+                # CRITICAL: Always return connection to pool
+                System.return_connection(conn)
                     
         except Exception as e:
             self.logger.error(f"Error retrieving model ID from database: {str(e)}")
