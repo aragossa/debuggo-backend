@@ -28,8 +28,9 @@ def init_db_pool():
     """Initialize the database connection pool."""
     global db_pool
     try:
+        # Increased pool size: 10-100 (was 5-50) to handle connection leaks while we fix them
         db_pool = psycopg2.pool.SimpleConnectionPool(
-            5, 50,
+            10, 100,
             host=os.getenv("DB_HOST", "localhost"),
             port=os.getenv("DB_PORT", "5432"),
             database=os.getenv("DB_NAME", "postgres"),
@@ -55,11 +56,14 @@ def get_db_connection():
                 # Validate connection is not closed
                 if conn.closed:
                     logger.warning(f"Retrieved closed connection on attempt {attempt + 1}, trying to get new one")
-                    # Force close and try to get another
+                    # CRITICAL: Return to pool before closing, otherwise pool thinks it's still in use
                     try:
-                        conn.close()
+                        db_pool.putconn(conn, close=True)
                     except:
-                        pass
+                        try:
+                            conn.close()
+                        except:
+                            pass
                     continue
                 
                 # Test connection with a simple query
@@ -69,10 +73,14 @@ def get_db_connection():
                         test_cur.fetchone()
                 except Exception as e:
                     logger.warning(f"Connection failed test query on attempt {attempt + 1}: {e}")
+                    # CRITICAL: Return to pool before closing
                     try:
-                        conn.close()
+                        db_pool.putconn(conn, close=True)
                     except:
-                        pass
+                        try:
+                            conn.close()
+                        except:
+                            pass
                     continue
                 
                 # Track this connection as active
