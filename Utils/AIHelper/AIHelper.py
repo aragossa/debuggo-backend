@@ -321,6 +321,22 @@ IMPORTANT REQUIREMENTS:
    - Stay focused on completing the core workflow as described in the test case
    - Avoid adding "nice to have" assertions or verifications that aren't explicitly required
    - Follow the minimal path to complete the described test scenario
+
+18. DROPDOWN/SELECT ELEMENT HANDLING: For select elements and dropdowns:
+   - ALWAYS examine the actual <option> elements in the HTML before suggesting a value
+   - Extract the EXACT values from <option value="..."> or the text content between <option> tags
+   - NEVER invent or assume option values that don't exist in the HTML
+   - If using text-based selection, use the EXACT text content from the <option> tags
+   - If using value-based selection, use the EXACT value attribute from the <option> tags
+   - When multiple options exist, choose the first available option that matches the test intent
+   - Document your option verification in element_purpose: "Element verified in HTML: options include [list of actual options]"
+   - For empty dropdowns or loading states, use a "wait" action instead of making up values
+
+19. DYNAMIC CONTENT AWARENESS: For elements that may be dynamically loaded:
+   - If an element referenced in next_prompt doesn't exist in current HTML, wait for it to load
+   - Use "wait" action with appropriate element locator when content is still loading
+   - Check for loading indicators, spinners, or placeholders before proceeding
+   - Never suggest interacting with elements that aren't present in the current HTML state
 """
 
     def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
@@ -420,12 +436,52 @@ IMPORTANT:
 7. DO NOT suggest solutions that have already been tried in the previous attempts
 """
 
+    def get_ai_response(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> str:
+        """
+        Get AI response using the configured provider.
+        
+        Args:
+            prompt: The prompt to send to the AI
+            image: Optional image to analyze
+            text_content: Optional text content to analyze
+            
+        Returns:
+            The AI response as a string
+        """
+        try:
+            if self.provider == "gemini":
+                result = self.send_request_to_gemini(prompt, image, text_content)
+            elif self.provider == "claude":
+                result = self.send_message_to_claude(prompt, image)
+            elif self.provider == "deepseek":
+                result = self.send_request_to_deepseek(prompt, image, text_content)
+            elif self.provider == "chatgpt":
+                # Add ChatGPT implementation if needed
+                raise NotImplementedError("ChatGPT provider not implemented yet")
+            else:
+                raise ValueError(f"Unsupported AI provider: {self.provider}")
+            
+            # Handle different return types
+            if isinstance(result, dict):
+                if 'error' in result:
+                    raise Exception(f"AI request failed: {result['error']}")
+                # Return the main content if it's a structured response
+                return result.get('content', str(result))
+            elif isinstance(result, str):
+                return result
+            else:
+                return str(result)
+                
+        except Exception as e:
+            self.logger.error(f"Error getting AI response: {str(e)}")
+            raise e
+
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):
         """
         Switch the AI provider.
 
         Args:
-            provider (str): The new AI provider to use ("ChatGPT", "Gemini", "Claude", "Deepseek").
+            provider: The AI provider to use ("chatgpt", "gemini", "claude", "deepseek")
         """
         self.provider = provider.lower()
         self.logger.info(f"Switched to provider: {self.provider}")
@@ -684,7 +740,8 @@ IMPORTANT:
                     self.logger.error("✗ All JSON parsing attempts failed")
                     self.logger.error(f"Raw response that failed parsing (first 300 chars): {response_text[:300]}")
                     self.logger.info("====== JSON PARSING END ======")
-                    raise ValueError('Cannot parse the response - all parsing attempts failed')
+                    self.logger.info("Returning raw response for caller to handle")
+                    return response_text
                 break
             except google.api_core.exceptions.InternalServerError as e:
                 self.logger.warning(f"Internal server error (attempt {attempt + 1}/{max_retries}): {e}")

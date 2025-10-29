@@ -6,6 +6,7 @@ class GenerateStepsRequest(BaseModel):
     project_id: Optional[UUID4] = None
     environment_id: Optional[int] = None
     ai_model_id: Optional[int] = None
+    force_preconditions: Optional[bool] = False
     
     class Config:
         from_attributes = True

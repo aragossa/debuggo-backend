@@ -20,7 +20,7 @@ class ApiSchemaService:
     def _setup_logger(self):
         """Setup logger for API schema service."""
         logger = logging.getLogger('ApiSchemaService')
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
         
         if not logger.handlers:
             handler = logging.StreamHandler()
@@ -37,7 +37,8 @@ class ApiSchemaService:
         test_case_id: int,
         schema_content: str,
         client_id: str,
-        project_id: str
+        project_id: str,
+        generation_context: str = "normal"
     ) -> bool:
         """
         Generate detailed API test steps for a test case flow using AI.
@@ -87,7 +88,8 @@ class ApiSchemaService:
             prompt = self._create_step_generation_prompt(
                 test_case_name,
                 test_case_description,
-                schema_content
+                schema_content,
+                generation_context
             )
             
             # Use Gemini to generate steps
@@ -410,14 +412,15 @@ class ApiSchemaService:
         self,
         test_case_name: str,
         test_case_description: str,
-        schema_content: str
+        schema_content: str,
+        generation_context: str = "normal"
     ) -> str:
         """Create AI prompt for generating API test steps."""
         
         # Extract relevant parts from schema (paths and operations)
         schema_summary = self._extract_schema_summary(schema_content)
         
-        return f"""
+        base_prompt = f"""
 You are an expert API test automation engineer. Generate detailed test steps for the following API test case.
 
 ⚠️ ⚠️ ⚠️ CRITICAL WARNING - READ THIS FIRST ⚠️ ⚠️ ⚠️
@@ -565,12 +568,210 @@ CRITICAL REQUIREMENTS - YOU MUST FOLLOW THESE EXACTLY:
    - Without extract_variables, subsequent authenticated requests will FAIL
 
 Generate practical, executable test steps that cover the main flow described in the test case.
+
+{self._get_context_specific_instructions(generation_context, test_case_name, additional_context)}
+"""
+        
+        return base_prompt
+    
+    def _get_context_specific_instructions(self, generation_context: str, test_case_name: str, additional_context: str = None) -> str:
+        """Generate context-specific instructions for different generation scenarios"""
+        if generation_context == "precondition":
+            base_precondition = f"""
+🔧 **PRECONDITION GENERATION MODE** 🔧
+
+This is a PRECONDITION test case - you are generating setup steps that create data/entities needed for the main UI test.
+
+**⚠️ CRITICAL: READ THE TEST CASE DESCRIPTION CAREFULLY ⚠️**
+
+The test case description above specifies EXACTLY what should be created in preconditions vs main test:
+
+MAIN TEST CASE: {test_case_name}
+FULL DESCRIPTION: Look at the "Description:" section above
+
+**PARSE THE DESCRIPTION TO UNDERSTAND**:
+- **preconditions:** section = what YOU should create (API setup)  
+- **test case:** section = what the UI test will do (not your responsibility)
+- **tear down:** section = what cleanup will do (not your responsibility)
+
+**EXAMPLE PARSING**:
+If description says "preconditions: create a new client via API. test case: create recipient group"
+→ YOU create: CLIENT (via API)
+→ UI test creates: RECIPIENT GROUP (via UI)
+
+**🚨 CRITICAL RULES FOR PRECONDITIONS 🚨**:
+
+1. **🚫 NEVER CREATE THE MAIN ENTITY**: 
+   - If test case name contains "create recipient group" → DO NOT create recipient group in precondition
+   - If test case name contains "create user" → DO NOT create user in precondition
+   - If test case name contains "create campaign" → DO NOT create campaign in precondition
+   - ONLY create DEPENDENCIES that the main entity needs
+
+2. **READ THE DESCRIPTION CAREFULLY**:
+   - Look for "preconditions:" section → This tells you EXACTLY what to create
+   - Look for "test case:" section → This is what the UI test will do (NOT YOU!)
+   - If preconditions says "create client" → Create ONLY client, nothing else
+
+3. **EXTRACT ALL IDs**: Every create operation MUST extract the created resource ID
+   - Example: Create client → extract client_id  
+   - Example: Create user → extract user_id
+
+**❌ ABSOLUTELY FORBIDDEN PATTERNS ❌**:
+```
+Test case name: "create recipient group"
+Step 1: Authenticate ✅
+Step 2: Create client ✅
+Step 3: Create recipient group ❌ WRONG! This is the main action!
+```
+
+**✅ CORRECT PATTERN ✅**:
+```
+Test case name: "create recipient group"
+Step 1: Authenticate ✅
+Step 2: Create client ✅ (dependency for recipient group)
+Step 3: STOP HERE! ✅ (UI test will create the recipient group)
+```
+
+**REMEMBER**: Preconditions = Setup dependencies ONLY. Main business action = UI test responsibility!
+
+3. **Use Variable Names That Make Sense**: Extract variables with descriptive names:
+   - "user_id", "client_id", "project_id", "organization_id", etc.
+   - NOT generic names like "id" or "resource_id"
+
+4. **Authentication First**: Always start with authentication to get proper permissions for creating resources
+
+5. **Keep It Minimal**: Only create what's explicitly mentioned in the preconditions section - don't over-engineer
+"""
+            
+            if additional_context:
+                base_precondition = f"""
+{base_precondition}
+
+**SPECIFIC CONTEXT FOR THIS PRECONDITION**:
+{additional_context}
+"""
+                return base_precondition
+            
+            return base_precondition
+
+        elif generation_context == "teardown":
+            base_teardown = f"""
+🧹 **TEARDOWN GENERATION MODE** 🧹
+
+This is a TEARDOWN test case - you are generating cleanup steps that remove data/entities created during testing.
+
+**⚠️ CRITICAL: READ THE TEST CASE DESCRIPTION CAREFULLY ⚠️**
+
+The test case description above specifies EXACTLY what entities are involved:
+
+MAIN TEST CASE: {test_case_name}  
+FULL DESCRIPTION: Look at the "Description:" section above
+
+**PARSE THE DESCRIPTION TO UNDERSTAND WHAT TO DELETE**:
+- **preconditions:** section = entities created by API preconditions (need cleanup)
+- **test case:** section = entities created by UI test (need cleanup)  
+- **tear down:** section = lists what YOU should delete
+
+**EXAMPLE PARSING**:
+If description says "preconditions: create a new client via API. test case: create recipient group. tear down: remove created client; remove recipient group"
+→ YOU delete: CLIENT (created by precondition) AND RECIPIENT GROUP (created by UI test)
+
+**🚨 CRITICAL RULES FOR TEARDOWN 🚨**:
+
+1. **🚫 ABSOLUTELY NO CREATION OPERATIONS**: 
+   - Generate ONLY DELETE operations
+   - If you generate ANY PUT or POST operations, you are doing it COMPLETELY WRONG
+   - Teardown = Cleanup ONLY, never create anything
+
+2. **DELETE WHAT WAS ALREADY CREATED**:
+   - Precondition created: client (has %client_id% variable)
+   - Main UI test created: recipient group (has %recipient_group_id% variable)
+   - YOU delete: Both of these using their variables
+
+3. **USE VARIABLES FROM PREVIOUS STEPS**:
+   - %client_id% - Created by precondition
+   - %recipient_group_id% - Created by main UI test
+   - %user_id% - Created by precondition (if applicable)
+   - These variables are ALREADY AVAILABLE from previous execution
+
+4. **DELETE IN REVERSE ORDER**:
+   - Delete child entities first (recipient group)
+   - Then delete parent entities (client)
+   - This respects foreign key dependencies
+
+**❌ ABSOLUTELY FORBIDDEN PATTERNS ❌**:
+```
+Step 1: Authenticate ✅
+Step 2: Create client ❌ WRONG! Don't create anything!
+Step 3: Create recipient group ❌ WRONG! Don't create anything!
+Step 4: Delete recipient group ❌ Why create it if you're deleting it?
+```
+
+**✅ CORRECT PATTERN ✅**:
+```
+Step 1: Authenticate ✅
+Step 2: Delete recipient group using %recipient_group_id% ✅ (created by UI test)
+Step 3: Delete client using %client_id% ✅ (created by precondition)
+Step 4: DONE! ✅
+```
+
+**REMEMBER**: Teardown = Delete what was created. NEVER create new entities in teardown!
+
+5. **Use Dynamic Variables, NOT hardcoded IDs**: 
+   - ✅ GOOD: "endpoint": "%base_url%/api/clients/%client_id%"
+   - ❌ BAD: "endpoint": "%base_url%/api/clients/105"
+
+6. **Authentication**: Start with authentication to ensure permissions for deletion
+
+7. **Expected Status Codes for DELETE operations**:
+   - 200: Successful deletion (with response body)
+   - 204: Successful deletion (no content)  
+   - 404: Already deleted (acceptable)
+
+**REMEMBER**: Teardown should ONLY delete what was created, never create new things!
+"""
+            
+            if additional_context:
+                base_teardown += f"\n\n**SPECIFIC CONTEXT FOR THIS TEARDOWN**:\n{additional_context}\n"
+            
+            return base_teardown
+
+        else:  # normal context
+            return """
+📋 **STANDARD API TEST GENERATION** 📋
+
+Generate a complete API test flow that covers the main functionality described in the test case.
+Focus on the primary user journey and include proper authentication, main operations, and validation.
 """
     
     def _update_test_case_description(self, test_case_id: int, steps: List[Dict[str, Any]], test_case_name: str):
         """Update test case description with summary of generated steps."""
         try:
-            # Build description from steps
+            # Check if description already contains structured context (from CombinedTestGenerationService)
+            with get_db_connection_context() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT description FROM test_cases WHERE id = %s", (test_case_id,))
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        existing_desc = result[0]
+                        # If description contains structured context markers, preserve it and append step summary
+                        if "STRUCTURED TEST DESCRIPTION:" in existing_desc or "preconditions:" in existing_desc:
+                            self.logger.info(f"Preserving structured context for test case {test_case_id}")
+                            # Just append step summary without overwriting structured context
+                            step_summary = f"\n\n=== GENERATED STEPS ({len(steps)} total) ===\n"
+                            for i, step in enumerate(steps, 1):
+                                summary = step.get('summary', step.get('expected_result', 'API Request'))
+                                step_summary += f"{i}. {summary}\n"
+                            
+                            cursor.execute("""
+                                UPDATE test_cases
+                                SET description = %s
+                                WHERE id = %s
+                            """, (existing_desc + step_summary, test_case_id))
+                            conn.commit()
+                            return
+            
+            # Build description from steps (for cases without structured context)
             description_parts = [f"Test Case: {test_case_name}\n"]
             description_parts.append(f"Total Steps: {len(steps)}\n\n")
             description_parts.append("Test Flow:\n")
@@ -999,7 +1200,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
         schema_content: str,
         client_id: str,
         project_id: str,
-        environment_id: int = None
+        environment_id: int = None,
+        generation_context: str = "normal",
+        additional_context: str = None
     ) -> bool:
         """
         Generate API test steps iteratively - one step at a time with real execution feedback.
@@ -1016,6 +1219,8 @@ Return ONLY the JSON array of corrected steps, no explanation.
             schema_content: The API schema content
             client_id: Client ID for access control
             project_id: Project ID for organization
+            environment_id: Environment ID for API configuration
+            generation_context: Context for generation - "normal", "precondition", or "teardown"
             
         Returns:
             bool: True if steps were generated successfully
@@ -1150,7 +1355,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
                 first_step = self._generate_first_step(
                     test_case_name,
                     test_case_description,
-                    schema_summary
+                    schema_summary,
+                    generation_context,
+                    additional_context
                 )
                 
                 if not first_step:
@@ -1390,7 +1597,7 @@ Return ONLY the JSON array of corrected steps, no explanation.
             self.logger.error(f"❌ Error in iterative generation: {str(e)}", exc_info=True)
             return False
     
-    def _generate_first_step(self, test_case_name: str, test_case_description: str, schema_summary: str) -> dict:
+    def _generate_first_step(self, test_case_name: str, test_case_description: str, schema_summary: str, generation_context: str = "normal", additional_context: str = None) -> dict:
         """Generate the first step (usually authentication if required)."""
         
         example_json = '''{
@@ -1454,6 +1661,8 @@ Expected response: {{"client": {{"id": 49, "name": "Test"}}}}
 
 Expected response: {{"token": "eyJ0eXAi..."}}
 ✅ CORRECT: "extract_variables": {{"auth_token": "$.token"}}
+
+{self._get_context_specific_instructions(generation_context, test_case_name, additional_context)}
 
 Return ONLY a single JSON object (not an array) with this structure:
 {example_json}

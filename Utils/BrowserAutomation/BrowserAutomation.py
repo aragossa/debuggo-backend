@@ -535,18 +535,88 @@ class BrowserAutomation:
             self.logger.info(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
             
             return screenshot_path
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to take screenshot: {str(e)}")
+            return None
+
+    def wait_for_page_changes(self, timeout=None):
+        """
+        Wait for any changes in the page DOM.
+        
+        Args:
+            timeout (int, optional): Maximum time to wait in seconds. Defaults to self.timeout.
+        """
+        timeout = timeout or self.timeout
+        try:
+            # Get initial page source
+            initial_source = self.driver.page_source
+            
+            # Wait for page source to change
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.page_source != initial_source
+            )
+            
+            # Wait for the page to be in a stable state
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            
+            # Wait for any AJAX requests to complete
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return jQuery.active == 0') or True
+            )
+            
+            self.logger.info(f"[PID:{self.pid}] Page changes detected and page is stable")
+            return True
+            
+        except TimeoutException:
+            self.logger.warning(f"[PID:{self.pid}] No page changes detected within {timeout} seconds")
+            return False
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for page changes: {str(e)}")
+            return False
+
+    def take_screenshot(self, name=None):
+        """
+        Takes a screenshot of the current browser window.
+    
+    Args:
+        name (str, optional): A descriptive name for the screenshot. If not provided, a generic name will be used.
+        
+    Returns:
+        str: The path to the saved screenshot file
+        """
+        try:
+            # Create a unique filename using timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            screenshot_name = f"{name or 'screenshot'}_{timestamp}.png"
+            
+            # Use a dedicated screenshots directory instead of temp
+            screenshots_dir = os.path.join(os.getcwd(), 'screenshots')
+            
+            # Create the directory if it doesn't exist
+            if not os.path.exists(screenshots_dir):
+                os.makedirs(screenshots_dir)
+                
+            screenshot_path = os.path.join(screenshots_dir, screenshot_name)
+            
+            # Take and save the screenshot
+            self.driver.save_screenshot(screenshot_path)
+            self.logger.info(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
+            
+            return screenshot_path
             
         except WebDriverException as e:
             self.logger.error(f"[PID:{self.pid}] Failed to take screenshot: {str(e)}")
             return None
 
-    def select(self, selector, option_value, by='xpath'):
+    def select(self, selector: str, option_value: str, by: str = 'xpath'):
         """
-        Select an option from a dropdown/select element.
-
+        Select an option from a dropdown element by value.
+        
         Args:
-            selector (str): Element selector for the select element
-            option_value (str): Value of the option to select
+            selector (str): Element selector
+            option_value (str): Value to select
             by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
         try:
@@ -556,14 +626,32 @@ class BrowserAutomation:
             by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
             element = self.find_element(selector, by_strategy)
             
-            # Create a Select object and select by value
             select = WebDriverSelect(element)
             select.select_by_value(option_value)
             
             self.logger.info(f"[PID:{self.pid}] Selected option with value '{option_value}' from select element: {selector}")
         except Exception as e:
-            self.logger.error(f"[PID:{self.pid}] Failed to select option from element {selector}: {str(e)}")
-            raise
+            # Enhanced error reporting - list available options
+            try:
+                from selenium.webdriver.support.ui import Select as WebDriverSelect
+                by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+                element = self.find_element(selector, by_strategy)
+                select = WebDriverSelect(element)
+                
+                # Get all available options for better error reporting
+                available_options = []
+                for option in select.options:
+                    value = option.get_attribute('value') or ''
+                    text = option.text or ''
+                    available_options.append(f"value='{value}' text='{text}'")
+                
+                options_info = ', '.join(available_options) if available_options else 'No options available'
+                enhanced_error = f"{str(e)} | Available options: [{options_info}]"
+                self.logger.error(f"[PID:{self.pid}] Failed to select option from element {selector}: {enhanced_error}")
+                raise Exception(enhanced_error)
+            except Exception as inner_e:
+                self.logger.error(f"[PID:{self.pid}] Failed to select option from element {selector}: {str(e)}")
+                raise
 
     def assert_element(self, element_path: str, expected_value: str = None, by_strategy: str = None):
         """

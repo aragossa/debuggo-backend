@@ -18,6 +18,7 @@ from Utils.BrowserAutomation.EnvHelper import EnvHelper
 from Utils.System import System
 import io
 from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from Services.TestDependencyService import TestDependencyService
 
 
 class TestRunner:
@@ -513,6 +514,35 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Ensuring browser is initialized for test case {test_case_id}")
                 self._ensure_browser_initialized()
                 self.logger.info(f"[PID:{self.pid}] Browser ready for test execution")
+
+                # Execute preconditions before main test
+                self.logger.info(f"[PID:{pid}] Checking for test preconditions")
+                preconditions_passed, precondition_results = self._execute_preconditions(test_case_id, environment_vars)
+                
+                if not preconditions_passed:
+                    self.logger.error(f"[PID:{pid}] Preconditions failed for test case {test_case_id}")
+                    # Create test run record to log the failure
+                    if not test_run_id:
+                        test_run_id = self._create_test_run(test_case_id, "failed")
+                    
+                    # Log precondition failure details
+                    precondition_errors = [result.get('error', 'Unknown error') for result in precondition_results if not result.get('success', False)]
+                    error_message = f"Preconditions failed: {'; '.join(precondition_errors)}"
+                    
+                    end_time = datetime.now()
+                    duration = (end_time - start_time).total_seconds()
+                    
+                    self._update_test_run(test_run_id, "failed", error_message, duration, 
+                                        stdout_capture.getvalue(), error_message)
+                    
+                    return {
+                        "status": "failed",
+                        "exception": error_message,
+                        "duration": duration,
+                        "stdout": stdout_capture.getvalue(),
+                        "stderr": error_message,
+                        "precondition_results": precondition_results
+                    }
 
                 # Get and execute test steps
                 self.logger.info(f"[PID:{pid}] Retrieving test steps")
@@ -1616,6 +1646,24 @@ class TestRunner:
             # Ensure browser is initialized
             self._ensure_browser_initialized()
             
+            # Execute preconditions before main test
+            self.logger.info(f"[PID:{pid}] Checking for test preconditions")
+            preconditions_passed, precondition_results = self._execute_preconditions(test_case_id, environment_vars)
+            
+            if not preconditions_passed:
+                self.logger.error(f"[PID:{pid}] Preconditions failed for test case {test_case_id}")
+                # Log precondition failure details
+                precondition_errors = [result.get('error', 'Unknown error') for result in precondition_results if not result.get('success', False)]
+                error_message = f"Preconditions failed: {'; '.join(precondition_errors)}"
+                
+                return {
+                    "test_run_id": test_run_id,
+                    "status": "failed",
+                    "exception": error_message,
+                    "stdout": None,
+                    "stderr": error_message
+                }
+            
             # Navigate to base_url from environment variables before executing steps
             base_url = env.base_url
             if base_url:
@@ -2373,3 +2421,47 @@ class TestRunner:
             conn.rollback()
             self.logger.error(f"Failed to update generation end time using session: {e}")
             raise
+
+    def _execute_preconditions(self, test_case_id: int, environment_vars=None):
+        """
+        Execute preconditions for a test case using TestDependencyService.
+        
+        Args:
+            test_case_id: The test case to execute preconditions for
+            environment_vars: Environment variables to pass to precondition tests
+            
+        Returns:
+            Tuple of (success, results_list)
+        """
+        try:
+            dependency_service = TestDependencyService()
+            return dependency_service.execute_preconditions(
+                test_case_id, 
+                environment_vars, 
+                user_id=self.user_id
+            )
+        except Exception as e:
+            self.logger.error(f"Error executing preconditions for test case {test_case_id}: {str(e)}")
+            return False, [{'success': False, 'error': str(e), 'test_case_id': test_case_id}]
+
+    def _execute_teardown(self, test_case_id: int, environment_vars=None):
+        """
+        Execute teardown actions for a test case using TestDependencyService.
+        
+        Args:
+            test_case_id: The test case to execute teardown for
+            environment_vars: Environment variables to pass to teardown tests
+            
+        Returns:
+            Tuple of (success, results_list)
+        """
+        try:
+            dependency_service = TestDependencyService()
+            return dependency_service.execute_teardown(
+                test_case_id, 
+                environment_vars, 
+                user_id=self.user_id
+            )
+        except Exception as e:
+            self.logger.error(f"Error executing teardown for test case {test_case_id}: {str(e)}")
+            return False, [{'success': False, 'error': str(e), 'test_case_id': test_case_id}]

@@ -145,12 +145,14 @@ class CreateTestCaseRequest(BaseModel):
     parent_id: Optional[int] = None
     project_id: Optional[UUID4] = None
     test_type: str = 'ui'  # Default to 'ui' type
+    requires_preconditions: bool = False
 
 class UpdateTestCaseRequest(BaseModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[int] = None
     test_type: Optional[str] = None
+    requires_preconditions: Optional[bool] = None
 
 class CreateTestExecutionRequest(BaseModel):
     name: str
@@ -853,6 +855,31 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
                         "status": "generating",
                         "activity_type": "api_generation"
                     })
+                    
+            # Scan for UI test generation keys
+            for key in r.scan_iter(match=f"ui_test_generating:*"):
+                test_case_id = key.split(":")[-1]
+                test_name = r.get(key)
+                # Verify test case belongs to user's client
+                cursor.execute("""
+                    SELECT tc.id, tc.name, tc.description
+                    FROM test_cases tc
+                    WHERE tc.id = %s AND tc.client_id = %s
+                """, (test_case_id, str(current_user.client_id)))
+                
+                result = cursor.fetchone()
+                if result:
+                    running_tests.append({
+                        "test_case_id": result[0],
+                        "test_case_name": result[1],
+                        "test_case_description": result[2],
+                        "test_run_id": None,
+                        "started_at": None,
+                        "execution_id": None,
+                        "execution_name": None,
+                        "status": "generating",
+                        "activity_type": "ui_generation"
+                    })
         except Exception as redis_error:
             logger.error(f"Redis error in get_running_tests: {redis_error}")
         
@@ -990,6 +1017,7 @@ async def generate_steps(
     Endpoint to generate test steps for a test case.
     If project_id is provided, the test case will be associated with that project.
     If environment_id is provided, the test will use the environment variables.
+    Supports combined UI+API generation when preconditions are needed.
     """
     conn = None
     try:
@@ -1028,13 +1056,20 @@ async def generate_steps(
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
-                # Verify the test case exists
+                # Verify the test case exists and get details
                 cursor.execute(
-                    "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                    "SELECT id, name, description, test_type, project_id, requires_preconditions FROM test_cases WHERE id = %s AND client_id = %s",
                     (id, str(current_user.client_id))
                 )
-                if not cursor.fetchone():
+                test_case_row = cursor.fetchone()
+                if not test_case_row:
                     raise HTTPException(status_code=404, detail="Test case not found")
+                
+                test_case_name = test_case_row[1]
+                test_case_description = test_case_row[2] or ""
+                test_type = test_case_row[3]
+                project_id = test_case_row[4]
+                requires_preconditions = test_case_row[5]
                 
                 # Delete all test steps
                 cursor.execute(
@@ -1121,6 +1156,97 @@ async def generate_steps(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate test steps: {str(e)}"
+        )
+
+@app.post("/api/test-cases/{id}/generate-combined-steps")
+async def generate_combined_test_steps(
+    id: int,
+    request_data: GenerateStepsRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Generate combined UI+API test steps with preconditions and teardown.
+    This endpoint handles the complete flow of creating precondition API tests,
+    main UI tests, and teardown API tests with proper dependencies.
+    """
+    try:
+        # Verify test case exists and get details
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, name, description, test_type, project_id FROM test_cases WHERE id = %s AND client_id = %s",
+                    (id, str(current_user.client_id))
+                )
+                test_case_row = cursor.fetchone()
+                if not test_case_row:
+                    raise HTTPException(status_code=404, detail="Test case not found")
+                
+                test_case_name = test_case_row[1]
+                test_case_description = test_case_row[2] or ""
+                test_type = test_case_row[3]
+                project_id = test_case_row[4]
+                
+                if test_type != 'ui':
+                    raise HTTPException(status_code=400, detail="Combined generation only supported for UI test cases")
+                
+                if not project_id:
+                    raise HTTPException(status_code=400, detail="Test case must be associated with a project for combined generation")
+                
+                # Check if project has API schemas
+                cursor.execute(
+                    "SELECT COUNT(*) FROM api_schemas WHERE project_id = %s AND client_id = %s",
+                    (str(project_id), str(current_user.client_id))
+                )
+                schema_count = cursor.fetchone()[0]
+                
+                if schema_count == 0:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="No API schemas found for this project. Upload an API schema first to enable combined generation."
+                    )
+        
+        logger.info(f"🔗 Starting combined UI+API generation for test case {id}")
+        
+        # Use CombinedTestGenerationService
+        from Services.CombinedTestGenerationService import CombinedTestGenerationService
+        combined_service = CombinedTestGenerationService()
+        
+        def run_combined_generation():
+            try:
+                result = combined_service.generate_combined_test(
+                    test_case_id=id,
+                    test_case_name=test_case_name,
+                    test_case_description=test_case_description,
+                    page_source="",  # Will be filled by combined service when needed
+                    page_url="",     # Will be filled by combined service when needed
+                    client_id=str(current_user.client_id),
+                    project_id=str(project_id),
+                    environment_id=request_data.environment_id if request_data else None,
+                    force_preconditions=request_data.force_preconditions if request_data else True
+                )
+                logger.info(f"✅ Combined generation result: {result}")
+            except Exception as e:
+                logger.error(f"❌ Combined generation failed: {e}")
+        
+        # Start combined generation in separate thread
+        from threading import Thread
+        thread = Thread(target=run_combined_generation)
+        thread.daemon = True
+        thread.start()
+        
+        return {
+            "status": "started", 
+            "mode": "combined",
+            "message": "Combined UI+API test generation started with preconditions and teardown"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in combined test generation: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start combined test generation: {str(e)}"
         )
 
 @app.post("/api/confirm_generate_steps/{id}", response_model=Dict)
@@ -2499,19 +2625,19 @@ async def get_project_test_tree(
                 """
                 WITH RECURSIVE TestCaseHierarchy AS (
                     -- Base case: get all root nodes
-                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type
+                    SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type, requires_preconditions
                     FROM test_cases
                     WHERE parent_id IS NULL AND project_id = %s
                     
                     UNION ALL
                     
                     -- Recursive case: get all children
-                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at, tc.test_type
+                    SELECT tc.id, tc.name, tc.description, tc.parent_id, tc.type, tc."order", tc.created_at, tc.updated_at, tc.test_type, tc.requires_preconditions
                     FROM test_cases tc
                     JOIN TestCaseHierarchy tch ON tc.parent_id = tch.id
                     WHERE tc.project_id = %s
                 )
-                SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type
+                SELECT id, name, description, parent_id, type, "order", created_at, updated_at, test_type, requires_preconditions
                 FROM TestCaseHierarchy
                 ORDER BY parent_id NULLS FIRST, "order", name
                 """,
@@ -2534,6 +2660,7 @@ async def get_project_test_tree(
                     "created_at": tc[6].isoformat() if tc[6] else None,
                     "updated_at": tc[7].isoformat() if tc[7] else None,
                     "test_type": tc[8],
+                    "requires_preconditions": tc[9],
                     "children": []
                 }
                 test_case_map[tc[0]] = test_case
@@ -3515,9 +3642,9 @@ async def create_test_case(
             # Insert the new test case
             cur.execute(
                 """
-                INSERT INTO test_cases (name, description, parent_id, type, "order", client_id, project_id, test_type)
-                VALUES (%s, %s, %s, 'test', 1, %s, %s, %s)
-                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
+                INSERT INTO test_cases (name, description, parent_id, type, "order", client_id, project_id, test_type, requires_preconditions)
+                VALUES (%s, %s, %s, 'test', 1, %s, %s, %s, %s)
+                RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type, requires_preconditions
                 """,
                 (
                     request_data.name,
@@ -3525,7 +3652,8 @@ async def create_test_case(
                     request_data.parent_id,
                     client_id_str,
                     project_id_str,
-                    request_data.test_type
+                    request_data.test_type,
+                    request_data.requires_preconditions
                 )
             )
             test_case = cur.fetchone()
@@ -3554,6 +3682,150 @@ async def create_test_case(
         )
     finally:
         return_db_connection(conn)
+
+@app.post("/api/test-cases/{test_case_id}/dependencies")
+async def add_test_dependency(
+    test_case_id: int,
+    request_data: dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Add a dependency (precondition or teardown) to a test case.
+    
+    Request body example:
+    {
+        "prerequisite_test_case_id": 123,
+        "dependency_type": "precondition",  // or "teardown"
+        "execution_order": 1
+    }
+    """
+    try:
+        from Services.TestDependencyService import TestDependencyService
+        
+        prerequisite_id = request_data.get('prerequisite_test_case_id')
+        dependency_type = request_data.get('dependency_type', 'precondition')
+        execution_order = request_data.get('execution_order', 1)
+        
+        if not prerequisite_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="prerequisite_test_case_id is required"
+            )
+        
+        if dependency_type not in ['precondition', 'teardown']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="dependency_type must be 'precondition' or 'teardown'"
+            )
+        
+        dependency_service = TestDependencyService()
+        success = dependency_service.add_test_dependency(
+            test_case_id, prerequisite_id, dependency_type, execution_order
+        )
+        
+        if success:
+            return {
+                "message": f"Successfully added {dependency_type} dependency",
+                "dependent_test_case_id": test_case_id,
+                "prerequisite_test_case_id": prerequisite_id,
+                "dependency_type": dependency_type,
+                "execution_order": execution_order
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to add test dependency"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add test dependency: {str(e)}"
+        )
+
+@app.get("/api/test-cases/{test_case_id}/dependencies")
+async def get_test_dependencies(
+    test_case_id: int,
+    dependency_type: str = Query(default="precondition", regex="^(precondition|teardown)$"),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        from Services.TestDependencyService import TestDependencyService
+        
+        dependency_service = TestDependencyService()
+        dependencies = dependency_service.get_test_dependencies(test_case_id, dependency_type)
+        
+        return {
+            "test_case_id": test_case_id,
+            "dependency_type": dependency_type,
+            "dependencies": dependencies
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching dependencies: {str(e)}")
+
+@app.delete("/api/dependencies/{dependency_id}")
+async def delete_test_dependency(
+    dependency_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        from Services.TestDependencyService import TestDependencyService
+        
+        dependency_service = TestDependencyService()
+        success = dependency_service.delete_test_dependency(dependency_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Dependency not found")
+        
+        return {
+            "message": "Dependency deleted successfully",
+            "dependency_id": dependency_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting dependency: {str(e)}")
+
+@app.delete("/api/test-cases/{test_case_id}/dependencies/{prerequisite_test_case_id}")
+async def remove_test_dependency(
+    test_case_id: int,
+    prerequisite_test_case_id: int,
+    dependency_type: str = Query(default="precondition", regex="^(precondition|teardown)$"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Remove a dependency from a test case.
+    """
+    try:
+        from Services.TestDependencyService import TestDependencyService
+        
+        dependency_service = TestDependencyService()
+        success = dependency_service.remove_test_dependency(
+            test_case_id, prerequisite_test_case_id, dependency_type
+        )
+        
+        if success:
+            return {
+                "message": f"Successfully removed {dependency_type} dependency",
+                "dependent_test_case_id": test_case_id,
+                "prerequisite_test_case_id": prerequisite_test_case_id,
+                "dependency_type": dependency_type
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to remove test dependency"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove test dependency: {str(e)}"
+        )
 
 @app.post("/api/test_cases/move")
 async def move_test_case(
@@ -3711,6 +3983,10 @@ async def update_test_case(
                     update_fields.append("test_type = %s")
                     update_values.append(request_data.test_type)
                 
+                if request_data.requires_preconditions is not None:
+                    update_fields.append("requires_preconditions = %s")
+                    update_values.append(request_data.requires_preconditions)
+                
                 update_values.append(id)
                 
                 cur.execute(
@@ -3718,7 +3994,7 @@ async def update_test_case(
                     UPDATE test_cases 
                     SET {', '.join(update_fields)}
                     WHERE id = %s
-                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type, requires_preconditions
                     """,
                     update_values
                 )
@@ -3730,6 +4006,10 @@ async def update_test_case(
                     update_fields.append("test_type = %s")
                     update_values.append(request_data.test_type)
                 
+                if request_data.requires_preconditions is not None:
+                    update_fields.append("requires_preconditions = %s")
+                    update_values.append(request_data.requires_preconditions)
+                
                 update_values.append(id)
                 
                 cur.execute(
@@ -3737,7 +4017,7 @@ async def update_test_case(
                     UPDATE test_cases 
                     SET {', '.join(update_fields)}
                     WHERE id = %s
-                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type
+                    RETURNING id, name, description, parent_id, type, "order", created_at, updated_at, project_id, test_type, requires_preconditions
                     """,
                     update_values
                 )
@@ -3755,7 +4035,8 @@ async def update_test_case(
                 "created_at": updated_test_case[6].isoformat() if updated_test_case[6] else None,
                 "updated_at": updated_test_case[7].isoformat() if updated_test_case[7] else None,
                 "project_id": updated_test_case[8],
-                "test_type": updated_test_case[9]
+                "test_type": updated_test_case[9],
+                "requires_preconditions": updated_test_case[10]
             }
     except Exception as e:
         conn.rollback()
@@ -3798,10 +4079,30 @@ async def get_test_step_screenshot(
             result = cursor.fetchone()
             logger.info(f"Screenshot query result for step {step_id}: {'Found' if result else 'Not found'}")
             
-            # If not found in new system, try old screenshots table
+            # If not found in new system, try test_steps table (for generation screenshots)
             if not result:
-                # logger.info(f"Screenshot request {step_id} - No result from new system, trying old screenshots table")
-                # Try old system
+                logger.info(f"Screenshot request {step_id} - No result from execution results, trying test_steps.screenshot_path")
+                cursor.execute(
+                    """
+                    SELECT ts.screenshot_path, NULL as screenshot_base64
+                    FROM test_steps ts
+                    JOIN test_cases tc ON ts.test_case_id = tc.id
+                    WHERE ts.id = %s AND tc.client_id = %s
+                    AND ts.screenshot_path IS NOT NULL
+                    """,
+                    (step_id, str(current_user.client_id))
+                )
+                result = cursor.fetchone()
+                logger.info(f"Screenshot request {step_id} - test_steps query result: {'Found' if result else 'Not found'}")
+                
+                # If found in test_steps, result format is (screenshot_path, None)
+                if result:
+                    # Mark as new system with 3-element tuple to avoid old system detection
+                    result = (None, result[0], 'test_steps')
+            
+            # If still not found, try old screenshots table
+            if not result:
+                logger.info(f"Screenshot request {step_id} - No result from test_steps, trying old screenshots table")
                 cursor.execute(
                     """
                     SELECT screenshot, description
@@ -3812,9 +4113,9 @@ async def get_test_step_screenshot(
                     (step_id,)
                 )
                 result = cursor.fetchone()
-                # logger.info(f"Screenshot request {step_id} - Old system query result: {'Found' if result else 'Not found'}")
+                logger.info(f"Screenshot request {step_id} - Old system query result: {'Found' if result else 'Not found'}")
             else:
-                # logger.info(f"Screenshot request {step_id} - Found result in new system (test_step_execution_results)")
+                logger.info(f"Screenshot request {step_id} - Found result in execution results or test_steps")
                 pass
             
             if not result:
@@ -3846,25 +4147,52 @@ async def get_test_step_screenshot(
                     # logger.info(f"Screenshot request {step_id} - Processing base64 from old system")
                     screenshot_base64 = screenshot_data
             else:
-                # Handle new system format - result[0] is base64 string, result[1] is screenshot_path
-                # logger.info(f"Screenshot request {step_id} - Processing data from new system")
-                screenshot_base64 = result[0]
-                screenshot_path = result[1]
+                # Handle new system format - could be from execution results or test_steps
+                if len(result) == 3:
+                    # From test_steps - result is (None, screenshot_path, 'test_steps')
+                    logger.info(f"Screenshot request {step_id} - Processing data from test_steps")
+                    screenshot_base64 = result[0]  # None
+                    screenshot_path = result[1]    # screenshot_path
+                else:
+                    # From execution results - result is (base64, screenshot_path)
+                    logger.info(f"Screenshot request {step_id} - Processing data from execution results")
+                    screenshot_base64 = result[0]
+                    screenshot_path = result[1]
                 
                 # If no base64 data but we have a path, try to read the file
+                logger.info(f"Processing screenshot - base64: {'None' if not screenshot_base64 else 'Available'}, path: {screenshot_path}")
                 if not screenshot_base64 and screenshot_path:
+                    logger.info(f"Attempting to read screenshot file: {screenshot_path}")
                     try:
                         import os
                         import base64
                         if os.path.exists(screenshot_path):
+                            logger.info(f"File exists, reading: {screenshot_path}")
                             with open(screenshot_path, "rb") as img_file:
-                                screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                                screenshot_binary = img_file.read()
+                                logger.info(f"Successfully read {len(screenshot_binary)} bytes from file")
+                                # Return as binary directly without base64 encoding/decoding
+                                import io
+                                logger.info(f"Screenshot request {step_id} - Returning binary data from file: {screenshot_path}")
+                                return StreamingResponse(
+                                    io.BytesIO(screenshot_binary),
+                                    media_type="image/png",
+                                    headers={"Content-Disposition": "inline; filename=screenshot.png"}
+                                )
+                        else:
+                            logger.error(f"Screenshot file does not exist: {screenshot_path}")
+                            return JSONResponse(content={
+                                "screenshot_available": False,
+                                "message": "Screenshot file not found"
+                            })
                     except Exception as file_error:
                         logger.error(f"Error reading screenshot file {screenshot_path}: {file_error}")
                         return JSONResponse(content={
                             "screenshot_available": False,
                             "message": "Screenshot file not accessible"
                         })
+                else:
+                    logger.info(f"Skipping file read - base64: {'Available' if screenshot_base64 else 'None'}, path: {'Available' if screenshot_path else 'None'}")
                 
                 # If still no screenshot data, return error
                 if not screenshot_base64:
@@ -3876,6 +4204,15 @@ async def get_test_step_screenshot(
             # Decode base64 to binary data for FileResponse
             import base64
             import io
+            
+            # Check if we have valid base64 data
+            if not screenshot_base64:
+                logger.error(f"No base64 screenshot data available for step {step_id}")
+                return JSONResponse(content={
+                    "screenshot_available": False,
+                    "message": "No screenshot data available"
+                })
+            
             try:
                 # Clean base64 data by removing whitespace and line breaks
                 cleaned_base64 = screenshot_base64.replace('\n', '').replace('\r', '').replace(' ', '').strip()
@@ -4193,6 +4530,54 @@ async def update_user_role(
                 "client_id": user_data[6],
                 "role": user_data[7]
             }
+
+@app.get("/api/projects/{project_id}/has-schemas")
+async def check_project_has_schemas(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Check if a project has any analyzed API schemas available for preconditions
+    """
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                # Check if project exists and belongs to user's client
+                cursor.execute(
+                    """
+                    SELECT id FROM projects
+                    WHERE id = %s AND client_id = %s
+                    """,
+                    (project_id, str(current_user.client_id))
+                )
+                if not cursor.fetchone():
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Project not found"
+                    )
+                
+                # Check for analyzed API schemas in the project
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM api_schemas
+                    WHERE project_id = %s AND client_id = %s
+                    """,
+                    (project_id, str(current_user.client_id))
+                )
+                schema_count = cursor.fetchone()[0]
+                
+                return {
+                    "has_schemas": schema_count > 0,
+                    "schema_count": schema_count
+                }
+                
+    except Exception as e:
+        logger.error(f"Error checking project schemas: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check project schemas: {str(e)}"
+        )
 
 @app.get("/api/test_case_generation_status/{id}")
 async def test_case_generation_status(
