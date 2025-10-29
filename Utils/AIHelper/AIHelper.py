@@ -300,23 +300,38 @@ IMPORTANT REQUIREMENTS:
 1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
 2. Action Types: For any type of actions, ensure that the value field is non-empty and includes appropriate test data.
 3. Environment Variables: Use %base_url%, %login%, and %password% for environment-specific values.
-4. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
-5. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
-6. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
-7. No Explanations: Do not include any explanation text. Only the required JSON object should be output.
-8. Assertion: If applicable, specify an assertion to validate expected behavior.
-9. Login Verification: After login steps, include a verification step to confirm successful login before proceeding.
-10. Password Field Handling: When dealing with login forms, ALWAYS include a separate step for entering the password in the password field before clicking the login button. This is mandatory even if the form appears to function without it.
-11. Hidden Menus: NEVER try to click on hidden submenu items directly. Always expand parent menus first before interacting with their child elements.
-12. FOLLOW THE EXACT NEXT STEP: If the next_prompt specifies an action like "Click the 'Recipients' link", make sure to perform exactly that action, not skip ahead to subsequent steps.
-13. STRICT SEQUENCE ADHERENCE: You MUST follow the exact sequence of steps. If the next_prompt is "Click the 'New group' button", you MUST create a step that clicks that button, even if you can see form fields that will need to be filled afterward.
-14. NEVER ASSUME COMPLETION: Never assume a step has already been completed. If the next_prompt indicates an action, that action must be performed as the current step.
-15. ONE ACTION PER STEP: Each step should perform exactly one action (click, type, etc.). Do not combine multiple actions into a single step.
-16. ELEMENT EXISTENCE VERIFICATION: Your element_locator MUST be for an element that actually exists in the provided HTML.
+4. DYNAMIC NAME GENERATION - CRITICAL FOR AVOIDING DUPLICATE FAILURES:
+   - NEVER use hardcoded names like "Test Client", "New User", "My Group", etc.
+   - ALWAYS use dynamic name variables to generate unique names automatically
+   - Available name variables:
+     * %unique_name% - Generates random unique name (e.g., "a7b3c9d2")
+     * %unique_name:Client% - Generates unique name with prefix (e.g., "Client_a7b3c9d2")
+     * %unique_name:User:Test% - Generates unique name with prefix and suffix (e.g., "User_a7b3c9d2_Test")
+     * %timestamp_name% - Generates timestamp-based name (e.g., "20250129_143052")
+     * %timestamp_name:Group% - Generates timestamp name with prefix (e.g., "Group_20250129_143052")
+   - Examples of CORRECT usage:
+     * For client name field: use "%unique_name:Client%" instead of "Test Client"
+     * For user name field: use "%unique_name:User%" instead of "John Doe"
+     * For group name field: use "%unique_name:Group%" instead of "My Group"
+     * For email field: use "%unique_name%@test.com" instead of "test@test.com"
+   - The system will automatically generate unique values at runtime to prevent duplicate name errors
+5. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
+6. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
+7. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
+8. No Explanations: Do not include any explanation text. Only the required JSON object should be output.
+9. Assertion: If applicable, specify an assertion to validate expected behavior.
+10. Login Verification: After login steps, include a verification step to confirm successful login before proceeding.
+11. Password Field Handling: When dealing with login forms, ALWAYS include a separate step for entering the password in the password field before clicking the login button. This is mandatory even if the form appears to function without it.
+12. Hidden Menus: NEVER try to click on hidden submenu items directly. Always expand parent menus first before interacting with their child elements.
+13. FOLLOW THE EXACT NEXT STEP: If the next_prompt specifies an action like "Click the 'Recipients' link", make sure to perform exactly that action, not skip ahead to subsequent steps.
+14. STRICT SEQUENCE ADHERENCE: You MUST follow the exact sequence of steps. If the next_prompt is "Click the 'New group' button", you MUST create a step that clicks that button, even if you can see form fields that will need to be filled afterward.
+15. NEVER ASSUME COMPLETION: Never assume a step has already been completed. If the next_prompt indicates an action, that action must be performed as the current step.
+16. ONE ACTION PER STEP: Each step should perform exactly one action (click, type, etc.). Do not combine multiple actions into a single step.
+17. ELEMENT EXISTENCE VERIFICATION: Your element_locator MUST be for an element that actually exists in the provided HTML.
    - Before providing a locator, verify that it exists in the HTML code by searching for unique text or attributes
    - Document your verification in the element_purpose with "Element verified in HTML: <text/attribute found>"
    - If you cannot verify the element exists, do not proceed - suggest a "wait" action instead
-17. FOCUS ON THE MAIN FLOW: Only include steps that are specifically described in the test description.
+18. FOCUS ON THE MAIN FLOW: Only include steps that are specifically described in the test description.
    - Do NOT add unnecessary steps like field validation that aren't part of the test description
    - Stay focused on completing the core workflow as described in the test case
    - Avoid adding "nice to have" assertions or verifications that aren't explicitly required

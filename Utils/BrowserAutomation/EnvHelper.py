@@ -1,12 +1,15 @@
 from contextlib import contextmanager
 from typing import Optional, Dict
 from Utils.System import System
+from Utils.BrowserAutomation.NameGenerator import NameGenerator
+import re
 
 class EnvHelper:
     def __init__(self, environment_vars: Dict = None):
         self._base_url: Optional[str] = None
         self._login: Optional[str] = None
         self._password: Optional[str] = None
+        self._generated_names: Dict[str, str] = {}  # Cache for generated names
         
         # If environment variables are provided, use them directly
         if environment_vars:
@@ -109,6 +112,15 @@ class EnvHelper:
         Process environment variables in a text string.
         
         Replaces %variable_name% with the actual value from environment variables.
+        Supports dynamic name generation for unique names.
+        
+        Supported variables:
+        - %base_url%, %login%, %password% - Standard environment variables
+        - %unique_name% - Generates a unique random name (e.g., "a7b3c9d2")
+        - %unique_name:prefix% - Generates unique name with prefix (e.g., "Client_a7b3c9d2")
+        - %unique_name:prefix:suffix% - Generates unique name with prefix and suffix (e.g., "Client_a7b3c9d2_Test")
+        - %timestamp_name% - Generates timestamp-based name (e.g., "20250129_143052")
+        - %timestamp_name:prefix% - Generates timestamp name with prefix (e.g., "Client_20250129_143052")
         
         Args:
             text (str): The text containing environment variable placeholders
@@ -118,8 +130,6 @@ class EnvHelper:
         """
         if not text:
             return text
-            
-        import re
         
         # Find all %variable% patterns in the text
         pattern = r'%([^%]+)%'
@@ -127,22 +137,71 @@ class EnvHelper:
         
         # Replace each variable with its value
         result = text
-        for var_name in matches:
-            var_name = var_name.strip()
+        for var_match in matches:
+            var_name = var_match.strip()
+            placeholder = f'%{var_match}%'
+            
             try:
+                # Handle standard environment variables
                 if var_name == 'base_url':
                     value = self.base_url
                 elif var_name == 'login':
                     value = self.login
                 elif var_name == 'password':
                     value = self.password
+                    
+                # Handle dynamic name generation
+                elif var_name.startswith('unique_name'):
+                    # Check if we already generated this exact variable in this test run
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        # Parse the variable for prefix and suffix
+                        parts = var_name.split(':')
+                        prefix = parts[1] if len(parts) > 1 else ""
+                        suffix = parts[2] if len(parts) > 2 else ""
+                        
+                        # Generate unique name
+                        value = NameGenerator.generate_unique_name(prefix=prefix, suffix=suffix)
+                        
+                        # Cache it for consistency within this test run
+                        self._generated_names[placeholder] = value
+                        
+                elif var_name.startswith('timestamp_name'):
+                    # Check if we already generated this exact variable in this test run
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        # Parse the variable for prefix
+                        parts = var_name.split(':')
+                        prefix = parts[1] if len(parts) > 1 else ""
+                        
+                        # Generate timestamp name
+                        value = NameGenerator.generate_timestamp_name(prefix=prefix)
+                        
+                        # Cache it for consistency within this test run
+                        self._generated_names[placeholder] = value
+                        
+                elif var_name.startswith('uuid_name'):
+                    # Check if we already generated this exact variable in this test run
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        # Parse the variable for prefix
+                        parts = var_name.split(':')
+                        prefix = parts[1] if len(parts) > 1 else ""
+                        short = parts[2].lower() != 'false' if len(parts) > 2 else True
+                        
+                        # Generate UUID name
+                        value = NameGenerator.generate_uuid_name(prefix=prefix, short=short)
+                        
+                        # Cache it for consistency within this test run
+                        self._generated_names[placeholder] = value
                 else:
-                    # For custom variables, we could add support here
-                    # For now, leave the placeholder if variable not found
+                    # For unknown variables, leave the placeholder
                     continue
                     
                 # Replace the placeholder with the actual value
-                placeholder = f'%{var_name}%'
                 result = result.replace(placeholder, value)
                 
             except ValueError:
