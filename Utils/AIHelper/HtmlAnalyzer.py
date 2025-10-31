@@ -98,13 +98,16 @@ class HtmlAnalyzer(AIHelper):
             self.logger.info("=== HTML ANALYZER RESPONSE START ===")
 
             # Validate required keys
-            required_keys = ['element_locator', 'by_strategy', 'action', 'element_purpose', 'next_step', 'value']
+            required_keys = ['element_locator', 'css_selector', 'by_strategy', 'action', 'element_purpose', 'next_step', 'value']
             missing_keys = [k for k in required_keys if k not in response]
             if missing_keys:
                 self.logger.warning(f"Missing required keys in response: {missing_keys}")
                 # Set default values for missing keys
                 for key in missing_keys:
-                    response[key] = ''
+                    if key == 'css_selector':
+                        response[key] = ''  # CSS selector is optional fallback
+                    else:
+                        response[key] = ''
 
             # Normalize by_strategy to match database constraints
             if response['by_strategy'].lower() not in ['css', 'xpath']:
@@ -117,6 +120,7 @@ class HtmlAnalyzer(AIHelper):
                 'element_purpose': response['element_purpose'],
                 'action': response['action'],
                 'element_locator': response['element_locator'],
+                'css_selector': response.get('css_selector', ''),  # Get CSS selector
                 'by_strategy': response['by_strategy'],
                 'value': response['value'],
                 'next_step': response['next_step']
@@ -124,12 +128,13 @@ class HtmlAnalyzer(AIHelper):
 
             self.add_step_to_history(test_case_id, step_data)
 
-            # Return tuple in the expected order
+            # Return tuple in the expected order (now includes css_selector)
             return (
                 step_data['next_step'],
                 step_data['element_purpose'],
                 step_data['action'],
                 step_data['element_locator'],
+                step_data['css_selector'],
                 step_data['by_strategy'],
                 step_data['value']
             )
@@ -190,13 +195,16 @@ class HtmlAnalyzer(AIHelper):
             self.logger.info("=== ERROR ANALYSIS RESPONSE START ===")
             
             # Validate required keys
-            required_keys = ['analysis', 'element_locator', 'by_strategy', 'action', 'element_purpose', 'value', 'next_step']
+            required_keys = ['analysis', 'element_locator', 'css_selector', 'by_strategy', 'action', 'element_purpose', 'value', 'next_step']
             missing_keys = [k for k in required_keys if k not in response]
             if missing_keys:
                 self.logger.warning(f"Missing required keys in error analysis response: {missing_keys}")
                 # Set default values for missing keys
                 for key in missing_keys:
-                    response[key] = ''
+                    if key == 'css_selector':
+                        response[key] = ''  # CSS selector is optional fallback
+                    else:
+                        response[key] = ''
             
             # Normalize by_strategy to match database constraints
             if response['by_strategy'].lower() not in ['css', 'xpath']:
@@ -207,12 +215,13 @@ class HtmlAnalyzer(AIHelper):
             # Log the analysis
             self.logger.info(f"Error analysis: {response['analysis']}")
             
-            # Return tuple in the expected order
+            # Return tuple in the expected order (now includes css_selector)
             return (
                 response['next_step'],
                 response['element_purpose'],
                 response['action'],
                 response['element_locator'],
+                response.get('css_selector', ''),
                 response['by_strategy'],
                 response['value']
             )

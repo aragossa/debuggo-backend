@@ -288,13 +288,23 @@ HTML Code:
 
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
-    "element_locator": "XPath selector to locate the element",
+    "element_locator": "XPath selector to locate the element (PRIMARY locator)",
+    "css_selector": "CSS selector to locate the same element (FALLBACK locator)",
     "by_strategy": "xpath",
     "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST provide actual test data (e.g., '%login%' for login field)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
 }}
+
+CRITICAL - DUAL LOCATOR REQUIREMENT:
+- You MUST provide BOTH element_locator (XPath) AND css_selector (CSS) for the SAME element
+- Both locators must target the exact same element on the page
+- XPath will be tried first, CSS selector will be used as fallback if XPath fails
+- Example:
+  * element_locator: "//button[@id='submit-btn']"
+  * css_selector: "button#submit-btn"
+- Both should be equally reliable and specific
 
 IMPORTANT REQUIREMENTS:
 1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
@@ -315,6 +325,23 @@ IMPORTANT REQUIREMENTS:
      * For group name field: use "%unique_name:Group%" instead of "My Group"
      * For email field: use "%unique_name%@test.com" instead of "test@test.com"
    - The system will automatically generate unique values at runtime to prevent duplicate name errors
+   
+   ⚠️ CRITICAL - NEVER HARDCODE DYNAMIC VALUES IN XPATH/CSS SELECTORS:
+   - When creating an item with a dynamic name (e.g., %unique_name:Group%), DO NOT hardcode the generated value in subsequent selectors
+   - ❌ WRONG: Step 1 uses "%unique_name:Group%", Step 2 uses "//tr[td/a[text()='Group_a7b3c9d2']]" (hardcoded!)
+   - ✅ BEST: Reuse the SAME variable in the selector:
+     * Step 1: value="%unique_name:Group%" creates the group
+     * Step 2: element_locator="//tr[td/a[text()='%unique_name:Group%']]//a[@title='Delete']"
+     * At runtime, both get replaced with the same value (e.g., "Group_a7b3c9d2")
+     * This ensures you're always targeting the item you just created
+   - ⚠️ AVOID position-based selectors if table can be sorted or filtered:
+     * "//tr[1]" gets first row - but what if table is sorted by name desc?
+     * "//tr[last()]" gets last row - but what if there's pagination?
+   - Only use position-based when you're certain of the order:
+     * Use contains() for partial match: "//tr[td/a[contains(text(), 'Group_')]]//a[@title='Delete']"
+     * Use data attributes if available: "//tr[@data-id='...']/a[@title='Delete']"
+   - Dynamic names change on every test run, so hardcoding them breaks test repeatability
+
 5. by_strategy: The value of by_strategy must be either 'css' or 'xpath'—no other values are allowed.
 6. Field Validation: If typing an invalid email or another value does not trigger validation, ensure the form is submitted to force validation.
 7. Test Progression: Ensure that each test step advances forward. Avoid repeating any steps. Each step must represent a unique action.
@@ -336,6 +363,13 @@ IMPORTANT REQUIREMENTS:
    - Stay focused on completing the core workflow as described in the test case
    - Avoid adding "nice to have" assertions or verifications that aren't explicitly required
    - Follow the minimal path to complete the described test scenario
+19. NOTIFICATION/TOAST MESSAGE ASSERTIONS - TIMING IS CRITICAL:
+   - Notification messages (success, error, info) often appear briefly and then fade away
+   - ❌ WRONG: Click delete → Immediately assert "Successfully deleted!" (notification already gone!)
+   - ✅ CORRECT: Click delete → Wait 1 second → Assert "Successfully deleted!" (catch notification while visible)
+   - Use time.sleep(1) or wait_for_clickable BEFORE assert_text_contains for notifications
+   - If notification is already gone when assertion runs, you'll get empty text ('')
+   - Common notification selectors: div[@id='notify'], div[contains(@class, 'alert')], div[contains(@class, 'toast')]
 """
 
     def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
@@ -417,13 +451,19 @@ CURRENT PAGE HTML:
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
     "analysis": "Brief analysis of why the step failed",
-    "element_locator": "Corrected XPath or CSS selector that should work",
-    "by_strategy": "xpath or css",
+    "element_locator": "Corrected XPath selector that should work (PRIMARY locator)",
+    "css_selector": "Corrected CSS selector for the same element (FALLBACK locator)",
+    "by_strategy": "xpath",
     "action": "Same or corrected action (click, type, etc.)",
     "element_purpose": "Description of what this step does",
     "value": "Same or corrected value if applicable",
     "next_step": "Description of what to do next"
 }}
+
+CRITICAL - DUAL LOCATOR REQUIREMENT:
+- You MUST provide BOTH element_locator (XPath) AND css_selector (CSS) for the SAME element
+- Both locators must target the exact same element on the page
+- System will try XPath first, then CSS as fallback if XPath fails
 
 IMPORTANT:
 1. Focus on fixing the CURRENT step, not skipping ahead
@@ -431,8 +471,27 @@ IMPORTANT:
 3. Consider if a parent menu needs to be expanded first
 4. For hidden elements, consider using hover actions or JavaScript execution
 5. If timing is the issue, suggest adding a wait step
-6. Ensure your solution follows the logical flow of the application
-7. DO NOT suggest solutions that have already been tried in the previous attempts
+6. For notification/toast assertions that fail with empty text (''):
+   - The notification appeared but faded before assertion ran
+   - Suggest adding wait action BEFORE the assertion
+   - Example fix: Insert "wait" step for 1-2 seconds, then retry assertion
+   - Notifications are transient - timing is critical!
+7. Ensure your solution follows the logical flow of the application
+8. DO NOT suggest solutions that have already been tried in the previous attempts
+
+⚠️ CRITICAL - NEVER HARDCODE DYNAMIC VALUES IN CORRECTED SELECTORS:
+- If the failed step was trying to locate a dynamically created item (with %unique_name%, %timestamp_name%, etc.)
+- DO NOT hardcode the generated value in the corrected XPath/CSS selector
+- ❌ WRONG: "//tr[td/a[text()='Group_a7b3c9d2']]//a[@title='Delete']" (hardcoded!)
+- ✅ BEST: Reuse the SAME variable in the corrected selector:
+  * If creation step used "%unique_name:Group%"
+  * Corrected selector: "//tr[td/a[text()='%unique_name:Group%']]//a[@title='Delete']"
+  * At runtime, both get replaced with the same value
+  * This ensures you're targeting the exact item that was created
+- ⚠️ AVOID position-based selectors for sorted/paginated tables:
+  * "//tr[1]" might not be the newly created item if table is sorted
+  * "//tr[last()]" fails if there's pagination
+- Only use position-based when order is guaranteed, otherwise use the variable reference
 """
 
     def switch_provider(self, provider: Literal["chatgpt", "gemini", "claude", "deepseek"]):

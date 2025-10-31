@@ -213,8 +213,8 @@ class BrowserAutomation:
                                 EC.element_to_be_clickable((by_strategy, selector))
                             )
                             return element
-                        except:
-                            pass
+                        except TimeoutException:
+                            self.logger.warning(f"[PID:{self.pid}] Element not clickable, trying JavaScript fallback...")
                     else:
                         # For type, wait, etc. - just need element to be present and visible
                         try:
@@ -223,28 +223,34 @@ class BrowserAutomation:
                                 EC.visibility_of_element_located((by_strategy, selector))
                             )
                             return element
-                        except:
-                            pass
+                        except TimeoutException:
+                            self.logger.warning(f"[PID:{self.pid}] Element not visible, trying JavaScript fallback...")
                     
                     # Last resort: try with JavaScript
-                        self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
-                        if by.lower() == 'xpath':
-                            # For XPath, we need to use document.evaluate
-                            js_script = """
-                            var result = document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-                            return result.singleNodeValue;
-                            """
-                        else:
-                            # For CSS, we can use querySelector
-                            js_script = "return document.querySelector(arguments[0]);"
-                        
-                        element = self.driver.execute_script(js_script, selector)
-                        if element:
-                            self.logger.info(f"[PID:{self.pid}] Found element using JavaScript")
-                            return element
-                        else:
+                    self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
+                    if by.lower() == 'xpath':
+                        # For XPath, we need to use document.evaluate
+                        js_script = """
+                        var result = document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                        return result.singleNodeValue;
+                        """
+                    else:
+                        # For CSS, we can use querySelector
+                        js_script = "return document.querySelector(arguments[0]);"
+                    
+                    element = self.driver.execute_script(js_script, selector)
+                    if element:
+                        self.logger.info(f"[PID:{self.pid}] Found element using JavaScript")
+                        return element
+                    else:
+                        # Take a screenshot for debugging
+                        try:
+                            screenshot_path = f"/tmp/element_not_found_{self.pid}_{int(time.time())}.png"
+                            self.driver.save_screenshot(screenshot_path)
+                            self.logger.error(f"[PID:{self.pid}] Element not found: {selector}. Screenshot saved: {screenshot_path}")
+                        except:
                             self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
-                            raise TimeoutException(f"Element not found: {selector}")
+                        raise TimeoutException(f"Element not found: {selector}")
 
         except TimeoutException:
             self.logger.error(f"[PID:{self.pid}] Element not found: {selector}")
@@ -256,52 +262,112 @@ class BrowserAutomation:
     def click(self, selector, by='xpath'):
         """
         Click an element using either CSS selector or XPath.
+        Automatically waits for the element to be clickable before attempting to click.
+        Includes retry logic for stale elements.
 
         Args:
             selector (str): The CSS selector or XPath to find the element.
             by (str): Either 'css' or 'xpath' to specify the selector type.
         """
-        element = self.find_element(selector, by, action='click')
+        from selenium.common.exceptions import StaleElementReferenceException
         
-        # Try standard click first
-        try:
-            element.click()
-            self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
-            return
-        except Exception as e:
-            self.logger.warning(f"[PID:{self.pid}] Standard click failed, trying alternative methods: {str(e)}")
-        
-        # If standard click fails, try JavaScript click
-        try:
-            self.logger.info(f"[PID:{self.pid}] Trying JavaScript click...")
-            self.driver.execute_script("arguments[0].click();", element)
-            self.logger.info(f"[PID:{self.pid}] Clicked element with JavaScript: {selector}")
-            return
-        except Exception as js_error:
-            self.logger.warning(f"[PID:{self.pid}] JavaScript click failed: {str(js_error)}")
-        
-        # If JavaScript click fails, try Actions
-        try:
-            self.logger.info(f"[PID:{self.pid}] Trying Actions click...")
-            from selenium.webdriver.common.action_chains import ActionChains
-            actions = ActionChains(self.driver)
-            actions.move_to_element(element).click().perform()
-            self.logger.info(f"[PID:{self.pid}] Clicked element with Actions: {selector}")
-            return
-        except Exception as actions_error:
-            self.logger.warning(f"[PID:{self.pid}] Actions click failed: {str(actions_error)}")
-        
-        # If all methods fail, try to scroll to the element and then click
-        try:
-            self.logger.info(f"[PID:{self.pid}] Trying scroll and click...")
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
-            time.sleep(0.5)  # Give time for the page to settle after scrolling
-            element.click()
-            self.logger.info(f"[PID:{self.pid}] Clicked element after scrolling: {selector}")
-            return
-        except Exception as scroll_error:
-            self.logger.error(f"[PID:{self.pid}] All click methods failed: {str(scroll_error)}")
-            raise
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # First, try to wait for the element to be clickable (especially important for modals)
+                by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+                try:
+                    self.logger.info(f"[PID:{self.pid}] Waiting for element to be clickable before clicking: {selector}")
+                    element = WebDriverWait(self.driver, self.timeout).until(
+                        EC.element_to_be_clickable((by_strategy, selector))
+                    )
+                    self.logger.info(f"[PID:{self.pid}] Element is clickable, proceeding with click")
+                except TimeoutException:
+                    self.logger.warning(f"[PID:{self.pid}] Element not clickable within timeout, falling back to find_element")
+                    element = self.find_element(selector, by, action='click')
+                
+                # Validate element was found
+                if element is None:
+                    raise TimeoutException(f"Element not found: {selector}")
+                
+                # Try standard click first
+                try:
+                    element.click()
+                    self.logger.info(f"[PID:{self.pid}] Clicked element: {selector}")
+                    return
+                except StaleElementReferenceException:
+                    raise  # Re-raise to trigger retry
+                except Exception as e:
+                    self.logger.warning(f"[PID:{self.pid}] Standard click failed, trying alternative methods: {str(e)}")
+                
+                # If standard click fails, try JavaScript click with null check
+                try:
+                    self.logger.info(f"[PID:{self.pid}] Trying JavaScript click with null check...")
+                    # Re-find element to avoid stale reference
+                    element = self.driver.find_element(by_strategy, selector)
+                    # Use safer JavaScript that checks for null
+                    self.driver.execute_script("""
+                        var element = arguments[0];
+                        if (element !== null && element !== undefined) {
+                            element.click();
+                        } else {
+                            throw new Error('Element is null or undefined');
+                        }
+                    """, element)
+                    self.logger.info(f"[PID:{self.pid}] Clicked element with JavaScript: {selector}")
+                    return
+                except StaleElementReferenceException:
+                    raise  # Re-raise to trigger retry
+                except Exception as js_error:
+                    self.logger.warning(f"[PID:{self.pid}] JavaScript click failed: {str(js_error)}")
+                
+                # If JavaScript click fails, try Actions
+                try:
+                    self.logger.info(f"[PID:{self.pid}] Trying Actions click...")
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    # Re-find element to avoid stale reference
+                    element = self.driver.find_element(by_strategy, selector)
+                    actions = ActionChains(self.driver)
+                    actions.move_to_element(element).click().perform()
+                    self.logger.info(f"[PID:{self.pid}] Clicked element with Actions: {selector}")
+                    return
+                except StaleElementReferenceException:
+                    raise  # Re-raise to trigger retry
+                except Exception as actions_error:
+                    self.logger.warning(f"[PID:{self.pid}] Actions click failed: {str(actions_error)}")
+                
+                # If all methods fail, try to scroll to the element and then click with null check
+                try:
+                    self.logger.info(f"[PID:{self.pid}] Trying scroll and click with null check...")
+                    # Re-find element to avoid stale reference
+                    element = self.driver.find_element(by_strategy, selector)
+                    # Use safer JavaScript that checks for null before scrollIntoView
+                    self.driver.execute_script("""
+                        var element = arguments[0];
+                        if (element !== null && element !== undefined) {
+                            element.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        } else {
+                            throw new Error('Element is null or undefined');
+                        }
+                    """, element)
+                    time.sleep(0.5)  # Give time for the page to settle after scrolling
+                    element.click()
+                    self.logger.info(f"[PID:{self.pid}] Clicked element after scrolling: {selector}")
+                    return
+                except StaleElementReferenceException:
+                    raise  # Re-raise to trigger retry
+                except Exception as scroll_error:
+                    self.logger.error(f"[PID:{self.pid}] All click methods failed: {str(scroll_error)}")
+                    raise
+                    
+            except StaleElementReferenceException:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"[PID:{self.pid}] Element became stale, retrying... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(0.5)  # Brief pause before retry
+                    continue
+                else:
+                    self.logger.error(f"[PID:{self.pid}] Element remained stale after {max_retries} attempts")
+                    raise
                 
     def type_text(self, selector, text, by='xpath'):
         try:
@@ -433,6 +499,107 @@ class BrowserAutomation:
             raise
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Error finding element {selector}: {str(e)}")
+            raise
+
+    def wait_for_clickable(self, selector, by='xpath', timeout=None):
+        """
+        Wait for an element to be clickable (visible and enabled).
+        This is especially useful for modal dialogs and dynamic elements.
+        
+        Args:
+            selector (str): The CSS selector or XPath to find the element.
+            by (str): Either 'css' or 'xpath' to specify the selector type.
+            timeout (int): Maximum time to wait in seconds (uses default if not specified).
+            
+        Returns:
+            WebElement: The clickable element
+        """
+        timeout = timeout or self.timeout
+        try:
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            
+            self.logger.info(f"[PID:{self.pid}] Waiting for element to be clickable: '{selector}' using strategy: {by_strategy}")
+            
+            # Wait for element to be clickable (visible and enabled)
+            element = WebDriverWait(self.driver, timeout).until(
+                EC.element_to_be_clickable((by_strategy, selector))
+            )
+            
+            self.logger.info(f"[PID:{self.pid}] Element is now clickable: '{selector}'")
+            return element
+            
+        except TimeoutException:
+            # Take a screenshot to debug the current page state
+            screenshot_path = self.take_screenshot()
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element to be clickable: '{selector}'. Screenshot: {screenshot_path}")
+            
+            # Gather debug information
+            try:
+                page_url = self.driver.current_url
+                page_title = self.driver.title
+                self.logger.error(f"[PID:{self.pid}] Current page: {page_url} (Title: {page_title})")
+                
+                # Check if element exists but is not clickable
+                try:
+                    element = self.driver.find_element(by_strategy, selector)
+                    self.logger.error(f"[PID:{self.pid}] Element exists but is not clickable. Displayed: {element.is_displayed()}, Enabled: {element.is_enabled()}")
+                except:
+                    self.logger.error(f"[PID:{self.pid}] Element does not exist in DOM")
+                
+            except Exception as debug_ex:
+                self.logger.error(f"[PID:{self.pid}] Failed to gather debug info: {str(debug_ex)}")
+                
+            raise
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for clickable element {selector}: {str(e)}")
+            raise
+
+    def wait_for_modal(self, modal_selector='//div[contains(@class, "modal")]', timeout=None):
+        """
+        Wait for a modal dialog to appear and become visible.
+        
+        Args:
+            modal_selector (str): XPath or CSS selector for the modal container
+            timeout (int): Maximum time to wait in seconds (uses default if not specified)
+            
+        Returns:
+            WebElement: The modal element
+        """
+        timeout = timeout or self.timeout
+        try:
+            self.logger.info(f"[PID:{self.pid}] Waiting for modal to appear: {modal_selector}")
+            
+            # Wait for modal to be present in DOM
+            by_strategy = By.XPATH if '//' in modal_selector else By.CSS_SELECTOR
+            modal = WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((by_strategy, modal_selector))
+            )
+            
+            # Wait for modal to be visible
+            WebDriverWait(self.driver, timeout).until(
+                EC.visibility_of(modal)
+            )
+            
+            # Give modal animation time to complete
+            time.sleep(0.3)
+            
+            self.logger.info(f"[PID:{self.pid}] Modal is visible and ready")
+            return modal
+            
+        except TimeoutException:
+            self.logger.error(f"[PID:{self.pid}] Modal did not appear within {timeout} seconds: {modal_selector}")
+            
+            # Take screenshot for debugging
+            try:
+                screenshot_path = f"/tmp/modal_not_found_{self.pid}_{int(time.time())}.png"
+                self.driver.save_screenshot(screenshot_path)
+                self.logger.error(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
+            except:
+                pass
+                
+            raise
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for modal: {str(e)}")
             raise
 
     def get_page_source(self):
@@ -941,12 +1108,24 @@ class BrowserAutomation:
             raise
 
     def close(self):
-        """Close the browser and cleanup"""
+        """Close the browser and cleanup with better error handling"""
         if self.driver:
             try:
-                self.driver.quit()
-                # Don't log here as TestRunner will handle it
+                # Check if session is still valid before trying to quit
+                try:
+                    self.driver.current_url  # Test if session is alive
+                    self.driver.quit()
+                    self.logger.info(f"[PID:{self.pid}] Browser closed successfully")
+                except Exception as session_error:
+                    # Session already dead, just clean up
+                    self.logger.warning(f"[PID:{self.pid}] Session already closed or invalid: {str(session_error)}")
             except Exception as e:
-                self.logger.error(f"[PID:{self.pid}] Error closing browser: {str(e)}")
+                # Catch any other errors during cleanup
+                error_msg = str(e)
+                # Don't log "session not found" as error - it's expected when browser crashes
+                if "Unable to find session" in error_msg or "NoSuchSessionException" in error_msg:
+                    self.logger.warning(f"[PID:{self.pid}] Browser session already terminated")
+                else:
+                    self.logger.error(f"[PID:{self.pid}] Error closing browser: {error_msg}")
             finally:
                 self.driver = None

@@ -353,27 +353,92 @@ class TestRunner:
             self.logger.error(f"Unexpected error while saving test step: {str(e)}")
             raise
 
-    def execute_step(self, action: str, element_path: str = None, value: str = None, by_strategy: str = None, env_helper=None):
+    def _execute_click_with_fallback(self, xpath_selector: str, css_selector: str, by_strategy: str):
         """
-        Execute a test step with the given action.
+        Execute click with dual locator fallback strategy:
+        1. Try XPath selector first
+        2. If XPath fails, try CSS selector
+        3. If CSS fails, try JavaScript click on either locator
         
         Args:
-            action (str): The action to perform (click, type, wait, etc.)
-            element_path (str): The path to the element to interact with
+            xpath_selector (str): Primary XPath locator
+            css_selector (str): Fallback CSS locator
+            by_strategy (str): Initial strategy hint
+        """
+        from selenium.common.exceptions import TimeoutException, NoSuchElementException
+        
+        # Strategy 1: Try XPath first
+        if xpath_selector:
+            try:
+                self.logger.info(f"[PID:{self.pid}] Strategy 1: Trying XPath locator: {xpath_selector}")
+                self.browser.click(xpath_selector, 'xpath')
+                self.logger.info(f"[PID:{self.pid}] ✅ Click succeeded with XPath")
+                return
+            except Exception as e:
+                self.logger.warning(f"[PID:{self.pid}] ❌ XPath click failed: {str(e)}")
+        
+        # Strategy 2: Try CSS selector fallback
+        if css_selector:
+            try:
+                self.logger.info(f"[PID:{self.pid}] Strategy 2: Trying CSS selector fallback: {css_selector}")
+                self.browser.click(css_selector, 'css')
+                self.logger.info(f"[PID:{self.pid}] ✅ Click succeeded with CSS selector")
+                return
+            except Exception as e:
+                self.logger.warning(f"[PID:{self.pid}] ❌ CSS selector click failed: {str(e)}")
+        
+        # Strategy 3: Try JavaScript click as last resort
+        self.logger.info(f"[PID:{self.pid}] Strategy 3: Trying JavaScript click as last resort")
+        try:
+            # Try to find element with either locator
+            element = None
+            if xpath_selector:
+                try:
+                    from selenium.webdriver.common.by import By
+                    element = self.browser.driver.find_element(By.XPATH, xpath_selector)
+                    self.logger.info(f"[PID:{self.pid}] Found element with XPath for JS click")
+                except:
+                    pass
+            
+            if not element and css_selector:
+                try:
+                    from selenium.webdriver.common.by import By
+                    element = self.browser.driver.find_element(By.CSS_SELECTOR, css_selector)
+                    self.logger.info(f"[PID:{self.pid}] Found element with CSS for JS click")
+                except:
+                    pass
+            
+            if element:
+                self.browser.driver.execute_script("arguments[0].click();", element)
+                self.logger.info(f"[PID:{self.pid}] ✅ Click succeeded with JavaScript")
+                return
+            else:
+                raise Exception(f"Element not found with XPath '{xpath_selector}' or CSS '{css_selector}'")
+                
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] ❌ All click strategies failed")
+            raise Exception(f"Failed to click element. XPath: {xpath_selector}, CSS: {css_selector}. Error: {str(e)}")
+
+    def execute_step(self, action: str, element_path: str = None, value: str = None, by_strategy: str = None, env_helper=None, css_selector: str = None):
+        """
+        Execute a test step with the given action.
+        Implements dual locator strategy: tries XPath first, then CSS fallback, then JavaScript click.
+        
+        Args:
+            action (str): The action to perform (click, type, etc.)
+            element_path (str): The XPath selector for the element (PRIMARY)
             value (str): The value to use for the action (e.g., text to type)
-            by_strategy (str): The strategy to locate elements (xpath or css)
-            env_helper (EnvHelper): Optional environment helper for variable processing
+            by_strategy (str): The locator strategy ('xpath' or 'css')
+            env_helper: Environment helper for variable substitution
+            css_selector (str): The CSS selector for the element (FALLBACK)
         """
         try:
-            # Ensure browser is initialized before executing any step
-            if not self.browser:
-                self.logger.warning(f"[PID:{self.pid}] Browser not initialized, initializing now...")
-                self._ensure_browser_initialized()
-            
-            # Process variables in element_path and value using the EnvHelper
+            # Process environment variables if env_helper is provided
             if env_helper:
                 if element_path:
                     element_path = env_helper.process_variables(element_path)
+                if css_selector:
+                    css_selector = env_helper.process_variables(css_selector)
                 if value:
                     value = env_helper.process_variables(value)
             
@@ -385,10 +450,11 @@ class TestRunner:
                 else:
                     by_strategy = 'css'
             
-            self.logger.info(f"[PID:{self.pid}] Executing {action} with path '{element_path}' using {by_strategy}")
+            self.logger.info(f"[PID:{self.pid}] Executing {action} with xpath='{element_path}' css='{css_selector}' using {by_strategy}")
 
             if action == "click":
-                self.browser.click(element_path, by_strategy)
+                # Implement dual locator strategy with JavaScript fallback
+                self._execute_click_with_fallback(element_path, css_selector, by_strategy)
             elif action == 'navigate':
                 # For navigate action, if element_path is 'N/A', use the value field instead
                 if element_path == 'N/A' or not element_path:
@@ -404,6 +470,12 @@ class TestRunner:
                 self.browser.type_text(element_path, value, by_strategy)
             elif action == "wait":
                 self.browser.wait_for_element(element_path, by_strategy)
+            elif action == "wait_for_clickable":
+                self.browser.wait_for_clickable(element_path, by_strategy)
+            elif action == "wait_for_modal":
+                # Wait for modal to appear, optionally with custom selector
+                modal_selector = element_path if element_path else '//div[contains(@class, "modal")]'
+                self.browser.wait_for_modal(modal_selector)
             elif action == "press_key":
                 self.browser.press_key(element_path, value, by_strategy)
             elif action == "assert":
@@ -1048,13 +1120,19 @@ class TestRunner:
                                 if isinstance(analyzer_response, tuple):
                                     self.logger.info(f"[PID:{pid}] Response length: {len(analyzer_response)}")
                                     if len(analyzer_response) == 5:
-                                        # If we got a 5-tuple, add an empty value
+                                        # Old format (5-tuple) - backward compatibility
                                         next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
+                                        css_selector = ""  # No CSS fallback
                                         value = ""  # Default empty value
-                                    else:
+                                    elif len(analyzer_response) == 6:
+                                        # Old format (6-tuple) - backward compatibility
                                         next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                        css_selector = ""  # No CSS fallback
+                                    else:
+                                        # New format (7-tuple) with CSS fallback
+                                        next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
-                                    self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                    self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                     break
                             except Exception as e:
                                 retry_count += 1
@@ -1109,7 +1187,8 @@ class TestRunner:
                                 action=action,
                                 element_locator=original_element_locator,
                                 value=original_value,
-                                by_strategy=by_strategy
+                                by_strategy=by_strategy,
+                                css_selector=css_selector
                             )
                             
                             try:
@@ -1164,6 +1243,21 @@ class TestRunner:
                                     self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
                                     
                                     try:
+                                        # CRITICAL: Check if browser session is still alive
+                                        if not self.browser:
+                                            self.logger.error(f"[PID:{pid}] Browser session lost during error recovery, re-initializing...")
+                                            self._ensure_browser_initialized()
+                                            if not self.browser:
+                                                raise Exception("Failed to re-initialize browser session")
+                                        
+                                        # Verify browser session is actually functional
+                                        try:
+                                            _ = self.browser.driver.current_url
+                                        except Exception as session_error:
+                                            self.logger.error(f"[PID:{pid}] Browser session dead (error: {session_error}), re-initializing...")
+                                            self.browser = None
+                                            self._ensure_browser_initialized()
+                                        
                                         # Get current page source for error analysis
                                         page_source = self.browser.get_page_source()
                                         
@@ -1194,12 +1288,19 @@ class TestRunner:
                                         
                                         # Unpack the response
                                         if len(analyzer_response) == 5:
+                                            # Old format (5-tuple)
                                             next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
-                                            value = ""  # Default empty value
-                                        else:
+                                            css_selector = ""
+                                            value = ""
+                                        elif len(analyzer_response) == 6:
+                                            # Old format (6-tuple)
                                             next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                            css_selector = ""
+                                        else:
+                                            # New format (7-tuple) with CSS fallback
+                                            next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
-                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution
                                         if value:
@@ -1334,6 +1435,21 @@ class TestRunner:
                                     self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
                                     
                                     try:
+                                        # CRITICAL: Check if browser session is still alive
+                                        if not self.browser:
+                                            self.logger.error(f"[PID:{pid}] Browser session lost during error recovery, re-initializing...")
+                                            self._ensure_browser_initialized()
+                                            if not self.browser:
+                                                raise Exception("Failed to re-initialize browser session")
+                                        
+                                        # Verify browser session is actually functional
+                                        try:
+                                            _ = self.browser.driver.current_url
+                                        except Exception as session_error:
+                                            self.logger.error(f"[PID:{pid}] Browser session dead (error: {session_error}), re-initializing...")
+                                            self.browser = None
+                                            self._ensure_browser_initialized()
+                                        
                                         # Get current page source for error analysis
                                         page_source = self.browser.get_page_source()
                                         
@@ -1364,12 +1480,19 @@ class TestRunner:
                                         
                                         # Unpack the response
                                         if len(analyzer_response) == 5:
+                                            # Old format (5-tuple)
                                             next_step, element_purpose, action, element_locator, by_strategy = analyzer_response
+                                            css_selector = ""
                                             value = ""
-                                        else:
+                                        elif len(analyzer_response) == 6:
+                                            # Old format (6-tuple)
                                             next_step, element_purpose, action, element_locator, by_strategy, value = analyzer_response
+                                            css_selector = ""
+                                        else:
+                                            # New format (7-tuple) with CSS fallback
+                                            next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
-                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, locator={element_locator}, strategy={by_strategy}, value={value}")
+                                        self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution
                                         if value:
@@ -2295,7 +2418,7 @@ class TestRunner:
                 "error_count": error_count
             }
 
-    def _save_step_with_session(self, cursor, conn, test_case_id, step_order, element_purpose, action, element_locator, value, by_strategy):
+    def _save_step_with_session(self, cursor, conn, test_case_id, step_order, element_purpose, action, element_locator, value, by_strategy, css_selector=""):
         """
         Save a test step using an existing database session connection.
         Returns the step_id of the saved step.
@@ -2303,11 +2426,11 @@ class TestRunner:
         try:
             cursor.execute(
                 """
-                INSERT INTO test_steps (test_case_id, step_number, description, action, target, element_path, value, "order") 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) 
+                INSERT INTO test_steps (test_case_id, step_number, description, action, target, element_path, css_selector, value, "order") 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) 
                 RETURNING id
                 """,
-                (test_case_id, step_order, element_purpose, action, element_locator, element_locator, value, step_order)
+                (test_case_id, step_order, element_purpose, action, element_locator, element_locator, css_selector, value, step_order)
             )
             step_id = cursor.fetchone()[0]
             conn.commit()
