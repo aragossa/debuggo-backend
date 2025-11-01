@@ -122,7 +122,7 @@ class ApiSchemaService:
                 self.logger.info(f"✅ Validation process completed")
                 
                 self._save_test_steps(test_case_id, validated_steps)
-                self._update_test_case_description(test_case_id, validated_steps, test_case_name)
+                # Don't update description - preserve user's original input
                 self.logger.info(f"Generated and validated {len(validated_steps)} steps for test case {test_case_id}")
                 return True
             else:
@@ -1084,7 +1084,7 @@ Return ONLY the JSON array of corrected steps, no explanation.
             generated_steps = []
             execution_history = []
             extracted_variables = {}  # Track variables extracted from responses
-            max_steps = 20  # Safety limit
+            max_steps = 100  # Safety limit (increased to support large test flows)
             first_step = None
             
             if conflict_resolution and conflict_resolution['status'] == 'approved':
@@ -1130,10 +1130,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
                             generated_steps.append(conflicted_step)
                             self.logger.info(f"✅ Saved previously conflicted step {hist_item['step_order']} to database")
                     
-                    # Update test case description immediately so steps appear in UI
+                    # Don't update description - preserve user's original input
                     if generated_steps:
-                        self.logger.info(f"📝 Updating test case description with {len(generated_steps)} steps after conflict resolution")
-                        self._update_test_case_description(test_case_id, generated_steps, test_case_name)
+                        self.logger.info(f"📝 Saved {len(generated_steps)} steps after conflict resolution (description preserved)")
                     
                     # Mark notification as processed
                     with get_db_connection_context() as conn:
@@ -1197,10 +1196,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
                                 self._save_single_step(test_case_id, conflicted_step, client_id)
                                 generated_steps.append(conflicted_step)
                         
-                        # Update description if we saved steps
+                        # Don't update description - preserve user's original input
                         if generated_steps:
-                            self.logger.info(f"📝 Updating test case description with {len(generated_steps)} steps (in-loop)")
-                            self._update_test_case_description(test_case_id, generated_steps, test_case_name)
+                            self.logger.info(f"📝 Saved {len(generated_steps)} steps (in-loop, description preserved)")
                         
                         # Mark notification as processed
                         with get_db_connection_context() as conn:
@@ -1376,12 +1374,11 @@ Return ONLY the JSON array of corrected steps, no explanation.
                 
                 step_order += 1
             
-            # Update test case description with summary (final update)
+            # Don't update description - preserve user's original input
             if generated_steps:
-                self.logger.info(f"📝 Final update: test case description with {len(generated_steps)} total steps")
-                self._update_test_case_description(test_case_id, generated_steps, test_case_name)
+                self.logger.info(f"📝 Final: {len(generated_steps)} total steps saved (description preserved)")
             else:
-                self.logger.warning(f"⚠️ No steps generated to update description")
+                self.logger.warning(f"⚠️ No steps generated")
             
             self.logger.info(f"✅ Iterative generation complete: {len(generated_steps)} steps generated")
             return True
@@ -1559,7 +1556,7 @@ Rules:
 2. Use variables extracted from previous steps (e.g., %auth_token%, %client_id%)
 3. Use EXACT HTTP methods from the schema
 4. Use EXACT field names from "Request Body Fields:" section
-5. If the test flow is complete, return {"complete": true} instead of a step
+5. **FOLLOW THE ENTIRE DESCRIPTION**: Compare the execution history against the test description above. Count how many steps from the description have been completed. If ALL steps from the description are done, return {"complete": true}. Otherwise, generate the NEXT step from the description.
 6. **CRITICAL - EXTRACT VARIABLES FROM ACTUAL RESPONSE STRUCTURE**:
    - Look at the "Response Body" in execution history to see the EXACT JSON structure
    - If response is {"client": {"id": 49}}, use "$.client.id" NOT "$.id"
@@ -2098,23 +2095,53 @@ Return ONLY the JSON object, no explanation."""
         return (None, None)
     
     def _is_test_flow_complete(self, execution_history: list, test_case_description: str) -> bool:
-        """Determine if the test flow is complete based on execution history."""
-        # Simple heuristic: if last step was a DELETE or verification GET, might be complete
+        """Determine if the test flow is complete by asking Gemini to compare execution against description."""
         if not execution_history:
             return False
         
-        last_step = execution_history[-1]
-        last_method = last_step['request']['method']
-        last_status = last_step['response']['status']
+        # Build execution summary
+        summary_parts = []
+        for i, exec_result in enumerate(execution_history, 1):
+            summary = exec_result.get('step', {}).get('summary', 'API Request')
+            status = exec_result['response']['status']
+            summary_parts.append(f"{i}. {summary} (Status: {status})")
         
-        # If it's a DELETE with 200/204, likely cleanup step (last step)
-        if last_method == 'DELETE' and last_status in [200, 204]:
-            return True
+        execution_summary = '\n'.join(summary_parts)
         
-        # If we have 5+ steps, might be complete
-        if len(execution_history) >= 5:
-            return True
+        # Ask Gemini if all steps from description are complete
+        prompt = f"""Compare the test description against what has been executed.
+
+Test Description:
+{test_case_description}
+
+Steps Executed So Far:
+{execution_summary}
+
+Question: Have ALL steps described in the test description been completed?
+- Count the steps in the description
+- Count the steps executed
+- Compare if they match
+
+Answer ONLY with "COMPLETE" if all steps are done, or "CONTINUE" if more steps are needed.
+Just one word, nothing else."""
+
+        try:
+            # Call Gemini directly for raw text response (not JSON)
+            import google.generativeai as genai
+            genai.configure(api_key=self.ai_helper.gemini_api_key)
+            model_id = self.ai_helper._get_model_id()
+            model = genai.GenerativeModel(model_id)
+            
+            response = model.generate_content(prompt)
+            
+            if response and response.text:
+                answer = response.text.strip().upper()
+                self.logger.info(f"🤖 Gemini completion check: {answer}")
+                return "COMPLETE" in answer
+        except Exception as e:
+            self.logger.warning(f"Failed to check completion with Gemini: {str(e)}")
         
+        # Fallback: never assume complete, keep generating
         return False
     
     def _detect_documentation_conflict(
