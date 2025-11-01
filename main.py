@@ -104,6 +104,7 @@ class UpdateTestStepAction(BaseModel):
     action: Optional[str] = None
     value: Optional[str] = None
     element_path: Optional[str] = None
+    css_selector: Optional[str] = None
     description: Optional[str] = None
 
 class StepOrderUpdate(BaseModel):
@@ -1799,6 +1800,9 @@ async def update_test_step(
             if update_data.element_path is not None:
                 update_fields.append("element_path = %s")
                 params.append(update_data.element_path)
+            if update_data.css_selector is not None:
+                update_fields.append("css_selector = %s")
+                params.append(update_data.css_selector)
             if update_data.description is not None:
                 update_fields.append("description = %s")
                 params.append(update_data.description)

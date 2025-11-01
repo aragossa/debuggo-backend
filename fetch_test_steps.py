@@ -27,7 +27,7 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
 
     # Query to get the test steps for the given test_case_id with screenshot info
     cursor.execute('''
-        SELECT ts.id, ts.step_order, ts.description, ts.expected_result, ts.action, ts.value, ts.element_path,
+        SELECT ts.id, ts.step_order, ts.description, ts.expected_result, ts.action, ts.value, ts.element_path, ts.css_selector,
                CASE WHEN ts.screenshot_path IS NOT NULL AND ts.screenshot_path != '' THEN true ELSE false END as has_screenshot
         FROM test_steps ts
         WHERE ts.test_case_id = %s
@@ -47,7 +47,8 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
             "action": row[4],
             "value": row[5],
             "element_path": row[6],
-            "has_screenshot": row[7]
+            "css_selector": row[7],
+            "has_screenshot": row[8]
         }
         for row in steps_rows
     ]

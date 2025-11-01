@@ -282,7 +282,7 @@ class TestRunner:
                     return ("Unknown Test Case", "No description available")
                 return result
 
-    def _save_step(self, test_case_id: int, step_order: int, element_purpose: str, action: str, element_locator: str, value: str, by_strategy: str) -> int:
+    def _save_step(self, test_case_id: int, step_order: int, element_purpose: str, action: str, element_locator: str, value: str, by_strategy: str, css_selector: str = "") -> int:
         try:
             with self.get_db_connection() as connection:
                 with connection.cursor() as cursor:
@@ -312,13 +312,14 @@ class TestRunner:
                             description,
                             action,
                             element_path,
+                            css_selector,
                             value,
                             path_type,
                             created_at,
                             updated_at,
                             screenshot_path
                         ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         ) RETURNING id;
                     """
 
@@ -332,6 +333,7 @@ class TestRunner:
                             element_purpose,
                             mapped_action,
                             element_locator,
+                            css_selector,
                             value,
                             by_strategy,
                             current_timestamp,
@@ -1321,7 +1323,8 @@ class TestRunner:
                                             action=action,
                                             element_locator=element_locator,
                                             value=value,
-                                            by_strategy=by_strategy
+                                            by_strategy=by_strategy,
+                                            css_selector=css_selector
                                         )
                                         
                                         # Try to execute the corrected step
@@ -1365,7 +1368,8 @@ class TestRunner:
                                 action=action,
                                 element_locator=original_element_locator,
                                 value=original_value,
-                                by_strategy=by_strategy
+                                by_strategy=by_strategy,
+                                css_selector=css_selector
                             )
                             
                             try:
@@ -1513,7 +1517,8 @@ class TestRunner:
                                             action=action,
                                             element_locator=element_locator,
                                             value=value,
-                                            by_strategy=by_strategy
+                                            by_strategy=by_strategy,
+                                            css_selector=css_selector
                                         )
                                         
                                         # Try to execute the corrected step

@@ -71,7 +71,7 @@ class HtmlAnalyzer(AIHelper):
             del self._step_history[test_case_id]
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
-                      next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str]:
+                      next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         prompt = self.get_analyze_html_prompt(
             html_code=html_code,
@@ -149,7 +149,7 @@ class HtmlAnalyzer(AIHelper):
 
     def analyze_error(self, test_case_id: int, html_code: str, test_name: str, test_description: str, 
                      step_history: list, failed_step: dict, error_message: str, 
-                     previous_attempts: list = None, screenshot_path: str = None) -> tuple[str, str, str, str, str, str]:
+                     previous_attempts: list = None, screenshot_path: str = None) -> tuple[str, str, str, str, str, str, str]:
         """
         Analyze a test step failure and suggest a fix.
         
@@ -165,7 +165,7 @@ class HtmlAnalyzer(AIHelper):
             screenshot_path: Path to the screenshot of the failure state
             
         Returns:
-            A tuple containing (next_step, element_purpose, action, element_locator, by_strategy, value)
+            A tuple containing (next_step, element_purpose, action, element_locator, css_selector, by_strategy, value)
         """
         self.logger.info("Sending request to AI provider for error analysis.")
         prompt = self.get_error_analysis_prompt(
