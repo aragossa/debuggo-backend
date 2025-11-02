@@ -165,6 +165,19 @@ class AssignTestRunRequest(BaseModel):
     test_run_id: int
     execution_id: int
 
+class CreateUserRequestRequest(BaseModel):
+    title: str
+    description: str
+    request_type: str  # bug, feature, improvement, question
+    priority: Optional[str] = 'medium'  # low, medium, high, critical
+    browser_info: Optional[str] = None
+    page_url: Optional[str] = None
+
+class UpdateUserRequestStatusRequest(BaseModel):
+    status: str  # new, in_progress, resolved, closed, rejected
+    admin_notes: Optional[str] = None
+    priority: Optional[str] = None
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
@@ -5187,6 +5200,293 @@ async def assign_test_run_to_execution(
             status_code=500,
             detail=f"Failed to assign test run to execution: {str(e)}"
         )
+
+# ================================
+# User Requests / Bug Reports
+# ================================
+
+@app.post("/api/user-requests")
+async def create_user_request(
+    request_data: CreateUserRequestRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Submit a new bug report or feature request.
+    Available to all authenticated users.
+    """
+    if not current_user.client_id:
+        raise HTTPException(
+            status_code=400,
+            detail="User must be associated with a client"
+        )
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Insert the user request
+        cursor.execute(
+            """
+            INSERT INTO user_requests (
+                user_id, client_id, title, description, request_type, 
+                priority, browser_info, page_url, status
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'new')
+            RETURNING id, created_at
+            """,
+            (
+                current_user.id,
+                str(current_user.client_id),
+                request_data.title,
+                request_data.description,
+                request_data.request_type,
+                request_data.priority,
+                request_data.browser_info,
+                request_data.page_url
+            )
+        )
+        
+        result = cursor.fetchone()
+        new_id = result[0]
+        created_at = result[1]
+        conn.commit()
+        
+        logger.info(f"User {current_user.email} created {request_data.request_type} request #{new_id}: {request_data.title}")
+        
+        return {
+            "success": True,
+            "id": new_id,
+            "message": "Request submitted successfully",
+            "created_at": created_at.isoformat() if created_at else None
+        }
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating user request: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create request: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
+@app.get("/api/user-requests/my")
+async def get_my_user_requests(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all requests submitted by the current user.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Get user's requests
+        cursor.execute(
+            """
+            SELECT 
+                ur.id, ur.title, ur.description, ur.request_type, 
+                ur.status, ur.priority, ur.browser_info, ur.page_url,
+                ur.created_at, ur.updated_at, ur.resolved_at, ur.admin_notes,
+                u.email as resolved_by_email
+            FROM user_requests ur
+            LEFT JOIN users u ON ur.resolved_by = u.id
+            WHERE ur.user_id = %s
+            ORDER BY ur.created_at DESC
+            """,
+            (current_user.id,)
+        )
+        
+        requests = []
+        for row in cursor.fetchall():
+            requests.append({
+                "id": row["id"],
+                "title": row["title"],
+                "description": row["description"],
+                "request_type": row["request_type"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "browser_info": row["browser_info"],
+                "page_url": row["page_url"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+                "resolved_by_email": row["resolved_by_email"],
+                "admin_notes": row["admin_notes"]
+            })
+        
+        return requests
+    except Exception as e:
+        logger.error(f"Error getting user requests: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve requests: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
+@app.get("/api/user-requests/all")
+async def get_all_user_requests(
+    status_filter: Optional[str] = Query(None),
+    type_filter: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all user requests in the system.
+    Admin only endpoint.
+    """
+    # Check if user is admin
+    if current_user.role != 'admin':
+        raise HTTPException(
+            status_code=403,
+            detail="Only administrators can access all requests"
+        )
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Build query with optional filters
+        query = """
+            SELECT 
+                ur.id, ur.title, ur.description, ur.request_type, 
+                ur.status, ur.priority, ur.browser_info, ur.page_url,
+                ur.created_at, ur.updated_at, ur.resolved_at, ur.admin_notes,
+                u.email as submitted_by_email,
+                u.full_name as submitted_by_name,
+                resolver.email as resolved_by_email
+            FROM user_requests ur
+            JOIN users u ON ur.user_id = u.id
+            LEFT JOIN users resolver ON ur.resolved_by = resolver.id
+            WHERE 1=1
+        """
+        params = []
+        
+        if status_filter:
+            query += " AND ur.status = %s"
+            params.append(status_filter)
+        
+        if type_filter:
+            query += " AND ur.request_type = %s"
+            params.append(type_filter)
+        
+        query += " ORDER BY ur.created_at DESC"
+        
+        cursor.execute(query, params)
+        
+        requests = []
+        for row in cursor.fetchall():
+            requests.append({
+                "id": row["id"],
+                "title": row["title"],
+                "description": row["description"],
+                "request_type": row["request_type"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "browser_info": row["browser_info"],
+                "page_url": row["page_url"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
+                "submitted_by": row['submitted_by_name'] if row['submitted_by_name'] else row['submitted_by_email'],
+                "resolved_by_email": row["resolved_by_email"],
+                "admin_notes": row["admin_notes"]
+            })
+        
+        return requests
+    except Exception as e:
+        logger.error(f"Error getting all user requests: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve all requests: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
+
+@app.patch("/api/user-requests/{request_id}/status")
+async def update_user_request_status(
+    request_id: int,
+    status_data: UpdateUserRequestStatusRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update the status of a user request.
+    Admin only endpoint.
+    """
+    # Check if user is admin
+    if current_user.role != 'admin':
+        raise HTTPException(
+            status_code=403,
+            detail="Only administrators can update request status"
+        )
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        
+        # Check if request exists
+        cursor.execute("SELECT id FROM user_requests WHERE id = %s", (request_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        # Build update query dynamically based on provided fields
+        update_fields = ["status = %s"]
+        params = [status_data.status]
+        
+        # Set resolved_at and resolved_by if status is resolved or closed
+        if status_data.status in ['resolved', 'closed']:
+            update_fields.append("resolved_at = CURRENT_TIMESTAMP")
+            update_fields.append("resolved_by = %s")
+            params.append(current_user.id)
+        
+        if status_data.admin_notes is not None:
+            update_fields.append("admin_notes = %s")
+            params.append(status_data.admin_notes)
+        
+        if status_data.priority is not None:
+            update_fields.append("priority = %s")
+            params.append(status_data.priority)
+        
+        params.append(request_id)
+        
+        query = f"""
+            UPDATE user_requests
+            SET {', '.join(update_fields)}
+            WHERE id = %s
+            RETURNING id, status, updated_at
+        """
+        
+        cursor.execute(query, params)
+        result = cursor.fetchone()
+        conn.commit()
+        
+        logger.info(f"Admin {current_user.email} updated request #{request_id} status to {status_data.status}")
+        
+        return {
+            "success": True,
+            "id": result["id"],
+            "status": result["status"],
+            "updated_at": result["updated_at"].isoformat() if result["updated_at"] else None,
+            "message": "Request status updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating user request status: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update request status: {str(e)}"
+        )
+    finally:
+        cursor.close()
+        return_db_connection(conn)
 
 @app.get("/api/system/pool-status")
 async def get_pool_status_endpoint():
