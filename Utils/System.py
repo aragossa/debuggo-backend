@@ -23,8 +23,10 @@ class System:
             return
 
         # Load environment variables from .env file
-        # Don't override existing environment variables (preserve command-line overrides)
-        load_dotenv(override=False)
+        # Explicitly set the .env file path and override existing variables
+        # This ensures Docker environment variables don't override our .env file
+        env_path = Path('/app/.env')
+        load_dotenv(dotenv_path=env_path, override=True)
 
         # Database configuration
         self.db_host = os.getenv('DB_HOST', 'localhost')

@@ -1,12 +1,12 @@
-from Utils.AIHelper.ImageAnalyzer import ImageAnalyzer
-from Utils.AIHelper.TextAnalyzer import TextAnalyzer
+from auroqa.Utils.AIHelper.ImageAnalyzer import ImageAnalyzer
+from auroqa.Utils.AIHelper.TextAnalyzer import TextAnalyzer
 from kafka import KafkaConsumer
 import json
 import logging
 import sys
 import os
 
-from Utils.BrowserAutomation.TestRunner import TestRunner
+from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
 
 
 class KafkaMessageConsumer:
@@ -173,7 +173,7 @@ class KafkaMessageConsumer:
             else:
                 # Clear Redis generation flag only on success (True) or failure (False)
                 import redis
-                from Utils.System import System
+                from auroqa.Utils.System import System
                 system = System()
                 try:
                     r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
@@ -191,7 +191,7 @@ class KafkaMessageConsumer:
             self.logger.error(f"Error processing API test steps generation: {e}", exc_info=True)
             # Clear Redis flag on error too
             import redis
-            from Utils.System import System
+            from auroqa.Utils.System import System
             system = System()
             try:
                 r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)

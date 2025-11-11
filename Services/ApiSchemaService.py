@@ -1,10 +1,10 @@
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from Utils.AIHelper.AIHelper import AIHelper
-from Utils.Connectors.db_utils import get_db_connection_context
-from Utils.System import System
-from Utils.BrowserAutomation.EnvHelper import EnvHelper
+from auroqa.Utils.AIHelper.AIHelper import AIHelper
+from auroqa.Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.System import System
+from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 
 
 class ApiSchemaService:

@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Request, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse, JSONResponse
 from datetime import timedelta
-from Utils.oauth import oauth, google, get_user_info_from_google
-from models.user import OAuthUserInfo, Token
-from models.crud import get_or_create_oauth_user
-from Utils.auth import create_access_token
-from Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.oauth import oauth, google, get_user_info_from_google
+from auroqa.models.user import OAuthUserInfo, Token
+from auroqa.models.crud import get_or_create_oauth_user
+from auroqa.Utils.auth import create_access_token
+from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 import secrets
 import os
 
@@ -22,11 +22,16 @@ async def login_google(request: Request):
     # Store state in session
     request.session['oauth_state'] = state
     
-    # Use configured redirect URI instead of dynamic construction
+    # Use configured redirect URI from environment
     redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://debuggo.app/api/auth/google/callback")
-    print("Environment GOOGLE_REDIRECT_URI:", os.getenv("GOOGLE_REDIRECT_URI"))
-    print("Using redirect_uri:", redirect_uri)
-    print("Google client config:", google.client_kwargs)
+    
+    # Debug logging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"🔍 OAuth Debug - GOOGLE_REDIRECT_URI from env: {os.getenv('GOOGLE_REDIRECT_URI')}")
+    logger.info(f"🔍 OAuth Debug - Using redirect_uri: {redirect_uri}")
+    logger.info(f"🔍 OAuth Debug - Google client_id: {os.getenv('GOOGLE_CLIENT_ID')}")
+    
     return await google.authorize_redirect(request, redirect_uri, state=state)
 
 @router.get("/auth/google/callback")

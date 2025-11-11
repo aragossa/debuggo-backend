@@ -2,8 +2,8 @@ from contextlib import contextmanager
 
 from fastapi import UploadFile
 
-from Utils.AIHelper.AIHelper import AIHelper
-from Utils.System import System
+from auroqa.Utils.AIHelper.AIHelper import AIHelper
+from auroqa.Utils.System import System
 
 
 class TextAnalyzer(AIHelper):
@@ -139,7 +139,7 @@ class TextAnalyzer(AIHelper):
     def _save_api_schema(self, schema_content: str, client_id: str, project_id: str, file_name: str):
         """Save API schema to database for future test step generation."""
         try:
-            from Utils.Connectors.db_utils import get_db_connection_context
+            from auroqa.Utils.Connectors.db_utils import get_db_connection_context
             
             # Determine schema type from file extension or content
             schema_type = 'openapi'

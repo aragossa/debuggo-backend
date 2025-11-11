@@ -1,4 +1,4 @@
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 def save_test_run_result(test_case_id, result, exception="", duration=None, stdout="", stderr="", additional_info=""):

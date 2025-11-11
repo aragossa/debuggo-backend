@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 from typing import Optional, Dict
-from Utils.System import System
-from Utils.BrowserAutomation.NameGenerator import NameGenerator
+from auroqa.Utils.System import System
+from auroqa.Utils.BrowserAutomation.NameGenerator import NameGenerator
 import re
 
 class EnvHelper:

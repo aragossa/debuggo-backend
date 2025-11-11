@@ -3,8 +3,8 @@ from typing import Union
 
 from fastapi import UploadFile
 
-from Utils.AIHelper.AIHelper import AIHelper
-from Utils.System import System
+from auroqa.Utils.AIHelper.AIHelper import AIHelper
+from auroqa.Utils.System import System
 from PIL import Image
 from io import BytesIO
 

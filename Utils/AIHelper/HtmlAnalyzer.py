@@ -5,8 +5,8 @@ import threading
 from datetime import datetime
 from typing import Dict, Any, Tuple
 
-from Utils.AIHelper.AIHelper import AIHelper
-from Utils.System import System
+from auroqa.Utils.AIHelper.AIHelper import AIHelper
+from auroqa.Utils.System import System
 from contextlib import contextmanager
 import logging
 

@@ -1,4 +1,4 @@
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 # Function to recursively build tree structure from flat data

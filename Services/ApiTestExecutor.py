@@ -3,8 +3,8 @@ import logging
 import requests
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-from Utils.Connectors.db_utils import get_db_connection_context
-from Utils.System import System
+from auroqa.Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.System import System
 
 
 class ApiTestExecutor:
@@ -353,7 +353,7 @@ class ApiTestExecutor:
         
         # First, use EnvHelper to process all %placeholder% variables
         # This handles %random_name%, %random_email%, %unique_name:Type%, etc.
-        from Utils.BrowserAutomation.EnvHelper import EnvHelper
+        from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
         env_helper = EnvHelper(self.environment_vars)
         result = env_helper.process_variables(result)
         

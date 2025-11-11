@@ -1,11 +1,11 @@
 from typing import Optional
 from datetime import datetime
 import uuid
-from models.client import Client, ClientCreate
-from models.user import User, UserCreate, OAuthUserInfo
+from auroqa.models.client import Client, ClientCreate
+from auroqa.models.user import User, UserCreate, OAuthUserInfo
 from psycopg2.extras import DictCursor
 from fastapi import HTTPException, status
-from Utils.auth import get_password_hash
+from auroqa.Utils.auth import get_password_hash
 
 def get_client(conn, client_id: str) -> Optional[Client]:
     with conn.cursor() as cur:

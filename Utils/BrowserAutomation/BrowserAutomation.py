@@ -15,8 +15,8 @@ import datetime
 import time
 import re
 
-from Utils.BrowserAutomation.EnvHelper import EnvHelper
-from Utils.System import System
+from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
+from auroqa.Utils.System import System
 
 
 class BrowserAutomation:

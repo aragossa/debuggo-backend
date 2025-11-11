@@ -2,7 +2,7 @@ import logging
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Optional, Any
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection, get_db_connection_context
+from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, get_db_connection_context
 import psycopg2.extras
 
 

@@ -25,15 +25,15 @@ import logging
 import traceback
 from pathlib import Path
 import requests
-from models.user import User, UserCreate, UserLogin, Token, OAuthUserInfo
-from models.client import Client, ClientCreate
-from models.test import GenerateStepsRequest
-from Utils.System import System
-from Utils.BrowserAutomation.TestRunner import TestRunner
-from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
-from Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
-from Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
-from Utils.auth import (
+from auroqa.models.user import User, UserCreate, UserLogin, Token, OAuthUserInfo
+from auroqa.models.client import Client, ClientCreate
+from auroqa.models.test import GenerateStepsRequest
+from auroqa.Utils.System import System
+from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
+from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
+from auroqa.Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
+from auroqa.Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
+from auroqa.Utils.auth import (
     create_access_token,
     get_password_hash,
     verify_password,
@@ -41,14 +41,14 @@ from Utils.auth import (
     ALGORITHM,
     ACCESS_TOKEN_EXPIRE_MINUTES
 )
-from Utils.oauth import oauth, google, get_user_info_from_google
-from models.crud import create_user, get_user_by_email, get_client_test_cases
-from fetch_test_steps import get_test_data_from_db_helper
-from test_case_builder import get_tests_tree, build_tree
+from auroqa.Utils.oauth import oauth, google, get_user_info_from_google
+from auroqa.models.crud import create_user, get_user_by_email, get_client_test_cases
+from auroqa.fetch_test_steps import get_test_data_from_db_helper
+from auroqa.test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
-from Services.TestExecutionService import TestExecutionService
+from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
+from auroqa.Services.TestExecutionService import TestExecutionService
 import signal
 import atexit
 
@@ -245,7 +245,7 @@ async def lifespan(app: FastAPI):
         init_db_pool()
         
         # Get the db_pool reference from db_utils
-        from Utils.Connectors.db_utils import db_pool as utils_db_pool
+        from auroqa.Utils.Connectors.db_utils import db_pool as utils_db_pool
         db_pool = utils_db_pool
     except Exception as e:
         logger.info(f"Failed to initialize database pool: {e}")
@@ -283,7 +283,7 @@ async def lifespan(app: FastAPI):
     if consumer_thread:
         consumer_thread.join(timeout=1.0)
     # Close the database pool using db_utils
-    from Utils.Connectors.db_utils import close_db_pool
+    from auroqa.Utils.Connectors.db_utils import close_db_pool
     close_db_pool()
 
 app = FastAPI(lifespan=lifespan)
@@ -301,7 +301,7 @@ app.add_middleware(
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Include OAuth routes
-from routes.oauth_routes import router as oauth_router
+from auroqa.routes.oauth_routes import router as oauth_router
 app.include_router(oauth_router, prefix="/api", tags=["oauth"])
 
 def get_db_dependencies():
@@ -622,7 +622,7 @@ async def get_test_cases(id: int, current_user: User = Depends(get_current_user)
             detail="User is not associated with any client"
         )
     with get_db_connection_context() as conn:
-        from fetch_test_steps import get_test_data_from_db_helper
+        from auroqa.fetch_test_steps import get_test_data_from_db_helper
         return get_test_data_from_db_helper(conn, id, str(current_user.client_id))
 
 @app.get("/api/get_test_runs/{test_case_id}")
@@ -757,7 +757,7 @@ async def run_test_case(
         # Route to appropriate executor based on test type
         if test_type == 'api' or test_type == 'api_test':
             # Use API test executor
-            from Services.ApiTestExecutor import ApiTestExecutor
+            from auroqa.Services.ApiTestExecutor import ApiTestExecutor
             
             if not environment_vars:
                 raise HTTPException(
@@ -811,7 +811,7 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
         running_tests = []
         
         # Check Redis for active test case runs
-        from Utils.System import System
+        from auroqa.Utils.System import System
         system = System()
         try:
             r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
@@ -1341,7 +1341,7 @@ If no specific endpoint is mentioned, use standard REST patterns.
         # Send message to Kafka for async processing
         from kafka import KafkaProducer
         import json
-        from Utils.System import System
+        from auroqa.Utils.System import System
         
         # Use System configuration which handles Docker vs local environments
         system = System()
@@ -1365,7 +1365,7 @@ If no specific endpoint is mentioned, use standard REST patterns.
         producer.close()
         
         # Mark test case as generating in Redis
-        from Utils.System import System
+        from auroqa.Utils.System import System
         system = System()
         try:
             r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
@@ -1511,7 +1511,7 @@ async def approve_conflict_resolution(
                 conn.commit()
                 
                 # Trigger test generation to resume
-                from Services.ApiSchemaService import ApiSchemaService
+                from auroqa.Services.ApiSchemaService import ApiSchemaService
                 from kafka import KafkaProducer
                 import json
                 
@@ -4024,7 +4024,7 @@ async def cleanup_orphaned_steps(
     This handles cases where test execution processes were killed or crashed unexpectedly.
     """
     try:
-        from Utils.BrowserAutomation.TestRunner import TestRunner
+        from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
         test_runner = TestRunner()
         test_runner._cleanup_orphaned_running_steps()
         
@@ -4422,7 +4422,7 @@ async def stop_all_test_executions(current_user: User = Depends(get_current_user
         )
         
         # Also clear all API test generation Redis flags for this client's test cases
-        from Utils.System import System
+        from auroqa.Utils.System import System
         system = System()
         generation_stopped_count = 0
         
@@ -4785,7 +4785,7 @@ async def set_user_ai_model(
         if conn:
             return_db_connection(conn)
 
-from models.contact import ContactRequest, ContactRequestResponse
+from auroqa.models.contact import ContactRequest, ContactRequestResponse
 
 # Contact Request Endpoints
 

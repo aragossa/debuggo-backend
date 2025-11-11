@@ -12,12 +12,12 @@ import multiprocessing
 from datetime import timedelta
 import base64
 import os.path
-from Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
-from Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
-from Utils.BrowserAutomation.EnvHelper import EnvHelper
-from Utils.System import System
+from auroqa.Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
+from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
+from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
+from auroqa.Utils.System import System
 import io
-from Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 
 
 class TestRunner:

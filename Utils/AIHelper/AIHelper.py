@@ -13,7 +13,7 @@ import threading
 import requests
 import glob
 
-from Utils.System import System
+from auroqa.Utils.System import System
 
 
 class AIHelper:
