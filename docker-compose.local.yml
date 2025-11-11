@@ -1,0 +1,42 @@
+# Docker Compose for Local Testing with Obfuscated Code
+# This connects the obfuscated container to your local PostgreSQL, Redis, and Kafka
+
+version: '3.8'
+
+services:
+  auroqa-local:
+    image: auroqa:obfuscated-local
+    container_name: auroqa-obfuscated-local
+    ports:
+      - "9000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override connection hosts to use host.docker.internal
+      # This allows the container to connect to services running on your Mac
+      DB_HOST: host.docker.internal
+      REDIS_HOST: host.docker.internal
+      KAFKA_HOST: host.docker.internal
+      
+      # Keep other settings from .env
+      # DB_PORT, DB_NAME, DB_USER, DB_PASSWORD will be loaded from .env
+      # KAFKA_PORT, REDIS_PORT will be loaded from .env
+      
+      # Optional: Override frontend URL if needed
+      # FRONTEND_URL: http://localhost:3000
+    extra_hosts:
+      # Enable host.docker.internal on Linux/Mac
+      - "host.docker.internal:host-gateway"
+    networks:
+      - auroqa-local-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  auroqa-local-network:
+    driver: bridge

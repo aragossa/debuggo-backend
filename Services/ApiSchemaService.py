@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional
 from Utils.AIHelper.AIHelper import AIHelper
 from Utils.Connectors.db_utils import get_db_connection_context
 from Utils.System import System
+from Utils.BrowserAutomation.EnvHelper import EnvHelper
 
 
 class ApiSchemaService:
@@ -1249,8 +1250,33 @@ Return ONLY the JSON array of corrected steps, no explanation.
                     self.logger.warning(f"⚠️ Step {step_order} returned error status: {execution_result['response']['status']}")
                     self.logger.warning(f"Error message: {execution_result.get('error_message')}")
                     
-                    # Check for documentation conflict BEFORE retrying
-                    if retry_count == 0:  # Only check on first error
+                    # Skip conflict detection for obvious data validation errors
+                    # Check both error_message and response body
+                    error_message = execution_result.get('error_message', '').lower()
+                    response_body = execution_result.get('response', {}).get('body', {})
+                    response_text = json.dumps(response_body).lower() if response_body else ''
+                    
+                    validation_patterns = [
+                        'should contain only alphabetic',
+                        'should contain only',
+                        'should be in',
+                        'invalid format',
+                        'field is required',
+                        'must be',
+                        'cannot be empty',
+                        'validation',
+                        'invalid',
+                        'format'
+                    ]
+                    is_validation_error = any(pattern in error_message for pattern in validation_patterns) or \
+                                        any(pattern in response_text for pattern in validation_patterns)
+                    
+                    if is_validation_error:
+                        self.logger.info(f"🔧 Data validation error detected in response: {response_body}")
+                        self.logger.info(f"🔧 This is NOT a conflict - will retry with corrected data")
+                    
+                    # Check for documentation conflict BEFORE retrying (but skip for validation errors)
+                    if retry_count == 0 and not is_validation_error:  # Only check on first error, skip validation errors
                         conflict_details = self._detect_documentation_conflict(
                             test_case_id,
                             current_step,
@@ -1435,14 +1461,63 @@ Rules:
    - If response will be {{"token": "abc"}}, use "$.token"
    - If response will be {{"data": {{"user": {{"id": 1}}}}}}, use "$.data.user.id"
    - ALWAYS match the actual nested structure from the API response
-6. **CRITICAL**: NEVER use hardcoded values - use variables:
-   - Authentication: use %login% and %password%, NOT "user@example.com"
-   - IDs will be extracted in next steps, NOT hardcoded
-
-Available variables:
-- %base_url% - API base URL
-- %login% - Username/email from environment
-- %password% - Password from environment
+6. **CRITICAL - DYNAMIC DATA PLACEHOLDERS**: NEVER use hardcoded values - use dynamic placeholders:
+   
+   A. ENVIRONMENT VARIABLES:
+      - %base_url% - API base URL
+      - %login% - Username/email from environment
+      - %password% - Password from environment
+      - %auth_token% - Extracted authentication token
+   
+   B. UNIQUE IDENTIFIERS (cached per test run):
+      - %unique_name% - Random unique ID (e.g., "a7b3c9d2")
+      - %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+      - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+   
+   C. REALISTIC PERSONAL DATA:
+      - %random_name% - Full name (e.g., "John Smith")
+      - %random_first_name% - First name (e.g., "John")
+      - %random_last_name% - Last name (e.g., "Smith")
+      - %random_email% - Email (e.g., "john.smith@example.com")
+      - %random_username% - Username (e.g., "john_smith_123")
+      - %random_phone% - Phone number (e.g., "+1-555-234-5678")
+   
+   D. REALISTIC LOCATION DATA:
+      - %random_address% - Street address
+      - %random_city% - City name
+      - %random_country% - Country name
+   
+   E. REALISTIC BUSINESS DATA:
+      - %random_company% - Company name (e.g., "Acme Corporation")
+      - %random_job_title% - Job title (e.g., "Software Engineer")
+   
+   F. TECHNICAL DATA:
+      - %random_string% - Alphanumeric string (10 chars)
+      - %random_number% - Number (1-10000)
+      - %random_url% - URL
+      - %random_uuid% - Full UUID
+      - %random_date% - Date (YYYY-MM-DD)
+      - %random_boolean% - true/false
+   
+   USAGE EXAMPLES FOR API REQUESTS:
+      ❌ WRONG: {{"name": "Test Client", "email": "test@test.com", "phone": "555-1234"}}
+      ✅ CORRECT: {{"name": "%random_company%", "email": "%random_email%", "phone": "%random_phone%"}}
+      
+      ❌ WRONG: {{"firstName": "John", "lastName": "Doe", "city": "New York"}}
+      ✅ CORRECT: {{"firstName": "%random_first_name%", "lastName": "%random_last_name%", "city": "%random_city%"}}
+      
+      ❌ WRONG: {{"username": "testuser", "password": "pass123"}}
+      ✅ CORRECT: {{"username": "%random_username%", "password": "%random_string%"}}
+   
+   WHEN TO USE:
+      - For "name" fields (clients, companies, groups): Use %random_company% (generates "Acme Corporation" - alphabetic only)
+      - For entity names needing consistency across steps: Use %unique_name:Type% (but may contain underscores/numbers)
+      - For email fields: Use %random_email%
+      - For phone fields: Use %random_phone%
+      - For address fields: Use %random_address%, %random_city%, %random_country%
+      - IDs will be extracted from responses, NOT hardcoded
+      
+      ⚠️ IMPORTANT: If API requires "alphabetic characters only", use %random_company% NOT %unique_name%
 
 EXAMPLES FOR VARIABLE EXTRACTION:
 Expected response: {{"client": {{"id": 49, "name": "Test"}}}}
@@ -1540,8 +1615,23 @@ Based on the execution history above, generate the NEXT STEP to continue the tes
 - DO NOT continue to the next step
 - ANALYZE the error response to understand what went wrong
 - GENERATE A CORRECTED VERSION of the failed request
-- Common errors:
-  - 500 "Name should contain only alphabetic characters" → Remove spaces/special chars from name field
+
+**CRITICAL - HOW TO FIX DATA VALIDATION ERRORS:**
+
+1. "only alphabetic characters" ERROR:
+   ❌ WRONG: "name": "TestClient%random_first_name%"  → "TestClientJohn" (mixed chars!)
+   ❌ WRONG: "name": "%unique_name:Client%"  → "Client_a7b3c9d2" (underscore/numbers!)
+   ✅ CORRECT: "name": "%random_company%"  → "AcmeCorporation" (letters only, no spaces/hyphens!)
+
+2. "international number format" ERROR:
+   ❌ WRONG: Leave phone as is → Will fail again
+   ✅ CORRECT: Use %random_phone% placeholder → Generates "+12025551234" (E.164 format - clean digits only)
+   
+3. Other validation errors:
+   - If ANY field validation fails → Use the appropriate %random_*% placeholder
+   - Don't try to fix data manually, use placeholders that generate correct format
+
+Other common errors:
   - 400 "Missing required field" → Add the missing field to request body
   - 401 "Unauthorized" → Check authentication token is included
   - 404 "Not found" → Check the URL path and ID are correct
@@ -1550,6 +1640,52 @@ Available variables (use these EXACT variable names in your step):
 """ + available_vars_text + """
 
 IMPORTANT: Use the EXACT variable names listed above (e.g., %auth_token%, NOT %token%)
+
+**DYNAMIC DATA PLACEHOLDERS** - Use these for realistic test data:
+
+A. UNIQUE IDENTIFIERS (cached per test run):
+   - %unique_name% - Random unique ID (e.g., "a7b3c9d2")
+   - %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+   - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+
+B. REALISTIC PERSONAL DATA:
+   - %random_name% - Full name (e.g., "John Smith")
+   - %random_first_name% - First name (e.g., "John")
+   - %random_last_name% - Last name (e.g., "Smith")
+   - %random_email% - Email (e.g., "john.smith@example.com")
+   - %random_username% - Username (e.g., "john_smith_123")
+   - %random_phone% - Phone number (e.g., "+1-555-234-5678")
+
+C. REALISTIC LOCATION DATA:
+   - %random_address% - Street address
+   - %random_city% - City name
+   - %random_country% - Country name
+
+D. REALISTIC BUSINESS DATA:
+   - %random_company% - Company name (e.g., "Acme Corporation")
+   - %random_job_title% - Job title (e.g., "Software Engineer")
+
+E. TECHNICAL DATA:
+   - %random_string% - Alphanumeric string (10 chars)
+   - %random_number% - Number (1-10000)
+   - %random_url% - URL
+   - %random_uuid% - Full UUID
+   - %random_date% - Date (YYYY-MM-DD)
+   - %random_boolean% - true/false
+
+USAGE EXAMPLES:
+   ❌ WRONG: {"name": "Test Client", "email": "test@test.com"}
+   ✅ CORRECT: {"name": "%random_company%", "email": "%random_email%"}
+
+⚠️ CRITICAL - PLACEHOLDER SELECTION:
+   - For "name" fields that must be ALPHABETIC ONLY → Use %random_company% (generates "Acme Corporation")
+   - For "name" fields that allow special chars → Use %unique_name:Client% (generates "Client_a7b3c9d2")
+   - For email fields → Use %random_email% (generates "john.smith@example.com")
+   - For phone fields → Use %random_phone% (generates "+1-555-234-5678")
+   - For address fields → Use %random_address%, %random_city%, %random_country%
+   
+   IF API REJECTS with "only alphabetic characters" error:
+   ✅ FIX: Change %unique_name:Client% to %random_company%
 
 Rules:
 1. **IF LAST STEP FAILED**: Fix the error and retry the same operation (don't move to next step)
@@ -1689,9 +1825,18 @@ No explanation, just JSON.
                     base_url = env[0]
                     login = env[1]
                     password = env[2]
-                    custom_vars = env[3] or {}
+                    custom_vars_raw = env[3] or {}
             
             # Build variable context
+            # Ensure custom_variables is a dict before unpacking
+            # It might be a list or have authorization_headers at top level
+            if isinstance(custom_vars_raw, dict):
+                # If it has authorization_headers, extract only the custom variables (not the headers array)
+                custom_vars = {k: v for k, v in custom_vars_raw.items() if k != 'authorization_headers' and not isinstance(v, list)}
+            else:
+                self.logger.warning(f"custom_variables is not a dict (type: {type(custom_vars_raw)}), using empty dict")
+                custom_vars = {}
+            
             variables = {
                 'base_url': base_url,
                 'login': login,
@@ -1702,6 +1847,13 @@ No explanation, just JSON.
             # Merge previously extracted variables
             if extracted_variables:
                 variables.update(extracted_variables)
+            
+            # Initialize EnvHelper for placeholder processing
+            env_helper = EnvHelper(environment_vars={
+                'base_url': base_url,
+                'login': login,
+                'password': password
+            })
             
             # Prepare request - handle multiple formats
             # Format 1: {"action": "api_request", "description": {...}}
@@ -1736,19 +1888,24 @@ No explanation, just JSON.
                 headers = description.get('headers', {})
                 body = description.get('body')
             
-            # Substitute variables in endpoint
+            # First, use EnvHelper to process ALL placeholders (including dynamic ones like %random_company%)
+            endpoint = env_helper.process_variables(endpoint)
+            
+            # Then substitute extracted variables (like %auth_token%, %client_id%)
             for var_name, var_value in variables.items():
                 endpoint = endpoint.replace(f'%{var_name}%', str(var_value))
             
-            # Substitute variables in headers
+            # Process headers
             headers_str = json.dumps(headers)
+            headers_str = env_helper.process_variables(headers_str)  # Process dynamic placeholders first
             for var_name, var_value in variables.items():
                 headers_str = headers_str.replace(f'%{var_name}%', str(var_value))
             headers = json.loads(headers_str)
             
-            # Substitute variables in body
+            # Process body
             if body:
                 body_str = json.dumps(body)
+                body_str = env_helper.process_variables(body_str)  # Process dynamic placeholders first
                 for var_name, var_value in variables.items():
                     body_str = body_str.replace(f'%{var_name}%', str(var_value))
                 body = json.loads(body_str)
@@ -2189,10 +2346,22 @@ Just one word, nothing else."""
 3. Does the actual response match the documentation?
 4. If there's a mismatch, is this a documentation conflict (doc says one thing, API does another)?
 
-**IMPORTANT:** Only report a conflict if:
-- The request is correct according to documentation
-- The documentation explicitly specifies a different status code or response format
-- This is NOT just a test case expecting an error (like testing invalid credentials)
+**IMPORTANT - DO NOT REPORT AS CONFLICT:**
+❌ Data validation errors that can be fixed by changing the request data:
+   - "Name should contain only alphabetic characters" → NOT a conflict, fix by using better data
+   - "Country should contain only alphabetic characters" → NOT a conflict, fix by using better data
+   - "Email format is invalid" → NOT a conflict, fix by using valid email
+   - "Field is required" → NOT a conflict, fix by adding the field
+   - ANY validation error about data format/content → NOT a conflict
+
+✅ ONLY report as conflict if:
+   - The request data is VALID according to documentation requirements
+   - The documentation explicitly specifies a different status code or response format
+   - The API behavior contradicts what the documentation says it should do
+   - This is NOT a test case expecting an error (like testing invalid credentials)
+   
+Example of TRUE conflict: Documentation says "returns 404 if not found" but API returns 500
+Example of NOT conflict: API returns 500 "Name should contain only alphabetic characters" - this is a data validation issue
 
 Return a JSON object:
 {{

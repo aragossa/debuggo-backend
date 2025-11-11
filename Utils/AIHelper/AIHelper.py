@@ -186,8 +186,11 @@ class AIHelper:
         if step_order == 0:
             skip_start_navigate = ". Skip the step with navigating to the first page.\n"
 
+        # Calculate screenshot text
+        screenshot_text = 'Also, consider the attached screenshot if available' if attached_screenshot is not None else ''
+
         # Enhanced prompt with stronger focus on test description and login handling
-        return f"""Act as an experienced QA engineer, you are creating a test case: "{test_name}".
+        prompt = f"""Act as an experienced QA engineer, you are creating a test case: "{test_name}".
 
 This is the suggested test description, some steps might be missing, if you see that executing this step will not help you to complete the test, suggest next step:
 {test_description}
@@ -195,7 +198,10 @@ This is the suggested test description, some steps might be missing, if you see 
 You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
 If current step will be final step, put to the next_step attribute the word 'Stop'.
 You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
-{step_history}
+{step_history}"""
+        
+        # Add the rest of the prompt as a regular string (no format substitution)
+        prompt += """
 
 IMPORTANT GUIDELINES:
 1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE AND NOT DISABLED
@@ -282,7 +288,7 @@ When performing assertions, consider the following validation patterns:
 - Verify selected state of checkboxes and radio buttons
 
 Analyze the provided HTML code of a web page to identify an element that possible to be used on this step.
-{'Also, consider the attached screenshot if available' if attached_screenshot is not None else ''}
+{screenshot_text}
 HTML Code:
 {html_code}
 
@@ -310,21 +316,63 @@ IMPORTANT REQUIREMENTS:
 1. JSON Format: The response must strictly follow the valid JSON structure, including all specified fields.
 2. Action Types: For any type of actions, ensure that the value field is non-empty and includes appropriate test data.
 3. Environment Variables: Use %base_url%, %login%, and %password% for environment-specific values.
-4. DYNAMIC NAME GENERATION - CRITICAL FOR AVOIDING DUPLICATE FAILURES:
-   - NEVER use hardcoded names like "Test Client", "New User", "My Group", etc.
-   - ALWAYS use dynamic name variables to generate unique names automatically
-   - Available name variables:
-     * %unique_name% - Generates random unique name (e.g., "a7b3c9d2")
-     * %unique_name:Client% - Generates unique name with prefix (e.g., "Client_a7b3c9d2")
-     * %unique_name:User:Test% - Generates unique name with prefix and suffix (e.g., "User_a7b3c9d2_Test")
-     * %timestamp_name% - Generates timestamp-based name (e.g., "20250129_143052")
-     * %timestamp_name:Group% - Generates timestamp name with prefix (e.g., "Group_20250129_143052")
-   - Examples of CORRECT usage:
-     * For client name field: use "%unique_name:Client%" instead of "Test Client"
-     * For user name field: use "%unique_name:User%" instead of "John Doe"
-     * For group name field: use "%unique_name:Group%" instead of "My Group"
-     * For email field: use "%unique_name%@test.com" instead of "test@test.com"
-   - The system will automatically generate unique values at runtime to prevent duplicate name errors
+4. DYNAMIC DATA PLACEHOLDERS - CRITICAL FOR REALISTIC TEST DATA:
+   - NEVER use hardcoded values like "Test Client", "test@test.com", "John Doe", "123-456-7890"
+   - ALWAYS use dynamic placeholders that generate realistic data at runtime
+   
+   A. UNIQUE IDENTIFIERS (cached per test run):
+     * %unique_name% - Random unique ID (e.g., "a7b3c9d2")
+     * %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+     * %unique_name:User:Test% - With prefix and suffix (e.g., "User_a7b3c9d2_Test")
+     * %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+     * %timestamp_name:Group% - With prefix (e.g., "Group_20250129_143052")
+   
+   B. REALISTIC PERSONAL DATA (new value each time):
+     * %random_name% - Full name (e.g., "John Smith")
+     * %random_first_name% - First name (e.g., "John")
+     * %random_last_name% - Last name (e.g., "Smith")
+     * %random_email% - Email (e.g., "john.smith@example.com")
+     * %random_username% - Username (e.g., "john_smith_123")
+     * %random_phone% - Phone number (e.g., "+1-555-234-5678")
+   
+   C. REALISTIC LOCATION DATA:
+     * %random_address% - Street address (e.g., "742 Evergreen Terrace")
+     * %random_city% - City name (e.g., "Springfield")
+     * %random_country% - Country name (e.g., "United States")
+   
+   D. REALISTIC BUSINESS DATA:
+     * %random_company% - Company name (e.g., "Acme Corporation")
+     * %random_job_title% - Job title (e.g., "Software Engineer")
+   
+   E. TECHNICAL DATA:
+     * %random_string% - Alphanumeric string (default 10 chars)
+     * %random_string:5% - Custom length string
+     * %random_number% - Number 1-10000
+     * %random_number:1:100% - Custom range number
+     * %random_url% - URL (e.g., "https://www.example.com")
+     * %random_ip% - IP address (e.g., "192.168.1.42")
+     * %random_uuid% - Full UUID
+     * %random_color% - Color name (e.g., "blue")
+     * %random_date% - Date YYYY-MM-DD
+     * %random_boolean% - true/false
+     * %random_text% - Paragraph of text
+     * %random_text:5% - Custom sentences count
+   
+   USAGE EXAMPLES:
+     ❌ WRONG: {{"name": "Test Client", "email": "test@test.com", "phone": "123-456-7890"}}
+     ✅ CORRECT: {{"name": "%random_company%", "email": "%random_email%", "phone": "%random_phone%"}}
+     
+     ❌ WRONG: value="John Doe" (for name field)
+     ✅ CORRECT: value="%random_name%" (generates "Michael Johnson")
+     
+     ❌ WRONG: value="New York" (for city field)
+     ✅ CORRECT: value="%random_city%" (generates "Los Angeles")
+     
+   WHEN TO USE EACH TYPE:
+     - Use %unique_name:Type% for entity names that need consistency (Client_xyz used in multiple steps)
+     - Use %random_*% for realistic data that doesn't need to be referenced later
+     - Use %random_email% instead of "%unique_name%@test.com" for better realism
+     - Use %random_company% instead of "%unique_name:Company%" for business names
    
    ⚠️ CRITICAL - NEVER HARDCODE DYNAMIC VALUES IN XPATH/CSS SELECTORS:
    - When creating an item with a dynamic name (e.g., %unique_name:Group%), DO NOT hardcode the generated value in subsequent selectors
@@ -371,6 +419,15 @@ IMPORTANT REQUIREMENTS:
    - If notification is already gone when assertion runs, you'll get empty text ('')
    - Common notification selectors: div[@id='notify'], div[contains(@class, 'alert')], div[contains(@class, 'toast')]
 """
+        
+        # Add screenshot text and HTML code
+        prompt += f"""
+{screenshot_text}
+HTML Code:
+{html_code}
+"""
+        
+        return prompt
 
     def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
                                  step_history: list, failed_step: dict, previous_attempts: list = None, 

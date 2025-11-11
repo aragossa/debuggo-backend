@@ -109,18 +109,38 @@ class EnvHelper:
         
     def process_variables(self, text: str) -> str:
         """
-        Process environment variables in a text string.
+        Process environment variables and placeholders in a text string.
         
-        Replaces %variable_name% with the actual value from environment variables.
-        Supports dynamic name generation for unique names.
+        Replaces %variable_name% with actual values from environment variables.
+        Supports dynamic data generation placeholders for realistic test data.
         
         Supported variables:
         - %base_url%, %login%, %password% - Standard environment variables
-        - %unique_name% - Generates a unique random name (e.g., "a7b3c9d2")
-        - %unique_name:prefix% - Generates unique name with prefix (e.g., "Client_a7b3c9d2")
-        - %unique_name:prefix:suffix% - Generates unique name with prefix and suffix (e.g., "Client_a7b3c9d2_Test")
-        - %timestamp_name% - Generates timestamp-based name (e.g., "20250129_143052")
-        - %timestamp_name:prefix% - Generates timestamp name with prefix (e.g., "Client_20250129_143052")
+        - %unique_name% - Unique identifier (e.g., "a7b3c9d2")
+        - %unique_name:prefix% - With prefix (e.g., "Client_a7b3c9d2")
+        - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+        
+        Supported placeholders:
+        - %random_string% - Random alphanumeric string
+        - %random_number% - Random number (1-10000)
+        - %random_name% - Full name (e.g., "John Smith")
+        - %random_first_name% - First name (e.g., "John")
+        - %random_last_name% - Last name (e.g., "Smith")
+        - %random_email% - Email address (e.g., "john.smith@example.com")
+        - %random_phone% - Phone number
+        - %random_address% - Street address
+        - %random_city% - City name
+        - %random_country% - Country name
+        - %random_company% - Company name
+        - %random_job_title% - Job title
+        - %random_username% - Username
+        - %random_url% - URL
+        - %random_color% - Color name
+        - %random_date% - Date (YYYY-MM-DD)
+        - %random_boolean% - True/False
+        - %random_ip% - IP address
+        - %random_uuid% - UUID
+        - %random_text% - Random text paragraph
         
         Args:
             text (str): The text containing environment variable placeholders
@@ -197,6 +217,77 @@ class EnvHelper:
                         
                         # Cache it for consistency within this test run
                         self._generated_names[placeholder] = value
+                
+                # Handle realistic data placeholders
+                elif var_name.startswith('random_string'):
+                    parts = var_name.split(':')
+                    length = int(parts[1]) if len(parts) > 1 else 10
+                    value = NameGenerator.generate_random_string(length=length)
+                    
+                elif var_name.startswith('random_number'):
+                    parts = var_name.split(':')
+                    min_val = int(parts[1]) if len(parts) > 1 else 1
+                    max_val = int(parts[2]) if len(parts) > 2 else 10000
+                    value = str(NameGenerator.generate_random_number(min_val=min_val, max_val=max_val))
+                    
+                elif var_name == 'random_name':
+                    value = NameGenerator.generate_random_name()
+                    
+                elif var_name == 'random_first_name':
+                    value = NameGenerator.generate_random_first_name()
+                    
+                elif var_name == 'random_last_name':
+                    value = NameGenerator.generate_random_last_name()
+                    
+                elif var_name == 'random_email':
+                    value = NameGenerator.generate_random_email()
+                    
+                elif var_name == 'random_phone':
+                    value = NameGenerator.generate_random_phone()
+                    
+                elif var_name == 'random_address':
+                    value = NameGenerator.generate_random_address()
+                    
+                elif var_name == 'random_city':
+                    value = NameGenerator.generate_random_city()
+                    
+                elif var_name == 'random_country':
+                    value = NameGenerator.generate_random_country()
+                    
+                elif var_name == 'random_company':
+                    value = NameGenerator.generate_random_company()
+                    
+                elif var_name == 'random_job_title':
+                    value = NameGenerator.generate_random_job_title()
+                    
+                elif var_name == 'random_username':
+                    value = NameGenerator.generate_random_username()
+                    
+                elif var_name == 'random_url':
+                    value = NameGenerator.generate_random_url()
+                    
+                elif var_name == 'random_color':
+                    value = NameGenerator.generate_random_color()
+                    
+                elif var_name.startswith('random_date'):
+                    parts = var_name.split(':')
+                    date_format = parts[1] if len(parts) > 1 else "%Y-%m-%d"
+                    value = NameGenerator.generate_random_date(format=date_format)
+                    
+                elif var_name == 'random_boolean':
+                    value = str(NameGenerator.generate_random_boolean())
+                    
+                elif var_name == 'random_ip':
+                    value = NameGenerator.generate_random_ip()
+                    
+                elif var_name == 'random_uuid':
+                    value = NameGenerator.generate_random_uuid()
+                    
+                elif var_name.startswith('random_text'):
+                    parts = var_name.split(':')
+                    sentences = int(parts[1]) if len(parts) > 1 else 3
+                    value = NameGenerator.generate_random_text(sentences=sentences)
+                
                 else:
                     # For unknown variables, leave the placeholder
                     continue

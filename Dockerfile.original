@@ -1,14 +1,15 @@
-# Simple obfuscation using Python bytecode compilation
+# 1. Use an official Python runtime as the base image
 FROM python:3.9-slim
 
-# Set environment variables
+# 2. Set environment variables
+# Prevents Python from writing .pyc files and buffers stdout and stderr
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Set working directory
+# 3. Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies
+# 4. Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-liberation \
@@ -54,34 +55,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# Create directory for ChromeDriver
+# 5. Create directory for ChromeDriver
 RUN mkdir -p /root/.cache/selenium/chromedriver/linux64 \
     && chmod -R 777 /root/.cache/selenium
 
-# Upgrade pip
+# 6. Upgrade pip
 RUN pip install --upgrade pip
 
-# Copy requirements and install dependencies
+# 7. Copy only the requirements file to leverage Docker layer caching
 COPY requirements.txt .
+
+# 8. Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all application code
+# 9. Copy the rest of the application code
 COPY . .
 
-# Compile all Python files to bytecode (.pyc)
-# This provides basic obfuscation by removing source code
-RUN python -m compileall -b /app && \
-    # Remove .py source files (keep __init__.py and main.py for entry points)
-    find /app -type f -name "*.py" \
-    ! -name "__init__.py" \
-    ! -name "main.py" \
-    ! -path "*/migrations/*" \
-    -delete && \
-    # Clean up __pycache__ directories
-    find /app -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
-# Expose port
+# 10. Expose the port the app runs on
 EXPOSE 8000
 
-# Run the application using bytecode
-CMD ["python", "-B", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# 11. Define the default command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

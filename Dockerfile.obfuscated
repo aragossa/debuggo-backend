@@ -1,4 +1,7 @@
-# Simple obfuscation using Python bytecode compilation
+# Python Code Obfuscation using Bytecode Compilation
+# This Dockerfile compiles Python source to .pyc bytecode and removes source files
+# Provides reasonable protection against casual code inspection
+
 FROM python:3.9-slim
 
 # Set environment variables
@@ -8,7 +11,7 @@ ENV PYTHONUNBUFFERED=1
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies (required for Selenium/Chrome automation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-liberation \
@@ -54,34 +57,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-# Create directory for ChromeDriver
+# Create directory for ChromeDriver with proper permissions
 RUN mkdir -p /root/.cache/selenium/chromedriver/linux64 \
     && chmod -R 777 /root/.cache/selenium
 
 # Upgrade pip
 RUN pip install --upgrade pip
 
-# Copy requirements and install dependencies
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application code
 COPY . .
 
-# Compile all Python files to bytecode (.pyc)
-# This provides basic obfuscation by removing source code
-RUN python -m compileall -b /app && \
-    # Remove .py source files (keep __init__.py and main.py for entry points)
+# 🔒 OBFUSCATION STEP - Compile to bytecode and remove source files
+RUN echo "🔒 Starting code obfuscation..." && \
+    # Compile all Python files to .pyc bytecode
+    python -m compileall -b /app && \
+    echo "✅ Bytecode compilation complete" && \
+    # Remove .py source files (preserve critical entry points and migrations)
     find /app -type f -name "*.py" \
-    ! -name "__init__.py" \
-    ! -name "main.py" \
-    ! -path "*/migrations/*" \
-    -delete && \
+        ! -name "__init__.py" \
+        ! -name "main.py" \
+        ! -path "*/migrations/*" \
+        -delete && \
+    echo "✅ Source files removed" && \
     # Clean up __pycache__ directories
-    find /app -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    find /app -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    echo "✅ Cache cleanup complete" && \
+    echo "🔒 Code obfuscation finished!"
 
-# Expose port
+# Verify obfuscation worked
+RUN echo "📊 Obfuscation verification:" && \
+    echo "  .pyc files: $(find /app -name '*.pyc' | wc -l)" && \
+    echo "  .py files remaining: $(find /app -name '*.py' ! -path '*/migrations/*' | wc -l)"
+
+# Expose application port
 EXPOSE 8000
 
-# Run the application using bytecode
+# Run application using bytecode
+# -B flag prevents creation of .pyc files during runtime
 CMD ["python", "-B", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

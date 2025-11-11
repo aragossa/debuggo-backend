@@ -351,27 +351,29 @@ class ApiTestExecutor:
         result = text
         original = text
         
-        # Substitute built-in dynamic variables (support both {{}} and %% syntax)
+        # First, use EnvHelper to process all %placeholder% variables
+        # This handles %random_name%, %random_email%, %unique_name:Type%, etc.
+        from Utils.BrowserAutomation.EnvHelper import EnvHelper
+        env_helper = EnvHelper(self.environment_vars)
+        result = env_helper.process_variables(result)
+        
+        # Substitute built-in dynamic variables (support {{}} syntax for compatibility)
         import time
         import uuid
-        if '{{timestamp}}' in result or '%timestamp%' in result:
+        if '{{timestamp}}' in result:
             timestamp = str(int(time.time()))
             result = result.replace('{{timestamp}}', timestamp)
-            result = result.replace('%timestamp%', timestamp)
-        if '{{datetime}}' in result or '%datetime%' in result:
+        if '{{datetime}}' in result:
             from datetime import datetime
             dt = datetime.now().isoformat()
             result = result.replace('{{datetime}}', dt)
-            result = result.replace('%datetime%', dt)
-        if '{{uuid}}' in result or '%uuid%' in result:
+        if '{{uuid}}' in result:
             uuid_str = str(uuid.uuid4())
             result = result.replace('{{uuid}}', uuid_str)
-            result = result.replace('%uuid%', uuid_str)
-        if '{{random}}' in result or '%random%' in result:
+        if '{{random}}' in result:
             import random
             rand = str(random.randint(1000, 9999))
             result = result.replace('{{random}}', rand)
-            result = result.replace('%random%', rand)
         
         # Substitute environment variables (support both {{}} and %% syntax)
         for key, value in self.environment_vars.items():
@@ -385,8 +387,9 @@ class ApiTestExecutor:
             result = result.replace(f'%{key}%', str(value))
         
         # Debug log if substitution occurred
-        if result != original and '%' in original:
-            self.logger.debug(f"🔄 Variable substitution: '{original}' → '{result}'")
+        if result != original:
+            if '%' in original or '{{' in original:
+                self.logger.debug(f"🔄 Variable substitution: '{original[:100]}...' → '{result[:100]}...'")
         
         return result
     
