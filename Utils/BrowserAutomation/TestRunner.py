@@ -631,12 +631,20 @@ class TestRunner:
                     step_id, action, element_path, description, expected_result, value, path_type = step
                     self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
                     
-                    # Record step start
+                    # Process environment variables to get resolved values for logging
+                    resolved_value = value
+                    resolved_element_path = element_path
+                    if env and value:
+                        resolved_value = env.process_variables(value)
+                    if env and element_path:
+                        resolved_element_path = env.process_variables(element_path)
+                    
+                    # Record step start with RESOLVED values
                     step_start_time = datetime.now()
                     step_result_id = self._log_step_execution_result(
                         test_run_id, step_id, step_order, "running",
                         step_description=description, step_action=action,
-                        step_element_path=element_path, step_value=value
+                        step_element_path=resolved_element_path, step_value=resolved_value
                     )
                     
                     try:
@@ -1787,12 +1795,20 @@ class TestRunner:
                 step_id, action, element_path, description, expected_result, value, path_type = step
                 self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
                 
-                # Record step start
+                # Process environment variables to get resolved values for logging
+                resolved_value = value
+                resolved_element_path = element_path
+                if env and value:
+                    resolved_value = env.process_variables(value)
+                if env and element_path:
+                    resolved_element_path = env.process_variables(element_path)
+                
+                # Record step start with RESOLVED values
                 step_start_time = datetime.now()
                 step_result_id = self._log_step_execution_result(
                     test_run_id, step_id, step_order, "running",
                     step_description=description, step_action=action,
-                    step_element_path=element_path, step_value=value
+                    step_element_path=resolved_element_path, step_value=resolved_value
                 )
                 
                 try:

@@ -156,7 +156,7 @@ class AIHelper:
         )
         return text_prompt
 
-    def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str, attached_screenshot: str = None) -> str:
+    def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str, attached_screenshot: str = None, variable_registry: dict = None) -> str:
         # Get test case ID from test name (assuming it's stored in the format "Test Case #123")
         try:
             test_case_id = int(''.join(filter(str.isdigit, test_name)))
@@ -177,6 +177,95 @@ class AIHelper:
                         f"- Value: {step['value']}\n"
                     )
                 step_history += "\nAvoid repeating the same steps. Each new step should progress the test forward.\n"
+        
+        # Build variable registry section
+        variable_context = ""
+        if variable_registry and len(variable_registry) > 0:
+            variable_context = "\n\n🔵 VARIABLES CREATED IN PREVIOUS STEPS - REUSE THESE WHEN NEEDED:\n"
+            variable_context += "=" * 80 + "\n"
+            
+            for var_name, var_info in variable_registry.items():
+                step_num = var_info['first_use_step']
+                placeholder = var_info['placeholder']
+                purpose = var_info['purpose']
+                usage_count = var_info['usage_count']
+                
+                variable_context += f"\n📌 Variable: {placeholder}\n"
+                variable_context += f"   - First created in: Step {step_num}\n"
+                variable_context += f"   - Created for: {purpose}\n"
+                variable_context += f"   - Used {usage_count} time(s) so far\n"
+                
+                # Detect variable type and provide usage hints
+                var_lower = var_name.lower()
+                if 'email' in var_lower:
+                    variable_context += f"   ⚠️ TYPE: Email - If this step needs an email (login, verify, etc.), use {placeholder}\n"
+                elif 'password' in var_lower:
+                    variable_context += f"   ⚠️ TYPE: Password - If this step needs password (login, confirm, etc.), use {placeholder}\n"
+                elif 'var:' in var_name:
+                    # Named variable - extract the meaningful part
+                    clean_name = var_name.replace('var:', '')
+                    variable_context += f"   ⚠️ NAMED VARIABLE: {clean_name} - Reuse this for related actions\n"
+                elif 'unique_name:' in var_name:
+                    variable_context += f"   ⚠️ TYPE: Unique identifier - Use for finding/selecting the created item\n"
+                
+            variable_context += "\n" + "=" * 80 + "\n"
+            variable_context += "⚠️ CRITICAL RULES FOR VARIABLE REUSE:\n"
+            variable_context += "1. If this step uses data CREATED in a previous step, use the EXACT SAME variable\n"
+            variable_context += "2. Example: Step 8 created user with %var:admin_email%, Step 16 logs in → MUST use %var:admin_email%\n"
+            variable_context += "3. DO NOT create new variables (like %random_email%) if one already exists above\n"
+            variable_context += "4. Using a different variable will cause TEST FAILURE - values won't match!\n"
+            variable_context += "=" * 80 + "\n"
+        
+        # Detect authentication state from step history
+        auth_state_context = ""
+        if test_case_id is not None:
+            history = self.get_step_history(test_case_id)
+            if history:
+                # Track login/logout actions
+                last_login_step = -1
+                last_logout_step = -1
+                login_user = None
+                
+                for idx, step in enumerate(history):
+                    purpose = step.get('element_purpose', '').lower()
+                    action = step.get('action', '').lower()
+                    value = step.get('value', '')
+                    
+                    # Detect login actions
+                    if 'login' in purpose or 'submit' in purpose:
+                        # Check if this is part of login flow (password or login button)
+                        if action == 'click' or (action == 'type' and 'password' in purpose):
+                            last_login_step = idx
+                            # Detect which user is logging in
+                            if '%login%' in value or 'admin' in purpose.lower():
+                                login_user = "admin"
+                            elif 'var:' in value or 'new' in purpose.lower():
+                                login_user = "newly created user"
+                    
+                    # Detect logout actions
+                    if 'logout' in purpose or 'sign out' in purpose:
+                        last_logout_step = idx
+                        login_user = None
+                
+                # Determine current authentication state
+                if last_login_step > last_logout_step:
+                    auth_state_context = f"\n\n🟢 AUTHENTICATION STATE:\n"
+                    auth_state_context += "=" * 80 + "\n"
+                    auth_state_context += f"✅ USER IS CURRENTLY LOGGED IN (step {last_login_step})\n"
+                    if login_user:
+                        auth_state_context += f"   Logged in as: {login_user}\n"
+                    auth_state_context += "\n⚠️ CRITICAL: DO NOT LOGIN AGAIN unless you see a login page or authentication error!\n"
+                    auth_state_context += "   - If you're already logged in, continue with the next action in the test flow\n"
+                    auth_state_context += "   - Only suggest login actions if you see login form fields in the HTML\n"
+                    auth_state_context += "   - Check the HTML for indicators like account menu, user name, or authenticated content\n"
+                    auth_state_context += "=" * 80 + "\n"
+                elif last_logout_step > last_login_step and last_logout_step >= 0:
+                    auth_state_context = f"\n\n🔴 AUTHENTICATION STATE:\n"
+                    auth_state_context += "=" * 80 + "\n"
+                    auth_state_context += f"❌ USER IS LOGGED OUT (step {last_logout_step})\n"
+                    auth_state_context += "   - If test requires authentication, you may need to login\n"
+                    auth_state_context += "   - Check if the HTML shows a login form\n"
+                    auth_state_context += "=" * 80 + "\n"
 
         prev_step_prompt = ''
         if prev_step_description != '':
@@ -198,10 +287,16 @@ This is the suggested test description, some steps might be missing, if you see 
 You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
 If current step will be final step, put to the next_step attribute the word 'Stop'.
 You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
-{step_history}"""
+{step_history}{variable_context}{auth_state_context}"""
         
         # Add the rest of the prompt as a regular string (no format substitution)
         prompt += """
+
+🔴 CRITICAL - PLACEHOLDER SYNTAX RULE:
+ALL placeholders MUST be wrapped with % on BOTH sides: %placeholder_name%
+✅ CORRECT: %unique_name:P@ssword1!% | %random_email% | %timestamp_name:Client%
+❌ WRONG: %unique_name:P@ssword1! | random_email% | %timestamp_name:Client
+If you forget the closing %, the placeholder will NOT work and will be typed literally!
 
 IMPORTANT GUIDELINES:
 1. BEFORE SUGGESTING ELEMENT TO LOCATE, ANALYZE THE HTML CODE AND THE SCREENSHOT TO UNDERSTAND THE CONTEXT AND MAKE SURE THAT ELEMENT IS VISIBLE AND CLICKABLE AND NOT DISABLED
@@ -287,10 +382,6 @@ When performing assertions, consider the following validation patterns:
 - Confirm correct values in input fields, dropdowns, or other form elements
 - Verify selected state of checkboxes and radio buttons
 
-Analyze the provided HTML code of a web page to identify an element that possible to be used on this step.
-{screenshot_text}
-HTML Code:
-{html_code}
 
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
@@ -299,9 +390,13 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "by_strategy": "xpath",
     "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
-    "value": "For type actions: MUST provide actual test data (e.g., '%login%' for login field)",
+    "value": "For type actions: MUST use placeholders like %login%, %random_email%, %unique_name:Prefix% (ALWAYS with % on BOTH sides)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
 }}
+
+⚠️ VALUE FIELD REMINDER: Always wrap placeholders with % on both sides!
+Examples: %login%, %password%, %unique_name:Client%, %random_email%
+NEVER: %login, password%, unique_name:Client%, %random_email
 
 CRITICAL - DUAL LOCATOR REQUIREMENT:
 - You MUST provide BOTH element_locator (XPath) AND css_selector (CSS) for the SAME element
@@ -320,43 +415,73 @@ IMPORTANT REQUIREMENTS:
    - NEVER use hardcoded values like "Test Client", "test@test.com", "John Doe", "123-456-7890"
    - ALWAYS use dynamic placeholders that generate realistic data at runtime
    
-   A. UNIQUE IDENTIFIERS (cached per test run):
+   ⚠️ CRITICAL PLACEHOLDER SYNTAX - MUST HAVE BOTH % SIGNS:
+   - ✅ CORRECT: %unique_name:P@ssword1!% (wrapped with % on BOTH sides)
+   - ✅ CORRECT: %random_email% (wrapped with % on BOTH sides)
+   - ✅ CORRECT: %timestamp_name:Client% (wrapped with % on BOTH sides)
+   - ❌ WRONG: %unique_name:P@ssword1! (missing closing %)
+   - ❌ WRONG: unique_name:Client% (missing opening %)
+   - ❌ WRONG: unique_name (no % signs at all)
+   
+   ALL PLACEHOLDERS MUST BE WRAPPED WITH % SIGNS: %placeholder_name%
+   
+   A. NAMED VARIABLES (NEW - EXPLICITLY CACHED WITH CUSTOM NAMES):
+     ⭐ USE THESE FOR VALUES THAT NEED TO BE REUSED LATER IN THE TEST ⭐
+     * %var:user_email% - First use: generates email, subsequent uses: reuses same value
+     * %var:user_password% - First use: generates password, subsequent uses: reuses same value
+     * %var:admin_name% - First use: generates name, subsequent uses: reuses same value
+     * %var:company_name% - First use: generates company, subsequent uses: reuses same value
+     * %var:custom_value% - Generic cached variable
+     
+     ⚠️ WHEN TO USE %var:name%:
+     - Step 8: Create user with email → value="%var:user_email%" (generates and caches)
+     - Step 16: Login with that user → value="%var:user_email%" (reuses same email from step 8)
+     - Step 11: Enter password → value="%var:user_password%" (generates and caches)
+     - Step 12: Confirm password → value="%var:user_password%" (reuses same password)
+     
+     The variable name (after "var:") can be anything descriptive:
+     - %var:new_user_email%, %var:admin_login%, %var:test_password%
+     - System intelligently generates appropriate data based on the name
+     
+   B. UNIQUE IDENTIFIERS (cached per test run):
      * %unique_name% - Random unique ID (e.g., "a7b3c9d2")
      * %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+     * %unique_name:P@ssword1!% - With special char prefix (e.g., "P@ssword1!_a7b3c9d2")
      * %unique_name:User:Test% - With prefix and suffix (e.g., "User_a7b3c9d2_Test")
      * %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
      * %timestamp_name:Group% - With prefix (e.g., "Group_20250129_143052")
    
-   B. REALISTIC PERSONAL DATA (new value each time):
-     * %random_name% - Full name (e.g., "John Smith")
-     * %random_first_name% - First name (e.g., "John")
-     * %random_last_name% - Last name (e.g., "Smith")
-     * %random_email% - Email (e.g., "john.smith@example.com")
-     * %random_username% - Username (e.g., "john_smith_123")
-     * %random_phone% - Phone number (e.g., "+1-555-234-5678")
+   C. REALISTIC PERSONAL DATA (cached per test run):
+     ⚠️ ALL THESE ARE NOW CACHED - First use generates, subsequent uses retrieve!
+     * %random_name% - Full name (e.g., "John Smith") - CACHED
+     * %random_first_name% - First name (e.g., "John") - CACHED
+     * %random_last_name% - Last name (e.g., "Smith") - CACHED
+     * %random_email% - Email (e.g., "john.smith@example.com") - CACHED
+     * %random_username% - Username (e.g., "john_smith_123") - CACHED
+     * %random_phone% - Phone number (e.g., "+1-555-234-5678") - CACHED
    
-   C. REALISTIC LOCATION DATA:
-     * %random_address% - Street address (e.g., "742 Evergreen Terrace")
-     * %random_city% - City name (e.g., "Springfield")
-     * %random_country% - Country name (e.g., "United States")
+   D. REALISTIC LOCATION DATA (cached per test run):
+     * %random_address% - Street address (e.g., "742 Evergreen Terrace") - CACHED
+     * %random_city% - City name (e.g., "Springfield") - CACHED
+     * %random_country% - Country name (e.g., "United States") - CACHED
    
-   D. REALISTIC BUSINESS DATA:
-     * %random_company% - Company name (e.g., "Acme Corporation")
-     * %random_job_title% - Job title (e.g., "Software Engineer")
+   E. REALISTIC BUSINESS DATA (cached per test run):
+     * %random_company% - Company name (e.g., "Acme Corporation") - CACHED
+     * %random_job_title% - Job title (e.g., "Software Engineer") - CACHED
    
-   E. TECHNICAL DATA:
-     * %random_string% - Alphanumeric string (default 10 chars)
-     * %random_string:5% - Custom length string
-     * %random_number% - Number 1-10000
-     * %random_number:1:100% - Custom range number
-     * %random_url% - URL (e.g., "https://www.example.com")
-     * %random_ip% - IP address (e.g., "192.168.1.42")
-     * %random_uuid% - Full UUID
-     * %random_color% - Color name (e.g., "blue")
-     * %random_date% - Date YYYY-MM-DD
-     * %random_boolean% - true/false
-     * %random_text% - Paragraph of text
-     * %random_text:5% - Custom sentences count
+   F. TECHNICAL DATA (cached per test run):
+     * %random_string% - Alphanumeric string (default 10 chars) - CACHED
+     * %random_string:5% - Custom length string - CACHED
+     * %random_number% - Number 1-10000 - CACHED
+     * %random_number:1:100% - Custom range number - CACHED
+     * %random_url% - URL (e.g., "https://www.example.com") - CACHED
+     * %random_ip% - IP address (e.g., "192.168.1.42") - CACHED
+     * %random_uuid% - Full UUID - CACHED
+     * %random_color% - Color name (e.g., "blue") - CACHED
+     * %random_date% - Date YYYY-MM-DD - CACHED
+     * %random_boolean% - true/false - CACHED
+     * %random_text% - Paragraph of text - CACHED
+     * %random_text:5% - Custom sentences count - CACHED
    
    USAGE EXAMPLES:
      ❌ WRONG: {{"name": "Test Client", "email": "test@test.com", "phone": "123-456-7890"}}
@@ -368,11 +493,51 @@ IMPORTANT REQUIREMENTS:
      ❌ WRONG: value="New York" (for city field)
      ✅ CORRECT: value="%random_city%" (generates "Los Angeles")
      
+     ❌ WRONG: value="%unique_name:Password123" (missing closing %)
+     ✅ CORRECT: value="%unique_name:Password123%" (generates "Password123_a7b3c9d2")
+     
+     ❌ WRONG: value="%random_email" (missing closing %)
+     ✅ CORRECT: value="%random_email%" (generates "john.smith@example.com")
+     
+   ⚠️ REMEMBER: EVERY placeholder MUST start AND end with % sign!
+     
+   CRITICAL - VARIABLE REUSE SCENARIOS:
+     
+     Example 1: Creating and logging in as a user
+     ❌ WRONG:
+       Step 8:  Enter email → value="%random_email%" (generates "john@example.com")
+       Step 16: Enter email → value="%random_email%" (generates NEW "mary@example.com" - DIFFERENT!)
+     
+     ✅ CORRECT Option A (using %var:name%):
+       Step 8:  Enter email → value="%var:user_email%" (generates "john@example.com" and caches as "user_email")
+       Step 16: Enter email → value="%var:user_email%" (retrieves "john@example.com" - SAME!)
+     
+     ✅ CORRECT Option B (using %random_email% with caching):
+       Step 8:  Enter email → value="%random_email%" (generates "john@example.com" and caches)
+       Step 16: Enter email → value="%random_email%" (retrieves "john@example.com" - SAME!)
+     
+     Example 2: Password confirmation fields
+     ❌ WRONG:
+       Step 11: Enter password → value="%unique_name:P@ssword1!%" (generates "P@ssword1!_abc123")
+       Step 12: Confirm password → value="%unique_name:P@ssword1!%" (generates NEW "P@ssword1!_xyz789" - FAILS!)
+     
+     ✅ CORRECT:
+       Step 11: Enter password → value="%unique_name:P@ssword1!%" (generates "P@ssword1!_abc123" and caches)
+       Step 12: Confirm password → value="%unique_name:P@ssword1!%" (retrieves "P@ssword1!_abc123" - SAME!)
+     
+     Example 3: Using %var:name% for explicit control
+     ✅ BEST PRACTICE:
+       Step 5:  Enter new user email → value="%var:new_user_email%" (generates and caches)
+       Step 10: Verify email in list → text contains "%var:new_user_email%" (reuses)
+       Step 15: Login with new user → value="%var:new_user_email%" (reuses)
+     
    WHEN TO USE EACH TYPE:
-     - Use %unique_name:Type% for entity names that need consistency (Client_xyz used in multiple steps)
-     - Use %random_*% for realistic data that doesn't need to be referenced later
-     - Use %random_email% instead of "%unique_name%@test.com" for better realism
-     - Use %random_company% instead of "%unique_name:Company%" for business names
+     - Use %var:custom_name% when you want EXPLICIT control and clear variable naming
+     - Use %unique_name:Type% for entity names that need consistency (Client_xyz)
+     - Use %random_*% for realistic data - NOW AUTOMATICALLY CACHED per test run!
+     - Both %var:user_email% and %random_email% work, but %var:% is more explicit
+     - Use %random_email% instead of "%unique_name%@test.com" for valid email format
+     - Use %random_company% instead of "%unique_name:Company%" for realistic business names
    
    ⚠️ CRITICAL - NEVER HARDCODE DYNAMIC VALUES IN XPATH/CSS SELECTORS:
    - When creating an item with a dynamic name (e.g., %unique_name:Group%), DO NOT hardcode the generated value in subsequent selectors

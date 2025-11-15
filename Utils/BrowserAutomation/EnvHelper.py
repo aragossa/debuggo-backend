@@ -119,28 +119,32 @@ class EnvHelper:
         - %unique_name% - Unique identifier (e.g., "a7b3c9d2")
         - %unique_name:prefix% - With prefix (e.g., "Client_a7b3c9d2")
         - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+        - %var:variable_name% - Cached variable with custom name (NEW)
         
-        Supported placeholders:
-        - %random_string% - Random alphanumeric string
-        - %random_number% - Random number (1-10000)
-        - %random_name% - Full name (e.g., "John Smith")
-        - %random_first_name% - First name (e.g., "John")
-        - %random_last_name% - Last name (e.g., "Smith")
-        - %random_email% - Email address (e.g., "john.smith@example.com")
-        - %random_phone% - Phone number
-        - %random_address% - Street address
-        - %random_city% - City name
-        - %random_country% - Country name
-        - %random_company% - Company name
-        - %random_job_title% - Job title
-        - %random_username% - Username
-        - %random_url% - URL
-        - %random_color% - Color name
-        - %random_date% - Date (YYYY-MM-DD)
-        - %random_boolean% - True/False
-        - %random_ip% - IP address
-        - %random_uuid% - UUID
-        - %random_text% - Random text paragraph
+        Supported placeholders (ALL AUTO-CACHED):
+        - %random_string% - Random alphanumeric string (cached)
+        - %random_number% - Random number (cached)
+        - %random_name% - Full name (cached, e.g., "John Smith")
+        - %random_first_name% - First name (cached, e.g., "John")
+        - %random_last_name% - Last name (cached, e.g., "Smith")
+        - %random_email% - Email address (cached, e.g., "john.smith@example.com")
+        - %random_phone% - Phone number (cached)
+        - %random_address% - Street address (cached)
+        - %random_city% - City name (cached)
+        - %random_country% - Country name (cached)
+        - %random_company% - Company name (cached)
+        - %random_job_title% - Job title (cached)
+        - %random_username% - Username (cached)
+        - %random_url% - URL (cached)
+        - %random_color% - Color name (cached)
+        - %random_date% - Date (cached, YYYY-MM-DD)
+        - %random_boolean% - True/False (cached)
+        - %random_ip% - IP address (cached)
+        - %random_uuid% - UUID (cached)
+        - %random_text% - Random text paragraph (cached)
+        
+        NOTE: All placeholders are cached per test execution.
+        First use generates value, subsequent uses retrieve from cache.
         
         Args:
             text (str): The text containing environment variable placeholders
@@ -170,6 +174,36 @@ class EnvHelper:
                 elif var_name == 'password':
                     value = self.password
                     
+                # Handle %var:variable_name% - Explicitly named cached variables (NEW)
+                elif var_name.startswith('var:'):
+                    # Extract variable name after 'var:'
+                    variable_name = var_name[4:].strip()
+                    
+                    # Check if we already have this variable cached
+                    cache_key = f"var:{variable_name}"
+                    if cache_key in self._generated_names:
+                        value = self._generated_names[cache_key]
+                    else:
+                        # Generate based on variable name pattern
+                        if 'email' in variable_name.lower():
+                            value = NameGenerator.generate_random_email()
+                        elif 'phone' in variable_name.lower():
+                            value = NameGenerator.generate_random_phone()
+                        elif 'name' in variable_name.lower():
+                            value = NameGenerator.generate_random_name()
+                        elif 'password' in variable_name.lower():
+                            value = NameGenerator.generate_random_string(length=12)
+                        elif 'company' in variable_name.lower():
+                            value = NameGenerator.generate_random_company()
+                        elif 'address' in variable_name.lower():
+                            value = NameGenerator.generate_random_address()
+                        else:
+                            # Default to random string
+                            value = NameGenerator.generate_random_string()
+                        
+                        # Cache it with the variable name
+                        self._generated_names[cache_key] = value
+                
                 # Handle dynamic name generation
                 elif var_name.startswith('unique_name'):
                     # Check if we already generated this exact variable in this test run
@@ -218,75 +252,157 @@ class EnvHelper:
                         # Cache it for consistency within this test run
                         self._generated_names[placeholder] = value
                 
-                # Handle realistic data placeholders
+                # Handle realistic data placeholders (ALL NOW CACHED)
                 elif var_name.startswith('random_string'):
-                    parts = var_name.split(':')
-                    length = int(parts[1]) if len(parts) > 1 else 10
-                    value = NameGenerator.generate_random_string(length=length)
+                    # Check cache first
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        parts = var_name.split(':')
+                        length = int(parts[1]) if len(parts) > 1 else 10
+                        value = NameGenerator.generate_random_string(length=length)
+                        self._generated_names[placeholder] = value
                     
                 elif var_name.startswith('random_number'):
-                    parts = var_name.split(':')
-                    min_val = int(parts[1]) if len(parts) > 1 else 1
-                    max_val = int(parts[2]) if len(parts) > 2 else 10000
-                    value = str(NameGenerator.generate_random_number(min_val=min_val, max_val=max_val))
+                    # Check cache first
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        parts = var_name.split(':')
+                        min_val = int(parts[1]) if len(parts) > 1 else 1
+                        max_val = int(parts[2]) if len(parts) > 2 else 10000
+                        value = str(NameGenerator.generate_random_number(min_val=min_val, max_val=max_val))
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_name':
-                    value = NameGenerator.generate_random_name()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_name()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_first_name':
-                    value = NameGenerator.generate_random_first_name()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_first_name()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_last_name':
-                    value = NameGenerator.generate_random_last_name()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_last_name()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_email':
-                    value = NameGenerator.generate_random_email()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_email()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_phone':
-                    value = NameGenerator.generate_random_phone()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_phone()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_address':
-                    value = NameGenerator.generate_random_address()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_address()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_city':
-                    value = NameGenerator.generate_random_city()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_city()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_country':
-                    value = NameGenerator.generate_random_country()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_country()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_company':
-                    value = NameGenerator.generate_random_company()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_company()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_job_title':
-                    value = NameGenerator.generate_random_job_title()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_job_title()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_username':
-                    value = NameGenerator.generate_random_username()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_username()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_url':
-                    value = NameGenerator.generate_random_url()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_url()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_color':
-                    value = NameGenerator.generate_random_color()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_color()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name.startswith('random_date'):
-                    parts = var_name.split(':')
-                    date_format = parts[1] if len(parts) > 1 else "%Y-%m-%d"
-                    value = NameGenerator.generate_random_date(format=date_format)
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        parts = var_name.split(':')
+                        date_format = parts[1] if len(parts) > 1 else "%Y-%m-%d"
+                        value = NameGenerator.generate_random_date(format=date_format)
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_boolean':
-                    value = str(NameGenerator.generate_random_boolean())
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = str(NameGenerator.generate_random_boolean())
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_ip':
-                    value = NameGenerator.generate_random_ip()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_ip()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name == 'random_uuid':
-                    value = NameGenerator.generate_random_uuid()
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        value = NameGenerator.generate_random_uuid()
+                        self._generated_names[placeholder] = value
                     
                 elif var_name.startswith('random_text'):
-                    parts = var_name.split(':')
-                    sentences = int(parts[1]) if len(parts) > 1 else 3
-                    value = NameGenerator.generate_random_text(sentences=sentences)
+                    if placeholder in self._generated_names:
+                        value = self._generated_names[placeholder]
+                    else:
+                        parts = var_name.split(':')
+                        sentences = int(parts[1]) if len(parts) > 1 else 3
+                        value = NameGenerator.generate_random_text(sentences=sentences)
+                        self._generated_names[placeholder] = value
                 
                 else:
                     # For unknown variables, leave the placeholder
@@ -295,7 +411,7 @@ class EnvHelper:
                 # Replace the placeholder with the actual value
                 result = result.replace(placeholder, value)
                 
-            except ValueError:
+            except Exception as e:
                 # If the variable doesn't exist, leave the placeholder
                 continue
                 

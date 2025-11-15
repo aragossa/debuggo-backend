@@ -60,6 +60,48 @@ class HtmlAnalyzer(AIHelper):
         if test_case_id not in self._step_history:
             self._step_history[test_case_id] = []
         self._step_history[test_case_id].append(step_data)
+        
+    def extract_variables_from_step(self, step_data: dict) -> list:
+        """Extract all placeholder variables from a step's value field."""
+        import re
+        variables = []
+        value = step_data.get('value', '')
+        if value:
+            # Find all %variable% patterns
+            pattern = r'%([^%]+)%'
+            matches = re.findall(pattern, value)
+            for match in matches:
+                variables.append({
+                    'placeholder': f'%{match}%',
+                    'var_name': match,
+                    'purpose': step_data.get('element_purpose', ''),
+                    'action': step_data.get('action', '')
+                })
+        return variables
+    
+    def get_variable_registry(self, test_case_id: int) -> dict:
+        """Build a registry of all variables used in previous steps."""
+        history = self.get_step_history(test_case_id)
+        registry = {}
+        
+        for idx, step in enumerate(history):
+            variables = self.extract_variables_from_step(step)
+            for var in variables:
+                var_name = var['var_name']
+                if var_name not in registry:
+                    registry[var_name] = {
+                        'first_use_step': idx,
+                        'placeholder': var['placeholder'],
+                        'purpose': var['purpose'],
+                        'action': var['action'],
+                        'usage_count': 1,
+                        'contexts': [var['purpose']]
+                    }
+                else:
+                    registry[var_name]['usage_count'] += 1
+                    registry[var_name]['contexts'].append(var['purpose'])
+        
+        return registry
 
     def get_step_history(self, test_case_id: int) -> list:
         """Get the step history for a test case."""
@@ -73,6 +115,11 @@ class HtmlAnalyzer(AIHelper):
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
                       next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
+        
+        # Get variable registry from previous steps
+        variable_registry = self.get_variable_registry(test_case_id)
+        self.logger.info(f"Variable registry for test case {test_case_id}: {len(variable_registry)} variables tracked")
+        
         prompt = self.get_analyze_html_prompt(
             html_code=html_code,
             test_name=test_name,
@@ -80,7 +127,8 @@ class HtmlAnalyzer(AIHelper):
             step_order=step_order,
             next_prompt=next_prompt,
             prev_step_description=prev_step_description,
-            attached_screenshot=screenshot_path
+            attached_screenshot=screenshot_path,
+            variable_registry=variable_registry
         )
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
