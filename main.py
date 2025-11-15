@@ -2963,6 +2963,22 @@ async def delete_test_step(
         
         conn.commit()
         
+        # Clear screenshot cache for the deleted step to prevent "No screenshot found" errors
+        try:
+            r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+            # Clear the screenshot cache key for this step
+            cache_key = f"screenshot:step:{id}"
+            r.delete(cache_key)
+            logger.info(f"Cleared screenshot cache for deleted step {id}")
+            
+            # Also clear the test case cache to force refresh
+            if test_case_id:
+                test_case_cache_key = f"test_case:{test_case_id}"
+                r.delete(test_case_cache_key)
+                logger.info(f"Cleared test case cache for test case {test_case_id}")
+        except Exception as cache_error:
+            logger.warning(f"Failed to clear screenshot cache: {cache_error}")
+        
         return {"status": "success", "message": "Test step deleted successfully"}
     
     except Exception as e:
@@ -3752,6 +3768,29 @@ async def get_test_step_screenshot(
             result = cursor.fetchone()
             logger.info(f"Screenshot query result for step {step_id}: {'Found' if result else 'Not found'}")
             
+            # Debug: Check if step exists at all
+            if not result:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM test_step_execution_results 
+                    WHERE test_step_id = %s
+                    """,
+                    (step_id,)
+                )
+                count_result = cursor.fetchone()
+                logger.debug(f"Total execution results for step {step_id}: {count_result[0] if count_result else 0}")
+                
+                # Check if any have screenshots
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM test_step_execution_results 
+                    WHERE test_step_id = %s AND (screenshot_base64 IS NOT NULL OR screenshot_path IS NOT NULL)
+                    """,
+                    (step_id,)
+                )
+                screenshot_count = cursor.fetchone()
+                logger.debug(f"Execution results with screenshots for step {step_id}: {screenshot_count[0] if screenshot_count else 0}")
+            
             # If not found in new system, try old screenshots table
             if not result:
                 # logger.info(f"Screenshot request {step_id} - No result from new system, trying old screenshots table")
@@ -4398,7 +4437,7 @@ async def stop_all_test_executions(current_user: User = Depends(get_current_user
                 for test_case_id in test_case_ids:
                     stop_key = f"test_case_stop_generating:{test_case_id}"
                     r.set(stop_key, "1", ex=300)
-                    logger.info(f"Set stop flag for generation of test case {test_case_id}")
+                logger.info(f"All test are marked as stopped")
                     
         except Exception as e:
             logger.error(f"Error while stopping all tests: {e}")

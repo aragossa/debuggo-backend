@@ -304,7 +304,8 @@ IMPORTANT GUIDELINES:
    - You MUST confirm that each element you suggest actually exists in the current HTML code
    - Do NOT suggest any element without verifying its existence in the provided HTML
    - Before suggesting a locator, search the HTML code for text fragments, IDs, or other attributes
-   - Include a comment in the element_purpose field like: "Element verified in HTML: <attribute/value found>"
+   - Verify the element exists but DO NOT include verification details in element_purpose
+   - Keep element_purpose clean and user-friendly (e.g., "Click the Login button to submit credentials")
 3. STRICT SEQUENTIAL NAVIGATION - NO SKIPPING STEPS:
    - You must STRICTLY follow one action at a time in a logical sequence
    - NEVER skip to form fields or other interactions before completing the navigation steps
@@ -569,7 +570,7 @@ IMPORTANT REQUIREMENTS:
 16. ONE ACTION PER STEP: Each step should perform exactly one action (click, type, etc.). Do not combine multiple actions into a single step.
 17. ELEMENT EXISTENCE VERIFICATION: Your element_locator MUST be for an element that actually exists in the provided HTML.
    - Before providing a locator, verify that it exists in the HTML code by searching for unique text or attributes
-   - Document your verification in the element_purpose with "Element verified in HTML: <text/attribute found>"
+   - Keep element_purpose clean and user-friendly - do NOT include HTML markup or verification details
    - If you cannot verify the element exists, do not proceed - suggest a "wait" action instead
 18. FOCUS ON THE MAIN FLOW: Only include steps that are specifically described in the test description.
    - Do NOT add unnecessary steps like field validation that aren't part of the test description

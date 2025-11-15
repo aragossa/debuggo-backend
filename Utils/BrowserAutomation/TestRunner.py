@@ -19,6 +19,8 @@ from auroqa.Utils.System import System
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
+from auroqa.Services.ValidationAgent import ValidationAgent
+from auroqa.Services.ConfidenceScorer import ConfidenceScorer
 
 
 class TestRunner:
@@ -86,6 +88,14 @@ class TestRunner:
             # Phase 1: Initialize feedback collector
             self.feedback_collector = ExecutionFeedbackCollector()
             self.logger.info(f"[PID:{self.pid}] Execution Feedback Collector initialized")
+            
+            # Phase 1: Initialize validation agent
+            self.validator = ValidationAgent()
+            self.logger.info(f"[PID:{self.pid}] Validation Agent initialized")
+            
+            # Phase 1: Initialize confidence scorer
+            self.scorer = ConfidenceScorer()
+            self.logger.info(f"[PID:{self.pid}] Confidence Scorer initialized")
             
             # Each instance will have its own browser
             # But we'll create it on demand when needed rather than at initialization time
@@ -677,6 +687,28 @@ class TestRunner:
                             screenshot_base64=screenshot_base64,
                             execution_time_ms=execution_time_ms
                         )
+                        
+                        # Phase 1: Collect validation result for successful step
+                        try:
+                            step_data = {
+                                'action': action,
+                                'element_locator': resolved_element_path,
+                                'value': resolved_value,
+                                'by_strategy': path_type
+                            }
+                            validation_result = self.validator.validate_step(step_data)
+                            self.validator.save_validation_result(test_case_id, step_id, validation_result)
+                            self.logger.info(f"✓ Step {step_order} validation: {validation_result.confidence:.1f}% confidence")
+                        except Exception as validation_error:
+                            self.logger.warning(f"⚠️ Failed to validate step {step_order}: {validation_error}")
+                        
+                        # Phase 1: Collect confidence score for successful step
+                        try:
+                            confidence_score = self.scorer.score_step(step_data)
+                            self.scorer.save_confidence_score(test_case_id, confidence_score)
+                            self.logger.info(f"📊 Step {step_order} confidence: {confidence_score.overall_confidence:.1f}% ({confidence_score.risk_level} risk)")
+                        except Exception as scoring_error:
+                            self.logger.warning(f"⚠️ Failed to score step {step_order}: {scoring_error}")
                         
                         self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
                         
@@ -1630,6 +1662,21 @@ class TestRunner:
                 self._update_generation_end_time_with_session(session_cursor, session_conn, test_case_id)
                 self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
                 
+                # Mark test_run as completed after successful generation
+                try:
+                    with self.get_db_connection() as connection:
+                        with connection.cursor() as cursor:
+                            cursor.execute("""
+                                UPDATE test_runs 
+                                SET result = 'completed'
+                                WHERE test_case_id = %s AND result = 'running'
+                            """, (test_case_id,))
+                            connection.commit()
+                            if cursor.rowcount > 0:
+                                self.logger.info(f"[PID:{pid}] Marked test_run as completed after successful generation for test case {test_case_id}")
+                except Exception as db_error:
+                    self.logger.error(f"[PID:{pid}] Failed to mark test_run as completed: {db_error}")
+                
                 # Clear the generation flag from Redis
                 try:
                     if self._redis:
@@ -1832,6 +1879,17 @@ class TestRunner:
             # Ensure browser is initialized
             self._ensure_browser_initialized()
             
+            # Clear browser cookies and cache before starting test execution to prevent session carryover
+            try:
+                self.logger.info(f"[PID:{pid}] Clearing browser cookies and cache before test execution")
+                self.browser.driver.delete_all_cookies()
+                # Clear local storage and session storage via JavaScript
+                self.browser.driver.execute_script("window.localStorage.clear();")
+                self.browser.driver.execute_script("window.sessionStorage.clear();")
+                self.logger.info(f"[PID:{pid}] Browser cache cleared successfully")
+            except Exception as cleanup_error:
+                self.logger.warning(f"[PID:{pid}] Failed to clear browser cache: {cleanup_error}")
+            
             # Navigate to base_url from environment variables before executing steps
             base_url = env.base_url
             if base_url:
@@ -1883,6 +1941,15 @@ class TestRunner:
                 if env and element_path:
                     resolved_element_path = env.process_variables(element_path)
                 
+                # Prepare step data for Phase 1 collection (used for both success and failure)
+                step_data = {
+                    'id': step_id,  # CRITICAL: Include step_id so confidence scorer doesn't default to 0
+                    'action': action,
+                    'element_locator': resolved_element_path,
+                    'value': resolved_value,
+                    'by_strategy': path_type
+                }
+                
                 # Record step start with RESOLVED values
                 step_start_time = datetime.now()
                 step_result_id = self._log_step_execution_result(
@@ -1917,6 +1984,26 @@ class TestRunner:
                     self._update_step_execution_result(
                         step_result_id, "passed", None, screenshot_path, screenshot_base64, execution_time_ms
                     )
+                    self.logger.info(f"[PID:{pid}] Step {step_order} result updated with screenshot (base64: {len(screenshot_base64) if screenshot_base64 else 0} bytes)")
+                    
+                    # Phase 1: Collect validation result for successful step
+                    try:
+                        validation_result = self.validator.validate_step(step_data)
+                        self.validator.save_validation_result(test_case_id, step_id, validation_result)
+                        self.logger.info(f"✓ Step {step_order} validation: {validation_result.confidence:.1f}% confidence")
+                    except Exception as validation_error:
+                        self.logger.error(f"❌ Failed to validate step {step_order}: {validation_error}", exc_info=True)
+                    
+                    # Phase 1: Collect confidence score for successful step
+                    try:
+                        confidence_score = self.scorer.score_step(step_data)
+                        if confidence_score:
+                            self.scorer.save_confidence_score(test_case_id, confidence_score)
+                            self.logger.info(f"📊 Step {step_order} confidence: {confidence_score.overall_confidence:.1f}% ({confidence_score.risk_level} risk)")
+                        else:
+                            self.logger.warning(f"⚠️ Confidence scorer returned None for step {step_order}")
+                    except Exception as scoring_error:
+                        self.logger.error(f"❌ Failed to score step {step_order}: {scoring_error}", exc_info=True)
                     
                     self.logger.info(f"[PID:{pid}] Step {step_order} completed successfully")
                     
@@ -1944,6 +2031,21 @@ class TestRunner:
                         step_result_id, "failed", str(step_error), screenshot_path, screenshot_base64, execution_time_ms
                     )
                     
+                    # Phase 1: Collect execution feedback for failed step
+                    try:
+                        failure_record = self.feedback_collector.collect_failure(
+                            test_case_id=test_case_id,
+                            step_id=step_id,
+                            step_order=step_order,
+                            action=action,
+                            element_locator=resolved_element_path,
+                            error=step_error
+                        )
+                        self.feedback_collector.save_failure_record(failure_record)
+                        self.logger.info(f"📝 Saved failure record for step {step_order}")
+                    except Exception as feedback_error:
+                        self.logger.warning(f"⚠️ Failed to save feedback for step {step_order}: {feedback_error}")
+                    
                     self.logger.error(f"[PID:{pid}] Step {step_order} failed: {step_error}")
                     failed_steps += 1
                     
@@ -1968,6 +2070,14 @@ class TestRunner:
             # Cleanup browser session immediately after test execution completes
             self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after test execution")
             self._cleanup_browser()
+            
+            # Clear browser cookies and cache to prevent session carryover
+            try:
+                self.logger.info(f"[PID:{pid}] Clearing browser cookies and cache")
+                self.browser.driver.delete_all_cookies()
+                self.logger.info(f"[PID:{pid}] Browser cookies cleared successfully")
+            except Exception as cleanup_error:
+                self.logger.warning(f"[PID:{pid}] Failed to clear browser cookies: {cleanup_error}")
             
             return {
                 "test_run_id": test_run_id,

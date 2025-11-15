@@ -177,8 +177,20 @@ class KafkaMessageConsumer:
                 system = System()
                 try:
                     r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
-                    r.delete(f"api_test_generating:{test_case_id}")
-                    self.logger.info(f"Cleared generation flag for test case {test_case_id}")
+                    
+                    # Clear all generation-related flags
+                    cleared_count = 0
+                    cleared_count += r.delete(f"api_test_generating:{test_case_id}")
+                    cleared_count += r.delete(f"test_case_generating:{test_case_id}")
+                    cleared_count += r.delete(f"test_case_current_step:{test_case_id}")
+                    cleared_count += r.delete(f"test_case_next_step:{test_case_id}")
+                    
+                    self.logger.info(f"✅ Cleared {cleared_count} generation flags for test case {test_case_id}")
+                    
+                    # Verify flags are cleared
+                    api_gen = r.get(f"api_test_generating:{test_case_id}")
+                    test_gen = r.get(f"test_case_generating:{test_case_id}")
+                    self.logger.info(f"🔍 Verification - api_test_generating: {api_gen}, test_case_generating: {test_gen}")
                 except Exception as redis_error:
                     self.logger.error(f"Redis error: {redis_error}")
                 
@@ -195,9 +207,14 @@ class KafkaMessageConsumer:
             system = System()
             try:
                 r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
-                r.delete(f"api_test_generating:{test_case_id}")
-            except:
-                pass
+                cleared_count = 0
+                cleared_count += r.delete(f"api_test_generating:{test_case_id}")
+                cleared_count += r.delete(f"test_case_generating:{test_case_id}")
+                cleared_count += r.delete(f"test_case_current_step:{test_case_id}")
+                cleared_count += r.delete(f"test_case_next_step:{test_case_id}")
+                self.logger.info(f"✅ Cleared {cleared_count} generation flags on error for test case {test_case_id}")
+            except Exception as redis_error:
+                self.logger.error(f"Failed to clear Redis flags on error: {redis_error}")
 
     def stop(self):
         self.running = False
