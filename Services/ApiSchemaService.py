@@ -5,6 +5,8 @@ from auroqa.Utils.AIHelper.AIHelper import AIHelper
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
+from auroqa.Services.ValidationAgent import ValidationAgent
+from auroqa.Services.ConfidenceScorer import ConfidenceScorer
 
 
 class ApiSchemaService:
@@ -17,6 +19,9 @@ class ApiSchemaService:
         self.logger = self._setup_logger()
         self.ai_helper = AIHelper()
         self.system = System()
+        # Phase 1: Initialize validation and scoring services
+        self.validator = ValidationAgent()
+        self.scorer = ConfidenceScorer()
     
     def _setup_logger(self):
         """Setup logger for API schema service."""
@@ -1374,6 +1379,28 @@ Return ONLY the JSON array of corrected steps, no explanation.
                 current_step['step_order'] = step_order
                 self._save_single_step(test_case_id, current_step, client_id)
                 generated_steps.append(current_step)
+                
+                # Phase 1: Validate the step
+                validation_result = self.validator.validate_step(current_step)
+                if not validation_result.is_valid:
+                    self.logger.warning(f"⚠️ Step {step_order} validation failed: {validation_result.errors}")
+                else:
+                    self.logger.info(f"✓ Step {step_order} validation passed (confidence: {validation_result.confidence:.1f}%)")
+                
+                # Save validation result
+                self.validator.save_validation_result(test_case_id, current_step.get('id', step_order), validation_result)
+                
+                # Phase 1: Score confidence
+                confidence_score = self.scorer.score_step(current_step)
+                self.logger.info(f"📊 Step {step_order} confidence: {confidence_score.overall_confidence:.1f}% ({confidence_score.risk_level} risk)")
+                
+                # Save confidence score
+                self.scorer.save_confidence_score(test_case_id, confidence_score)
+                
+                # Log recommendations if any
+                if confidence_score.recommendations:
+                    for rec in confidence_score.recommendations:
+                        self.logger.info(f"💡 Recommendation: {rec}")
                 
                 # Extract variables from response if specified
                 if 'extracted_vars' in execution_result:

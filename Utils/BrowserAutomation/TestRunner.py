@@ -18,6 +18,7 @@ from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
+from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
 
 
 class TestRunner:
@@ -81,6 +82,10 @@ class TestRunner:
             # Initialize HTML analyzer
             self.html_analyzer = HtmlAnalyzer()
             self.logger.info(f"[PID:{self.pid}] HTML Analyzer initialized")
+            
+            # Phase 1: Initialize feedback collector
+            self.feedback_collector = ExecutionFeedbackCollector()
+            self.logger.info(f"[PID:{self.pid}] Execution Feedback Collector initialized")
             
             # Each instance will have its own browser
             # But we'll create it on demand when needed rather than at initialization time
@@ -754,6 +759,24 @@ class TestRunner:
                         error_message = str(step_error)
                         self.logger.error(f"[PID:{pid}] Error in step {step_id}: {error_message}")
                         
+                        # Phase 1: Collect failure feedback
+                        failure_record = self.feedback_collector.collect_failure(
+                            test_case_id=test_case_id,
+                            step_id=step_id,
+                            step_order=step_order,
+                            action=action,
+                            element_locator=resolved_element_path,
+                            error=step_error
+                        )
+                        
+                        # Save failure record to database
+                        self.feedback_collector.save_failure_record(failure_record)
+                        self.logger.info(f"📝 Saved failure record for step {step_id}")
+                        
+                        # Generate AI feedback for potential retry
+                        ai_feedback = self.feedback_collector.generate_ai_feedback(failure_record)
+                        self.logger.info(f"🤖 AI Feedback:\n{ai_feedback}")
+                        
                         # Take screenshot on error
                         screenshot_path = None
                         screenshot_base64 = None
@@ -1027,17 +1050,17 @@ class TestRunner:
         """
         pid = os.getpid()
         
-        # Set the generating status in Redis
+        # Set the generating status in Redis with shorter TTL to prevent stale flags
         try:
             if self._redis:
                 # Clear any existing stop flag
                 self._redis.delete(f"test_case_stop_generating:{test_case_id}")
-                # Set generating flag
-                self._redis.set(f"test_case_generating:{test_case_id}", "1", ex=3600)  # Expire after 1 hour
+                # Set generating flag with 5-minute TTL to prevent stale generation flags
+                self._redis.set(f"test_case_generating:{test_case_id}", "1", ex=300)  # Expire after 5 minutes
                 # Initialize current and next step information
-                self._redis.set(f"test_case_current_step:{test_case_id}", "", ex=3600)
-                self._redis.set(f"test_case_next_step:{test_case_id}", "Starting...", ex=3600)
-                self.logger.info(f"[PID:{pid}] Set generation status in Redis for test case {test_case_id}")
+                self._redis.set(f"test_case_current_step:{test_case_id}", "", ex=300)
+                self._redis.set(f"test_case_next_step:{test_case_id}", "Starting...", ex=300)
+                self.logger.info(f"[PID:{pid}] Set generation status in Redis for test case {test_case_id} (TTL: 5 min)")
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to set generation status in Redis: {e}")
         
@@ -1111,6 +1134,11 @@ class TestRunner:
                         
                         retry_count = 0
                         while retry_count < max_retries:
+                            # Check for stop flag before attempting AI analysis
+                            if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                                self.logger.info(f"[PID:{pid}] Stop flag detected during retry loop, aborting generation")
+                                break
+                            
                             try:
                                 self.logger.info(f"[PID:{pid}] Processing step {screenshot_path}")
                                 self.logger.info(f"[PID:{pid}] Calling html_analyzer with step_order={step_order}, next_prompt={next_prompt}")
@@ -1124,6 +1152,12 @@ class TestRunner:
                                     prev_step_description=prev_step_description,
                                     screenshot_path=screenshot_path
                                 )
+                                
+                                # Check for stop flag after AI response
+                                if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                                    self.logger.info(f"[PID:{pid}] Stop flag detected after AI response, aborting generation")
+                                    break
+                                
                                 self.logger.info(f"[PID:{pid}] Analyzer response: {analyzer_response}")
                                 
                                 # Handle tuple unpacking with defaults
@@ -1155,6 +1189,11 @@ class TestRunner:
                                     retry_delay *= 2  # Exponential backoff
                                 else:
                                     raise
+                        
+                        # Check if stop was requested during retry loop
+                        if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                            self.logger.info(f"[PID:{pid}] Stop flag detected after retry loop, breaking main generation loop")
+                            break
                         
                         next_prompt = next_step
                         prev_step_description = element_purpose
@@ -1366,6 +1405,11 @@ class TestRunner:
                                         self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
                                         return
                         elif action and element_locator:
+                            # Check for stop flag before executing step
+                            if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                                self.logger.info(f"[PID:{pid}] Stop flag detected before step execution, aborting generation")
+                                break
+                            
                             self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
 
                             # Save the step to the database first - use original values with placeholders
@@ -1585,11 +1629,47 @@ class TestRunner:
                 # Update end time on successful completion using session connection
                 self._update_generation_end_time_with_session(session_cursor, session_conn, test_case_id)
                 self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
+                
+                # Clear the generation flag from Redis
+                try:
+                    if self._redis:
+                        self._redis.delete(f"test_case_generating:{test_case_id}")
+                        self._redis.delete(f"test_case_current_step:{test_case_id}")
+                        self._redis.delete(f"test_case_next_step:{test_case_id}")
+                        self.logger.info(f"[PID:{pid}] Cleared generation flags from Redis for test case {test_case_id}")
+                except Exception as redis_error:
+                    self.logger.error(f"[PID:{pid}] Failed to clear Redis flags: {redis_error}")
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
             # Update end time even on error using fallback method
             self._update_generation_end_time(test_case_id)
+            
+            # Mark any running test_run as stopped when generation fails
+            try:
+                with self.get_db_connection() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("""
+                            UPDATE test_runs 
+                            SET result = 'stopped'
+                            WHERE test_case_id = %s AND result = 'running'
+                        """, (test_case_id,))
+                        connection.commit()
+                        if cursor.rowcount > 0:
+                            self.logger.info(f"[PID:{pid}] Marked test_run as stopped due to generation error for test case {test_case_id}")
+            except Exception as db_error:
+                self.logger.error(f"[PID:{pid}] Failed to mark test_run as stopped: {db_error}")
+            
+            # Clear the generation flag from Redis on error too
+            try:
+                if self._redis:
+                    self._redis.delete(f"test_case_generating:{test_case_id}")
+                    self._redis.delete(f"test_case_current_step:{test_case_id}")
+                    self._redis.delete(f"test_case_next_step:{test_case_id}")
+                    self.logger.info(f"[PID:{pid}] Cleared generation flags from Redis after error for test case {test_case_id}")
+            except Exception as redis_error:
+                self.logger.error(f"[PID:{pid}] Failed to clear Redis flags on error: {redis_error}")
+            
             raise
 
     def _update_generation_end_time(self, test_case_id: int):
@@ -2194,12 +2274,27 @@ class TestRunner:
                 self._update_generation_end_time(test_case_id)
                 
                 self.logger.info(f"[PID:{pid}] Set stop flag in Redis for test case {test_case_id}")
-                
-                # Cleanup browser session immediately when generation is stopped
-                self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after stopping generation")
-                self._cleanup_browser()
-                
-                return True
+            
+            # Mark any running test_run as stopped in database
+            try:
+                with self.get_db_connection() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("""
+                            UPDATE test_runs 
+                            SET result = 'stopped'
+                            WHERE test_case_id = %s AND result = 'running'
+                        """, (test_case_id,))
+                        connection.commit()
+                        if cursor.rowcount > 0:
+                            self.logger.info(f"[PID:{pid}] Marked test_run as stopped for test case {test_case_id}")
+            except Exception as db_error:
+                self.logger.error(f"[PID:{pid}] Failed to mark test_run as stopped: {db_error}")
+            
+            # Cleanup browser session immediately when generation is stopped
+            self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after stopping generation")
+            self._cleanup_browser()
+            
+            return True
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to set stop flag in Redis: {e}")
         

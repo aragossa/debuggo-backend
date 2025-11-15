@@ -48,6 +48,7 @@ from auroqa.test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
+from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
 import signal
 import atexit
@@ -802,75 +803,13 @@ async def run_test_case(
 async def get_running_tests(current_user: User = Depends(get_current_user)):
     """
     Get all currently running test cases and executions for the user's client.
-    Returns active test runs and their current status.
+    Uses database as single source of truth for running tests.
     """
     with get_db_connection_context() as conn:
         cursor = conn.cursor()
-        
-        # Get running test cases from Redis and database
         running_tests = []
         
-        # Check Redis for active test case runs
-        from auroqa.Utils.System import System
-        system = System()
-        try:
-            r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
-            # Scan for running test case keys
-            for key in r.scan_iter(match=f"test_case_running:*"):
-                test_case_id = key.split(":")[-1]
-                # Verify test case belongs to user's client and get details
-                cursor.execute("""
-                    SELECT tc.id, tc.name, tc.description, tr.id as test_run_id, 
-                           tr.run_date, tr.execution_id, te.name as execution_name
-                    FROM test_cases tc
-                    LEFT JOIN test_runs tr ON tc.id = tr.test_case_id AND tr.result = 'running'
-                    LEFT JOIN test_executions te ON tr.execution_id = te.id
-                    WHERE tc.id = %s AND tc.client_id = %s
-                    ORDER BY tr.run_date DESC
-                    LIMIT 1
-                """, (test_case_id, str(current_user.client_id)))
-                
-                result = cursor.fetchone()
-                if result:
-                    running_tests.append({
-                        "test_case_id": result[0],
-                        "test_case_name": result[1],
-                        "test_case_description": result[2],
-                        "test_run_id": result[3],
-                        "started_at": result[4].isoformat() if result[4] else None,
-                        "execution_id": result[5],
-                        "execution_name": result[6],
-                        "status": "running"
-                    })
-            
-            # Scan for API test generation keys
-            for key in r.scan_iter(match=f"api_test_generating:*"):
-                test_case_id = key.split(":")[-1]
-                test_name = r.get(key)
-                # Verify test case belongs to user's client
-                cursor.execute("""
-                    SELECT tc.id, tc.name, tc.description
-                    FROM test_cases tc
-                    WHERE tc.id = %s AND tc.client_id = %s
-                """, (test_case_id, str(current_user.client_id)))
-                
-                result = cursor.fetchone()
-                if result:
-                    running_tests.append({
-                        "test_case_id": result[0],
-                        "test_case_name": result[1],
-                        "test_case_description": result[2],
-                        "test_run_id": None,
-                        "started_at": None,
-                        "execution_id": None,
-                        "execution_name": None,
-                        "status": "generating",
-                        "activity_type": "api_generation"
-                    })
-        except Exception as redis_error:
-            logger.error(f"Redis error in get_running_tests: {redis_error}")
-        
-        # Also check database for running test runs
+        # Get all running test runs from database (single source of truth)
         cursor.execute("""
             SELECT tr.id, tr.test_case_id, tc.name, tc.description, 
                    tr.run_date, tr.execution_id, te.name as execution_name
@@ -881,20 +820,17 @@ async def get_running_tests(current_user: User = Depends(get_current_user)):
             ORDER BY tr.run_date DESC
         """, (str(current_user.client_id),))
         
-        db_running = cursor.fetchall()
-        for row in db_running:
-            # Avoid duplicates from Redis check
-            if not any(t["test_run_id"] == row[0] for t in running_tests):
-                running_tests.append({
-                    "test_case_id": row[1],
-                    "test_case_name": row[2], 
-                    "test_case_description": row[3],
-                    "test_run_id": row[0],
-                    "started_at": row[4].isoformat() if row[4] else None,
-                    "execution_id": row[5],
-                    "execution_name": row[6],
-                    "status": "running"
-                })
+        for row in cursor.fetchall():
+            running_tests.append({
+                "test_case_id": row[1],
+                "test_case_name": row[2], 
+                "test_case_description": row[3],
+                "test_run_id": row[0],
+                "started_at": row[4].isoformat() if row[4] else None,
+                "execution_id": row[5],
+                "execution_name": row[6],
+                "status": "running"
+            })
         
         return {"running_tests": running_tests}
 
@@ -1364,13 +1300,14 @@ If no specific endpoint is mentioned, use standard REST patterns.
         producer.flush()
         producer.close()
         
-        # Mark test case as generating in Redis
+        # Mark test case as generating in Redis with shorter TTL to avoid stale flags
         from auroqa.Utils.System import System
         system = System()
         try:
             r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
-            r.setex(f"api_test_generating:{test_case_id}", 3600, test_name)  # Expire after 1 hour
-            logger.info(f"Marked test case {test_case_id} as generating in Redis")
+            # Use shorter TTL (5 minutes) to prevent stale generation flags
+            r.setex(f"api_test_generating:{test_case_id}", 300, test_name)  # Expire after 5 minutes
+            logger.info(f"Marked test case {test_case_id} as generating in Redis (TTL: 5 min)")
         except Exception as redis_error:
             logger.error(f"Redis error: {redis_error}")
         
@@ -3837,10 +3774,17 @@ async def get_test_step_screenshot(
             if not result:
                 logger.warning(f"No screenshot found for step {step_id} with client_id {current_user.client_id}")
                 # Return JSON response indicating no screenshot available
-                return JSONResponse(content={
-                    "screenshot_available": False,
-                    "message": "No screenshot found for this test step"
-                })
+                # Add cache headers to prevent repeated requests for missing screenshots
+                return JSONResponse(
+                    content={
+                        "screenshot_available": False,
+                        "message": "No screenshot found for this test step"
+                    },
+                    headers={
+                        "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
+                        "X-Screenshot-Available": "false"
+                    }
+                )
             
             # Check if this is from old system (screenshots table) or new system
             if len(result) == 2 and hasattr(result, '__getitem__'):
@@ -3916,8 +3860,9 @@ async def get_test_step_screenshot(
                     media_type="image/png",
                     headers={
                         "Content-Disposition": "inline; filename=screenshot.png",
-                        "Cache-Control": "no-cache",
-                        "Content-Length": str(len(screenshot_binary))
+                        "Cache-Control": "public, max-age=86400",  # Cache for 24 hours (screenshots don't change)
+                        "Content-Length": str(len(screenshot_binary)),
+                        "X-Screenshot-Available": "true"
                     }
                 )
             except Exception as decode_error:
@@ -4421,31 +4366,42 @@ async def stop_all_test_executions(current_user: User = Depends(get_current_user
             client_id=str(current_user.client_id)
         )
         
-        # Also clear all API test generation Redis flags for this client's test cases
-        from auroqa.Utils.System import System
-        system = System()
+        # Update database to mark any running test_runs as stopped (single source of truth)
         generation_stopped_count = 0
-        
         try:
-            r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
-            
-            # Get all test cases for this client
             with get_db_connection_context() as conn:
                 cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE test_runs 
+                    SET result = 'stopped'
+                    WHERE result = 'running' 
+                    AND test_case_id IN (
+                        SELECT id FROM test_cases WHERE client_id = %s
+                    )
+                """, (str(current_user.client_id),))
+                generation_stopped_count = cursor.rowcount
+                conn.commit()
+                logger.info(f"Updated database to mark {generation_stopped_count} running test_runs as stopped for client {current_user.client_id}")
+                
+                # Also clear Redis generation flags so running threads stop
+                from auroqa.Utils.System import System
+                system = System()
+                r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
+                
+                # Get all test cases for this client
                 cursor.execute("""
                     SELECT id FROM test_cases WHERE client_id = %s
                 """, (str(current_user.client_id),))
                 test_case_ids = [row[0] for row in cursor.fetchall()]
-            
-            # Clear Redis flags for each test case
-            for test_case_id in test_case_ids:
-                key = f"api_test_generating:{test_case_id}"
-                if r.delete(key):
-                    generation_stopped_count += 1
-                    logger.info(f"Cleared API generation flag for test case {test_case_id}")
+                
+                # Set stop flags for generation threads
+                for test_case_id in test_case_ids:
+                    stop_key = f"test_case_stop_generating:{test_case_id}"
+                    r.set(stop_key, "1", ex=300)
+                    logger.info(f"Set stop flag for generation of test case {test_case_id}")
                     
-        except Exception as redis_error:
-            logger.error(f"Redis error while clearing generation flags: {redis_error}")
+        except Exception as e:
+            logger.error(f"Error while stopping all tests: {e}")
         
         if result["status"] == "success":
             total_stopped = result["stopped_count"] + generation_stopped_count
@@ -5502,6 +5458,254 @@ async def get_pool_status_endpoint():
             status_code=500,
             detail=f"Failed to get pool status: {str(e)}"
         )
+
+# ==================== PHASE 1: MONITORING ENDPOINTS ====================
+
+def check_admin_access(current_user: User = Depends(get_current_user)) -> User:
+    """
+    Verify that the current user is an admin.
+    Only admin users can access monitoring endpoints.
+    """
+    if current_user.role != 'admin':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin users can access monitoring endpoints"
+        )
+    return current_user
+
+# Initialize monitoring service
+monitoring_service = AgentMonitoring()
+
+@app.get("/api/monitoring/health")
+async def get_health_status(admin_user: User = Depends(check_admin_access)):
+    """
+    Get health status of all Phase 1 services.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - overall_status: 'healthy', 'warning', or 'error'
+    - tables: Status of each database table
+    - recent_activity: Activity in the last hour
+    """
+    try:
+        health = monitoring_service.get_health_status()
+        return {
+            'status': 'success',
+            'data': health,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting health status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/metrics")
+async def get_all_metrics(
+    hours: int = Query(24, ge=1, le=720),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get all Phase 1 metrics combined.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    
+    Returns:
+    - validation: Validation metrics
+    - confidence: Confidence scoring metrics
+    - feedback: Execution feedback metrics
+    - retry: Retry attempt metrics
+    """
+    try:
+        metrics = monitoring_service.get_all_metrics(hours=hours)
+        return {
+            'status': 'success',
+            'data': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/validation")
+async def get_validation_metrics(
+    hours: int = Query(24, ge=1, le=720),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get validation metrics.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    
+    Returns:
+    - total_validations: Total number of validations
+    - valid_steps: Number of valid steps
+    - invalid_steps: Number of invalid steps
+    - success_rate: Percentage of valid steps
+    - avg_confidence: Average validation confidence
+    - error_distribution: Distribution of error types
+    """
+    try:
+        metrics = monitoring_service.get_validation_metrics(hours=hours)
+        return {
+            'status': 'success',
+            'data': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting validation metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/confidence")
+async def get_confidence_metrics(
+    hours: int = Query(24, ge=1, le=720),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get confidence scoring metrics.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    
+    Returns:
+    - total_scored: Total steps scored
+    - avg_confidence: Average confidence score
+    - low_risk_steps: Number of low risk steps
+    - medium_risk_steps: Number of medium risk steps
+    - high_risk_steps: Number of high risk steps
+    - factor_averages: Average scores for selector, action, data, pattern
+    """
+    try:
+        metrics = monitoring_service.get_confidence_metrics(hours=hours)
+        return {
+            'status': 'success',
+            'data': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting confidence metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/feedback")
+async def get_feedback_metrics(
+    hours: int = Query(24, ge=1, le=720),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get execution feedback metrics.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    
+    Returns:
+    - total_failures: Total number of failures
+    - unique_error_types: Number of unique error types
+    - error_categories: Distribution of error categories
+    - most_common_errors: Top 5 most common errors
+    """
+    try:
+        metrics = monitoring_service.get_feedback_metrics(hours=hours)
+        return {
+            'status': 'success',
+            'data': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting feedback metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/retry")
+async def get_retry_metrics(
+    hours: int = Query(24, ge=1, le=720),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get retry attempt metrics.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    
+    Returns:
+    - total_retry_attempts: Total retry attempts
+    - successful_retries: Number of successful retries
+    - failed_retries: Number of failed retries
+    - retry_success_rate: Percentage of successful retries
+    - avg_attempts_per_step: Average number of attempts
+    """
+    try:
+        metrics = monitoring_service.get_retry_metrics(hours=hours)
+        return {
+            'status': 'success',
+            'data': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting retry metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/alerts")
+async def get_alerts(admin_user: User = Depends(check_admin_access)):
+    """
+    Check for alert conditions based on metrics.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - alert_count: Number of active alerts
+    - alerts: List of alerts with severity and message
+    """
+    try:
+        alerts = monitoring_service.check_alerts()
+        return {
+            'status': 'success',
+            'data': alerts,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error checking alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/monitoring/trends")
+async def get_trends(
+    hours: int = Query(24, ge=1, le=720),
+    interval_minutes: int = Query(60, ge=5, le=1440),
+    admin_user: User = Depends(check_admin_access)
+):
+    """
+    Get metric trends over time.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - hours: Number of hours to look back (1-720, default 24)
+    - interval_minutes: Interval for data points (5-1440, default 60)
+    
+    Returns:
+    - validation_trend: Validation metrics over time
+    - confidence_trend: Confidence metrics over time
+    - failure_trend: Failure metrics over time
+    """
+    try:
+        trends = monitoring_service.get_trends(hours=hours, interval_minutes=interval_minutes)
+        return {
+            'status': 'success',
+            'data': trends,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting trends: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
