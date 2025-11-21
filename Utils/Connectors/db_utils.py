@@ -28,7 +28,7 @@ def init_db_pool():
     """Initialize the database connection pool."""
     global db_pool
     try:
-        # Increased pool size: 10-100 (was 5-50) to handle connection leaks while we fix them
+        # Pool size: 10-100 connections
         db_pool = psycopg2.pool.SimpleConnectionPool(
             10, 100,
             host=os.getenv("DB_HOST", "localhost"),

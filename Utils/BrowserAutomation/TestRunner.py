@@ -1156,6 +1156,28 @@ class TestRunner:
         """
         pid = os.getpid()
         
+        # Initialize ReasoningCollector
+        try:
+            from Services.ReasoningCollector import ReasoningCollector
+            from Utils.System import System
+            
+            system = System()
+            reasoning_collector = ReasoningCollector(
+                redis_host=system.redis_host,
+                redis_port=system.redis_port
+            )
+            reasoning_collector.start_generation(test_case_id, test_name, test_description)
+            reasoning_collector.set_test_split_strategy(
+                test_case_id,
+                total_steps=8,  # Will be updated as we generate
+                phases=["Analysis", "Interaction", "Validation", "Cleanup"],
+                strategy="Automated UI test generation with AI analysis"
+            )
+            self.logger.info(f"[PID:{pid}] Initialized ReasoningCollector for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to initialize ReasoningCollector: {e}")
+            reasoning_collector = None
+        
         # Set the generating status in Redis with shorter TTL to prevent stale flags
         try:
             if self._redis:
@@ -1237,6 +1259,19 @@ class TestRunner:
                             next_step = next_prompt if next_prompt != "Stop" else "Finalizing test generation"
                             self._redis.set(f"test_case_current_step:{test_case_id}", current_step, ex=3600)
                             self._redis.set(f"test_case_next_step:{test_case_id}", next_step, ex=3600)
+                        
+                        # Update ReasoningCollector with current step
+                        if reasoning_collector:
+                            try:
+                                reasoning_collector.set_current_step(
+                                    test_case_id,
+                                    step_number=step_order,
+                                    action="analyzing",
+                                    description=f"Analyzing page for step {step_order}",
+                                    reasoning="Waiting for AI analysis of current page state"
+                                )
+                            except Exception as e:
+                                self.logger.error(f"[PID:{pid}] Failed to update reasoning collector: {e}")
                         
                         retry_count = 0
                         while retry_count < max_retries:
@@ -1591,6 +1626,20 @@ class TestRunner:
                                     css_selector=css_selector
                                 )
                                 
+                                # Update ReasoningCollector with successful step
+                                if reasoning_collector:
+                                    try:
+                                        reasoning_collector.set_current_step(
+                                            test_case_id,
+                                            step_number=step_order,
+                                            action=action,
+                                            description=element_purpose,
+                                            reasoning=f"Successfully executed: {action} on target element",
+                                            element_info=original_element_locator
+                                        )
+                                    except Exception as e:
+                                        self.logger.error(f"[PID:{pid}] Failed to update reasoning with successful step: {e}")
+                                
                                 # Skip if this was a duplicate step
                                 if step_id == -1:
                                     self.logger.info(f"[PID:{pid}] Duplicate step detected, skipping database save")
@@ -1822,6 +1871,13 @@ class TestRunner:
                 # Update end time on successful completion using session connection
                 self._update_generation_end_time_with_session(session_cursor, session_conn, test_case_id)
                 self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
+                
+                # Complete reasoning collection
+                if reasoning_collector:
+                    try:
+                        reasoning_collector.complete_generation(test_case_id, step_order - 1)
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to complete reasoning collection: {e}")
                 
                 # Mark test_run as completed after successful generation
                 try:

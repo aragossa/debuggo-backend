@@ -3835,7 +3835,6 @@ async def get_test_step_screenshot(
                         "message": "No screenshot found for this test step"
                     },
                     headers={
-                        "Cache-Control": "public, max-age=3600",  # Cache for 1 hour
                         "X-Screenshot-Available": "false"
                     }
                 )
@@ -3914,7 +3913,6 @@ async def get_test_step_screenshot(
                     media_type="image/png",
                     headers={
                         "Content-Disposition": "inline; filename=screenshot.png",
-                        "Cache-Control": "public, max-age=86400",  # Cache for 24 hours (screenshots don't change)
                         "Content-Length": str(len(screenshot_binary)),
                         "X-Screenshot-Available": "true"
                     }
@@ -4296,6 +4294,53 @@ async def test_case_generation_status(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to check test case generation status: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+@app.get("/api/test-cases/{id}/reasoning")
+async def get_test_case_reasoning(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get AI reasoning and planning data for a test case during generation.
+    Returns thoughts, test split strategy, phases, current step, timeline, and statistics.
+    """
+    conn = None
+    try:
+        from Services.ReasoningCollector import ReasoningCollector
+        
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify the test case exists and belongs to the user's client
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Get reasoning data from ReasoningCollector
+        system = System()
+        collector = ReasoningCollector(
+            redis_host=system.redis_host,
+            redis_port=system.redis_port
+        )
+        
+        reasoning_data = collector.get_reasoning_data(id)
+        
+        return reasoning_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving reasoning data: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve reasoning data: {str(e)}"
         )
     finally:
         if conn:
