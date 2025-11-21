@@ -1158,8 +1158,8 @@ class TestRunner:
         
         # Initialize ReasoningCollector
         try:
-            from Services.ReasoningCollector import ReasoningCollector
-            from Utils.System import System
+            from auroqa.Services.ReasoningCollector import ReasoningCollector
+            from auroqa.Utils.System import System
             
             system = System()
             reasoning_collector = ReasoningCollector(

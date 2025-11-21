@@ -4310,7 +4310,7 @@ async def get_test_case_reasoning(
     """
     conn = None
     try:
-        from Services.ReasoningCollector import ReasoningCollector
+        from auroqa.Services.ReasoningCollector import ReasoningCollector
         
         conn = get_db_connection()
         with conn.cursor() as cursor:
