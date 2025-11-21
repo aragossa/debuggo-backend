@@ -1148,6 +1148,81 @@ class TestRunner:
                 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Database connection error during test generation: {e}")
+    
+    def _estimate_steps_with_ai(self, test_description, html_analyzer):
+        """
+        Use AI to estimate the number of test steps needed for the test case.
+        
+        Args:
+            test_description: The test case description
+            html_analyzer: HtmlAnalyzer instance (used to access AI provider)
+            
+        Returns:
+            Estimated number of steps (between 3 and 30)
+        """
+        try:
+            from auroqa.Utils.AIHelper.AIHelper import AIHelper
+            import re
+            
+            prompt = f"""Analyze this test case description and estimate how many test steps will be needed to complete it.
+Consider each distinct action or verification as a separate step.
+
+Test Case: {test_description}
+
+Respond with ONLY a single number between 3 and 30, nothing else."""
+            
+            ai_helper = AIHelper()
+            
+            # For step estimation, use the fast Gemini Flash model
+            # Temporarily override the provider to use flash model
+            original_provider = ai_helper.provider
+            try:
+                # Use Gemini Flash Lite for fast estimation
+                if ai_helper.provider == 'gemini':
+                    # Directly call Gemini with the flash model
+                    import google.generativeai as genai
+                    genai.configure(api_key=ai_helper.gemini_api_key)
+                    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                    gemini_response = model.generate_content(prompt)
+                    response = gemini_response.text if gemini_response else None
+                elif ai_helper.provider == 'claude':
+                    response = ai_helper.send_message_to_claude(prompt)
+                elif ai_helper.provider == 'deepseek':
+                    response = ai_helper.send_request_to_deepseek(prompt)
+                else:
+                    # Default to Gemini Flash
+                    import google.generativeai as genai
+                    genai.configure(api_key=ai_helper.gemini_api_key)
+                    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                    gemini_response = model.generate_content(prompt)
+                    response = gemini_response.text if gemini_response else None
+            finally:
+                ai_helper.provider = original_provider
+            
+            # Extract the number from response
+            if response:
+                # Handle both string and int responses
+                if isinstance(response, int):
+                    estimated = response
+                elif isinstance(response, str):
+                    # Try to find a number in the response
+                    numbers = re.findall(r'\d+', response.strip())
+                    if numbers:
+                        estimated = int(numbers[0])
+                    else:
+                        return 5  # Fallback if no number found
+                else:
+                    return 5  # Fallback for unexpected types
+                
+                # Ensure it's within bounds
+                estimated = max(3, min(30, estimated))
+                self.logger.info(f"AI estimated {estimated} steps for test case")
+                return estimated
+        except Exception as e:
+            self.logger.warning(f"Failed to estimate steps with AI: {e}")
+        
+        # Fallback to reasonable default if AI estimation fails
+        return 5
             
     def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
                                                    test_name, test_description, environment_vars, model_id):
@@ -1167,12 +1242,6 @@ class TestRunner:
                 redis_port=system.redis_port
             )
             reasoning_collector.start_generation(test_case_id, test_name, test_description)
-            reasoning_collector.set_test_split_strategy(
-                test_case_id,
-                total_steps=8,  # Will be updated as we generate
-                phases=["Analysis", "Interaction", "Validation", "Cleanup"],
-                strategy="Automated UI test generation with AI analysis"
-            )
             self.logger.info(f"[PID:{pid}] Initialized ReasoningCollector for test case {test_case_id}")
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to initialize ReasoningCollector: {e}")
@@ -1217,6 +1286,20 @@ class TestRunner:
                     self.logger.info(f"[PID:{pid}] Initialized HTML analyzer")
                 
                 html_analyzer = self.html_analyzer
+                
+                # Estimate total steps using AI
+                estimated_steps = self._estimate_steps_with_ai(test_description, html_analyzer)
+                if reasoning_collector:
+                    try:
+                        reasoning_collector.set_test_split_strategy(
+                            test_case_id,
+                            total_steps=estimated_steps,
+                            phases=["Analysis", "Interaction", "Validation", "Cleanup"],
+                            strategy="Automated UI test generation with AI analysis"
+                        )
+                        self.logger.info(f"[PID:{pid}] AI estimated {estimated_steps} steps for test case {test_case_id}")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to set test split strategy: {e}")
                 
                 # Navigate to the base URL
                 base_url = env.get_base_url()
