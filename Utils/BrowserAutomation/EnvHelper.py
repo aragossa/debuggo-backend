@@ -147,11 +147,15 @@ class EnvHelper:
         First use generates value, subsequent uses retrieve from cache.
         
         Args:
-            text (str): The text containing environment variable placeholders
+            text: Text containing %variable% placeholders (must be string or None)
             
         Returns:
             str: The text with environment variables replaced with their values
         """
+        # Handle non-string values (dict, list, etc.) - return as-is
+        if not isinstance(text, str):
+            return text
+        
         if not text:
             return text
         

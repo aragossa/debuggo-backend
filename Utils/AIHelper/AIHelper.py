@@ -282,7 +282,7 @@ class AIHelper:
         prompt = f"""Act as an experienced QA engineer, you are creating a test case: "{test_name}".
 
 This is the suggested test description, some steps might be missing, if you see that executing this step will not help you to complete the test, suggest next step:
-{test_description}
+{test_description}; end of the test.
 
 You should recursively go through all test steps and on each step you should assume next step until the test will be finished.
 If current step will be final step, put to the next_step attribute the word 'Stop'.
@@ -291,6 +291,23 @@ You are on the test step # {step_order}{prev_step_prompt}{skip_start_navigate}
         
         # Add the rest of the prompt as a regular string (no format substitution)
         prompt += """
+
+CRITICAL - TEST COMPLETION RULE:
+When the test is complete and no more steps are needed:
+- Set "next_step": "Stop" (EXACTLY this word, nothing else)
+- Do NOT add any explanation or description after "Stop"
+- ONLY use "Stop" as the value
+- The system uses this exact value to determine when to stop generating steps
+
+IMPORTANT - When to use "Stop":
+- Use "Stop" ONLY when the main test objective has been achieved and verified
+- Do NOT use "Stop" for verification steps that are part of the test flow (e.g., "Wait for the dashboard page to load and verify a key element is visible" is a REQUIRED step, not a completion indicator)
+- Do NOT use "Stop" just because you could describe optional future actions
+- Use "Stop" only when there are genuinely no more steps needed to complete the test objective
+
+Examples:
+- ✅ CORRECT: "Stop" (when login is verified and dashboard is confirmed)
+- ❌ WRONG: "Wait for dashboard to load and verify navigation menu is visible" (this is a required verification step, not completion)
 
 🔴 CRITICAL - PLACEHOLDER SYNTAX RULE:
 ALL placeholders MUST be wrapped with % on BOTH sides: %placeholder_name%
@@ -383,13 +400,26 @@ When performing assertions, consider the following validation patterns:
 - Confirm correct values in input fields, dropdowns, or other form elements
 - Verify selected state of checkboxes and radio buttons
 
+🔴 CRITICAL - ACTION VALIDATION:
+You MUST ONLY use these valid actions. NO OTHER ACTIONS ARE ALLOWED:
+- UI Actions: click, type, select, hover, wait, scroll, clear, navigate, press_key, use_component
+- Assertion Actions: assert, assert_text_contains
+- Wait Actions: wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable
+- API Actions: api_request, api_auth, api_get, api_post, api_put, api_delete, api_patch, response_validation, validation
+
+❌ DO NOT use these invalid actions:
+- assert_element_is_visible (WRONG - use wait_for_element_to_be_visible instead)
+- assert_element_visible (WRONG - use wait_for_element_visible instead)
+- verify_element (WRONG - use assert or assert_text_contains)
+- check_element (WRONG - use assert or assert_text_contains)
+- Any other action not in the valid list above
 
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
     "element_locator": "XPath selector to locate the element (PRIMARY locator)",
     "css_selector": "CSS selector to locate the same element (FALLBACK locator)",
     "by_strategy": "xpath",
-    "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key",
+    "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST use placeholders like %login%, %random_email%, %unique_name:Prefix% (ALWAYS with % on BOTH sides)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"

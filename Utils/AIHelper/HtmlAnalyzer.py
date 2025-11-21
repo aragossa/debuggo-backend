@@ -10,6 +10,14 @@ from auroqa.Utils.System import System
 from contextlib import contextmanager
 import logging
 
+# Phase 2.5: Few-shot learning imports
+try:
+    from auroqa.Services.SimilaritySearch import SimilaritySearch
+    from auroqa.Services.EmbeddingGenerator import EmbeddingGenerator
+    PHASE_2_5_AVAILABLE = True
+except ImportError:
+    PHASE_2_5_AVAILABLE = False
+
 class HtmlAnalyzer(AIHelper):
     _instance = None
     _lock = threading.Lock()
@@ -26,6 +34,21 @@ class HtmlAnalyzer(AIHelper):
             super().__init__()
             self.system = System()
             self.logger = self._setup_logger()
+            
+            # Phase 2.5: Initialize few-shot learning services
+            self.use_few_shot = True
+            if PHASE_2_5_AVAILABLE:
+                try:
+                    self.similarity_search = SimilaritySearch()
+                    self.embedding_generator = EmbeddingGenerator()
+                    self.logger.info("Few-shot learning enabled (Phase 2.5)")
+                except Exception as e:
+                    self.logger.warning(f"Few-shot learning disabled: {str(e)}")
+                    self.use_few_shot = False
+            else:
+                self.logger.info("Phase 2.5 services not available")
+                self.use_few_shot = False
+            
             self._initialized = True
 
     @contextmanager
@@ -111,6 +134,336 @@ class HtmlAnalyzer(AIHelper):
         """Clear the step history for a test case."""
         if test_case_id in self._step_history:
             del self._step_history[test_case_id]
+    
+    def _build_few_shot_prompt(self, test_description: str, similar_tests: list) -> str:
+        """
+        Build a few-shot prompt with examples from similar successful tests.
+        
+        Args:
+            test_description: Description of the test to generate
+            similar_tests: List of similar successful tests
+        
+        Returns:
+            Few-shot prompt with examples
+        """
+        prompt = f"""
+You are an expert test automation engineer. Use the following successful examples 
+to generate similar high-quality test steps.
+
+TEST DESCRIPTION: {test_description}
+
+SUCCESSFUL EXAMPLES:
+"""
+        
+        for i, test in enumerate(similar_tests, 1):
+            prompt += f"\n{i}. Test: {test.get('test_name', 'Unknown')}\n"
+            prompt += f"   Description: {test.get('description', 'N/A')}\n"
+            prompt += f"   Similarity: {test.get('similarity_score', 0):.2f}\n"
+            if 'action' in test:
+                prompt += f"   Action: {test.get('action')}\n"
+            if 'element_purpose' in test:
+                prompt += f"   Purpose: {test.get('element_purpose')}\n"
+        
+        prompt += """
+
+TASK: Generate the next test step following the patterns from successful examples.
+
+AVAILABLE VARIABLES FOR VALUES:
+
+A. ENVIRONMENT VARIABLES:
+   - %base_url% - API base URL
+   - %login% - Username/email from environment
+   - %password% - Password from environment
+
+B. UNIQUE IDENTIFIERS (cached per test run):
+   - %unique_name% - Random unique ID (e.g., "a7b3c9d2")
+   - %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+   - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+
+C. REALISTIC PERSONAL DATA (cached per test run):
+   - %random_name% - Full name (e.g., "John Smith")
+   - %random_first_name% - First name (e.g., "John")
+   - %random_last_name% - Last name (e.g., "Smith")
+   - %random_email% - Email (e.g., "john.smith@example.com")
+   - %random_username% - Username (e.g., "john_smith_123")
+   - %random_phone% - Phone number (e.g., "+1-555-234-5678")
+
+D. REALISTIC LOCATION DATA (cached per test run):
+   - %random_address% - Street address
+   - %random_city% - City name
+   - %random_country% - Country name
+
+E. REALISTIC BUSINESS DATA (cached per test run):
+   - %random_company% - Company name (e.g., "Acme Corporation")
+   - %random_job_title% - Job title (e.g., "Software Engineer")
+
+F. TECHNICAL DATA (cached per test run):
+   - %random_string% - Alphanumeric string (10 chars)
+   - %random_number% - Number (1-10000)
+   - %random_url% - URL
+   - %random_uuid% - Full UUID
+   - %random_date% - Date (YYYY-MM-DD)
+   - %random_boolean% - true/false
+
+⚠️ CRITICAL - ENVIRONMENT VARIABLES vs GENERATED VARIABLES:
+
+ENVIRONMENT VARIABLES (%password%, %login%) are ONLY for:
+- Logging in with EXISTING test account credentials from environment
+- NOT for newly created items in the test
+
+GENERATED VARIABLES (%random_email%, %var:name%) are for:
+- Newly created users/items in the test
+- Data that needs to be reused later in the same test
+
+COMMON MISTAKE - DO NOT DO THIS:
+❌ WRONG: Step 5 creates new user with password → value="%password%" (environment password)
+❌ WRONG: Step 6 confirms password → value="%password%" (same environment password)
+❌ WRONG: Step 10 logs in as new user → value="%password%" (FAILS - doesn't match what was entered!)
+
+CORRECT APPROACH:
+✅ CORRECT: Step 5 creates new user with password → value="%var:new_user_password%" (generates and caches)
+✅ CORRECT: Step 6 confirms password → value="%var:new_user_password%" (reuses same password)
+✅ CORRECT: Step 10 logs in as new user → value="%var:new_user_password%" (reuses same password - WORKS!)
+
+CRITICAL - VALUE FIELD REQUIREMENTS:
+- ✅ CORRECT: "value": "%password%" (ONLY for logging in with existing account)
+- ✅ CORRECT: "value": "%var:new_user_password%" (for newly created user passwords)
+- ✅ CORRECT: "value": "%login%" (ONLY for logging in with existing account)
+- ✅ CORRECT: "value": "%random_email%" (for random email - STRING)
+- ✅ CORRECT: "value": "%unique_name%" (for unique names - STRING)
+- ✅ CORRECT: "value": null (for click/wait actions with no input - NULL)
+- ❌ WRONG: "value": {{"%password%"}} (object/dict - must be string)
+- ❌ WRONG: "value": {{"condition": "element_is_visible"}} (object/dict - must be string)
+- ❌ WRONG: "value": "{{user_password}}" (incorrect syntax)
+
+IMPORTANT: The "value" field MUST be either:
+1. A string with %placeholder% format (e.g., "%password%")
+2. null (for actions that don't require input like click, wait, assert)
+3. NEVER a JSON object or dictionary
+
+SUPPORTED ACTIONS:
+- "click" - Click an element
+- "type" - Type text into an element
+- "wait" - Wait for element to appear
+- "wait_for_clickable" - Wait for element to be clickable
+- "wait_for_element_visible" - Wait for element to be visible
+- "press_key" - Press a keyboard key
+- "select" - Select from dropdown
+- "hover" - Hover over element
+- "clear" - Clear element content
+- "assert" - Assert element exists
+- "assert_text" - Assert element has EXACT text match (use this for final verification)
+- "assert_text_contains" - Assert element text contains substring
+- "navigate" - Navigate to URL
+- "stop_test" - Stop test execution (use when test is completed successfully)
+
+CRITICAL - WHEN TO USE STOP_TEST:
+✅ Use "stop_test" when:
+  - Test has completed all steps successfully
+  - Final assertion passed
+  - No more steps needed
+  - Test objective is achieved
+
+Return a JSON object with:
+- action: One of the supported actions above
+- element_locator: XPath selector (or "N/A" for navigate/stop_test)
+- css_selector: CSS selector (optional fallback)
+- by_strategy: "xpath" or "css"
+- element_purpose: What this step does
+- value: Value to enter using %placeholder% format (if applicable, null for click/wait/assert/stop_test)
+- next_step: Description of the next step to perform
+"""
+        
+        return prompt
+    
+    def _get_standard_prompt(self, test_description: str) -> str:
+        """Get standard prompt when no similar tests found."""
+        return f"""
+You are an expert test automation engineer.
+
+TEST DESCRIPTION: {test_description}
+
+Generate a high-quality test step that:
+1. Uses specific, reliable XPath selectors
+2. Includes proper waits and error handling
+3. Follows best practices from successful tests
+4. Handles edge cases and dynamic content
+
+AVAILABLE VARIABLES FOR VALUES:
+
+A. ENVIRONMENT VARIABLES:
+   - %base_url% - API base URL
+   - %login% - Username/email from environment
+   - %password% - Password from environment
+
+B. UNIQUE IDENTIFIERS (cached per test run):
+   - %unique_name% - Random unique ID (e.g., "a7b3c9d2")
+   - %unique_name:Client% - With prefix (e.g., "Client_a7b3c9d2")
+   - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
+
+C. REALISTIC PERSONAL DATA (cached per test run):
+   - %random_name% - Full name (e.g., "John Smith")
+   - %random_first_name% - First name (e.g., "John")
+   - %random_last_name% - Last name (e.g., "Smith")
+   - %random_email% - Email (e.g., "john.smith@example.com")
+   - %random_username% - Username (e.g., "john_smith_123")
+   - %random_phone% - Phone number (e.g., "+1-555-234-5678")
+
+D. REALISTIC LOCATION DATA (cached per test run):
+   - %random_address% - Street address
+   - %random_city% - City name
+   - %random_country% - Country name
+
+E. REALISTIC BUSINESS DATA (cached per test run):
+   - %random_company% - Company name (e.g., "Acme Corporation")
+   - %random_job_title% - Job title (e.g., "Software Engineer")
+
+F. TECHNICAL DATA (cached per test run):
+   - %random_string% - Alphanumeric string (10 chars)
+   - %random_number% - Number (1-10000)
+   - %random_url% - URL
+   - %random_uuid% - Full UUID
+   - %random_date% - Date (YYYY-MM-DD)
+   - %random_boolean% - true/false
+
+⚠️ CRITICAL - ENVIRONMENT VARIABLES vs GENERATED VARIABLES:
+
+ENVIRONMENT VARIABLES (%password%, %login%) are ONLY for:
+- Logging in with EXISTING test account credentials from environment
+- NOT for newly created items in the test
+
+GENERATED VARIABLES (%random_email%, %var:name%) are for:
+- Newly created users/items in the test
+- Data that needs to be reused later in the same test
+
+COMMON MISTAKE - DO NOT DO THIS:
+❌ WRONG: Step 5 creates new user with password → value="%password%" (environment password)
+❌ WRONG: Step 6 confirms password → value="%password%" (same environment password)
+❌ WRONG: Step 10 logs in as new user → value="%password%" (FAILS - doesn't match what was entered!)
+
+CORRECT APPROACH:
+✅ CORRECT: Step 5 creates new user with password → value="%var:new_user_password%" (generates and caches)
+✅ CORRECT: Step 6 confirms password → value="%var:new_user_password%" (reuses same password)
+✅ CORRECT: Step 10 logs in as new user → value="%var:new_user_password%" (reuses same password - WORKS!)
+
+CRITICAL - VALUE FIELD REQUIREMENTS:
+- ✅ CORRECT: "value": "%password%" (ONLY for logging in with existing account)
+- ✅ CORRECT: "value": "%var:new_user_password%" (for newly created user passwords)
+- ✅ CORRECT: "value": "%login%" (ONLY for logging in with existing account)
+- ✅ CORRECT: "value": "%random_email%" (for random email - STRING)
+- ✅ CORRECT: "value": "%unique_name%" (for unique names - STRING)
+- ✅ CORRECT: "value": null (for click/wait actions with no input - NULL)
+- ❌ WRONG: "value": {{"%password%"}} (object/dict - must be string)
+- ❌ WRONG: "value": {{"condition": "element_is_visible"}} (object/dict - must be string)
+- ❌ WRONG: "value": "{{user_password}}" (incorrect syntax)
+
+IMPORTANT: The "value" field MUST be either:
+1. A string with %placeholder% format (e.g., "%password%")
+2. null (for actions that don't require input like click, wait, assert)
+3. NEVER a JSON object or dictionary
+
+SUPPORTED ACTIONS:
+- "click" - Click an element
+- "type" - Type text into an element
+- "wait" - Wait for element to appear
+- "wait_for_clickable" - Wait for element to be clickable
+- "wait_for_element_visible" - Wait for element to be visible
+- "press_key" - Press a keyboard key
+- "select" - Select from dropdown
+- "hover" - Hover over element
+- "clear" - Clear element content
+- "assert" - Assert element exists
+- "assert_text" - Assert element has EXACT text match (use this for final verification)
+- "assert_text_contains" - Assert element text contains substring
+- "navigate" - Navigate to URL
+- "stop_test" - Stop test execution (use when test is completed successfully)
+
+CRITICAL - WHEN TO USE STOP_TEST:
+✅ Use "stop_test" when:
+  - Test has completed all steps successfully
+  - Final assertion passed
+  - No more steps needed
+  - Test objective is achieved
+
+Return a JSON object with:
+- action: One of the supported actions above
+- element_locator: XPath selector (or "N/A" for navigate/stop_test)
+- css_selector: CSS selector (optional fallback)
+- by_strategy: "xpath" or "css"
+- element_purpose: What this step does
+- value: Value to enter using %placeholder% format (if applicable, null for click/wait/assert/stop_test)
+- next_step: Description of the next step to perform
+"""
+    
+    def _find_similar_tests(self, test_case_id: int, test_description: str, top_k: int = 3) -> list:
+        """
+        Find similar successful tests using Phase 2.5 learning system.
+        
+        Args:
+            test_case_id: ID of the test case
+            test_description: Description of the test
+            top_k: Number of similar tests to return
+        
+        Returns:
+            List of similar tests with similarity scores
+        """
+        if not self.use_few_shot or not PHASE_2_5_AVAILABLE:
+            return []
+        
+        try:
+            self.logger.info(f"Finding similar tests for test case {test_case_id}")
+            similar_tests = self.similarity_search.find_similar_tests(
+                test_case_id=test_case_id,
+                top_k=top_k
+            )
+            
+            if similar_tests:
+                self.logger.info(f"Found {len(similar_tests)} similar tests")
+                return similar_tests
+            else:
+                self.logger.info("No similar tests found")
+                return []
+        
+        except Exception as e:
+            self.logger.warning(f"Failed to find similar tests: {str(e)}")
+            return []
+    
+    def _record_pattern_usage(self, test_case_id: int, step: dict) -> None:
+        """
+        Record pattern usage for learning system.
+        
+        Args:
+            test_case_id: ID of test case
+            step: Generated step
+        """
+        if not self.use_few_shot or not PHASE_2_5_AVAILABLE:
+            return
+        
+        try:
+            from auroqa.Services.VectorStore import VectorStore
+            
+            # Extract pattern from step
+            pattern_type = 'selector' if 'element_locator' in step else 'api_flow'
+            pattern_data = {
+                'action': step.get('action'),
+                'locator': step.get('element_locator'),
+                'value': step.get('value'),
+                'purpose': step.get('element_purpose')
+            }
+            
+            # Record usage in vector store
+            vector_store = VectorStore()
+            vector_store.record_pattern_usage(
+                pattern_type=pattern_type,
+                pattern_data=pattern_data,
+                test_case_id=test_case_id,
+                success=True
+            )
+            
+            self.logger.debug(f"Recorded pattern usage for test {test_case_id}")
+        
+        except Exception as e:
+            self.logger.debug(f"Pattern usage recording skipped: {str(e)}")
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
                       next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str, str]:
@@ -120,16 +473,37 @@ class HtmlAnalyzer(AIHelper):
         variable_registry = self.get_variable_registry(test_case_id)
         self.logger.info(f"Variable registry for test case {test_case_id}: {len(variable_registry)} variables tracked")
         
-        prompt = self.get_analyze_html_prompt(
-            html_code=html_code,
-            test_name=test_name,
-            test_description=test_description,
-            step_order=step_order,
-            next_prompt=next_prompt,
-            prev_step_description=prev_step_description,
-            attached_screenshot=screenshot_path,
-            variable_registry=variable_registry
-        )
+        # Phase 2.5: Try to find similar tests for few-shot learning
+        similar_tests = self._find_similar_tests(test_case_id, test_description, top_k=3)
+        
+        # Build prompt with few-shot examples if available
+        if similar_tests and self.use_few_shot:
+            self.logger.info(f"Building few-shot prompt with {len(similar_tests)} examples")
+            prompt = self._build_few_shot_prompt(
+                test_description=test_description,
+                similar_tests=similar_tests
+            )
+        else:
+            self.logger.info("Using standard prompt (no similar tests found)")
+            prompt = self._get_standard_prompt(test_description)
+        
+        # Append variable registry information to prompt
+        if variable_registry:
+            prompt += f"\n\nPREVIOUSLY USED VARIABLES:\n"
+            for var_name, var_info in variable_registry.items():
+                prompt += f"- {var_name}: Used {var_info['usage_count']} times, Purpose: {var_info['purpose']}\n"
+        
+        # Append FULL HTML code (critical for XPath generation)
+        # Include full HTML, not truncated - Gemini needs complete DOM structure to generate accurate selectors
+        prompt += f"""
+
+CURRENT PAGE HTML (FULL):
+{html_code}
+
+CURRENT STEP: {step_order}
+NEXT ACTION: {next_prompt}
+PREVIOUS STEP: {prev_step_description}
+"""
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
         if screenshot_path:
@@ -175,6 +549,9 @@ class HtmlAnalyzer(AIHelper):
             }
 
             self.add_step_to_history(test_case_id, step_data)
+            
+            # Phase 2.5: Record pattern usage for learning system
+            self._record_pattern_usage(test_case_id, step_data)
 
             # Return tuple in the expected order (now includes css_selector)
             return (

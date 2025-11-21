@@ -301,24 +301,77 @@ class TestRunner:
         try:
             with self.get_db_connection() as connection:
                 with connection.cursor() as cursor:
-                    # Map AI-generated specific actions to database-valid actions
+                    # Map AI-generated specific actions to supported actions
                     action_mapping = {
-                        'assert_text_equals': 'assert',
-                        'assert_element_visible': 'assert',
-                        'assert_element_present': 'assert',
+                        # Assertion actions -> wait_for_element_to_be_visible (more reliable)
+                        'assert_element_is_visible': 'wait_for_element_to_be_visible',
+                        'assert_element_visible': 'wait_for_element_to_be_visible',
+                        'assert_element_present': 'wait_for_element_to_be_visible',
                         'assert_element_not_present': 'assert',
+                        'assert_text_equals': 'assert_text_contains',
                         'assert_url_contains': 'assert',
                         'assert_title_contains': 'assert',
-                        'verify_text': 'assert',
-                        'verify_element': 'assert',
-                        'check_text': 'assert',
-                        'check_element': 'assert'
+                        'verify_text': 'assert_text_contains',
+                        'verify_element': 'wait_for_element_to_be_visible',
+                        'check_text': 'assert_text_contains',
+                        'check_element': 'wait_for_element_to_be_visible'
                     }
                     
                     # Convert action if it's a specific assertion type
                     mapped_action = action_mapping.get(action, action)
                     
                     self.logger.info(f"Saving step with action: {action} -> {mapped_action}")
+                    
+                    # Check for duplicate steps (deduplication)
+                    # Get the last 3 steps to check for duplicates
+                    cursor.execute("""
+                        SELECT action, element_path, description FROM test_steps 
+                        WHERE test_case_id = %s 
+                        ORDER BY step_order DESC 
+                        LIMIT 3
+                    """, (test_case_id,))
+                    recent_steps = cursor.fetchall()
+                    
+                    if recent_steps:
+                        # Helper function to extract key identifiers from locator
+                        def extract_locator_keys(locator):
+                            """Extract key identifiers from XPath/CSS locator"""
+                            if not locator:
+                                return set()
+                            # Extract IDs, classes, and text patterns
+                            import re
+                            keys = set()
+                            # Extract @id values
+                            id_matches = re.findall(r"@id='([^']+)'", locator)
+                            keys.update(id_matches)
+                            # Extract text patterns
+                            text_matches = re.findall(r"\[contains\(.*?'([^']+)'\)", locator)
+                            keys.update(text_matches)
+                            # Extract element tags
+                            tag_matches = re.findall(r"//(\w+)\[", locator)
+                            keys.update(tag_matches)
+                            return keys
+                        
+                        current_keys = extract_locator_keys(element_locator)
+                        
+                        # Check against recent steps
+                        for recent_action, recent_locator, recent_desc in recent_steps:
+                            recent_keys = extract_locator_keys(recent_locator)
+                            
+                            # Consider it a duplicate if:
+                            # 1. Targeting the same element (same keys)
+                            # 2. Same or similar action type (wait, assert, verify)
+                            if (current_keys and recent_keys and current_keys == recent_keys):
+                                # Check if actions are similar (both verification-type actions)
+                                verification_actions = {'wait', 'assert', 'wait_for_element_to_be_visible', 
+                                                       'assert_element_is_visible', 'assert_text_contains'}
+                                if (mapped_action in verification_actions and 
+                                    recent_action in verification_actions):
+                                    self.logger.warning(
+                                        f"Skipping duplicate verification step: {mapped_action} on {element_locator} "
+                                        f"(previous: {recent_action})"
+                                    )
+                                    return -1  # Return -1 to indicate skipped duplicate
                     
                     insert_query = """
                         INSERT INTO public.test_steps (
@@ -339,6 +392,16 @@ class TestRunner:
                     """
 
                     current_timestamp = datetime.now()
+                    
+                    # Convert value to string if it's a dict or other non-string type
+                    # This handles cases where Gemini returns complex objects like {"condition": "element_is_visible", "timeout": 10}
+                    if isinstance(value, dict):
+                        import json
+                        value_str = json.dumps(value)
+                    elif value is None:
+                        value_str = None
+                    else:
+                        value_str = str(value)
 
                     cursor.execute(
                         insert_query,
@@ -349,7 +412,7 @@ class TestRunner:
                             mapped_action,
                             element_locator,
                             css_selector,
-                            value,
+                            value_str,
                             by_strategy,
                             current_timestamp,
                             current_timestamp,
@@ -489,6 +552,10 @@ class TestRunner:
                 self.browser.wait_for_element(element_path, by_strategy)
             elif action == "wait_for_clickable":
                 self.browser.wait_for_clickable(element_path, by_strategy)
+            elif action == "wait_for_element_to_be_visible":
+                self.browser.wait_for_element_to_be_visible(element_path, by_strategy)
+            elif action == "wait_for_element_visible":
+                self.browser.wait_for_element_visible(element_path, by_strategy)
             elif action == "wait_for_modal":
                 # Wait for modal to appear, optionally with custom selector
                 modal_selector = element_path if element_path else '//div[contains(@class, "modal")]'
@@ -497,6 +564,9 @@ class TestRunner:
                 self.browser.press_key(element_path, value, by_strategy)
             elif action == "assert":
                 self.browser.assert_element(element_path, value, by_strategy)
+            elif action == "assert_text":
+                # Exact text match assertion
+                self.browser.assert_text(element_path, value, by_strategy)
             elif action == "assert_text_contains":
                 self.browser.assert_text_contains(element_path, value, by_strategy)
             elif action == "hover":
@@ -505,6 +575,10 @@ class TestRunner:
                 self.browser.select(element_path, value, by_strategy)
             elif action == "clear":
                 self.browser.clear(element_path, by_strategy)
+            elif action == "stop_test":
+                # Gracefully stop the test
+                self.logger.info(f"[PID:{self.pid}] ✅ Test completed successfully - stopping test execution")
+                return "test_completed"
             else:
                 raise ValueError(f"Unsupported action: {action}")
                 
@@ -1227,6 +1301,19 @@ class TestRunner:
                             self.logger.info(f"[PID:{pid}] Stop flag detected after retry loop, breaking main generation loop")
                             break
                         
+                        # Normalize next_step to handle cases where Gemini returns "Test complete..." instead of "Stop"
+                        if next_step and isinstance(next_step, str):
+                            next_step_lower = next_step.strip().lower()
+                            # Check if Gemini returned a completion message instead of "Stop"
+                            # Only catch CLEAR completion/optional indicators, not descriptive steps
+                            completion_phrases = [
+                                'test complete', 'test finished', 'test done', 'no more steps', 'test is complete',
+                                'test has successfully', 'test is now complete', 'test is finished'
+                            ]
+                            if any(phrase in next_step_lower for phrase in completion_phrases):
+                                self.logger.info(f"[PID:{pid}] Detected test completion message: '{next_step}' - normalizing to 'Stop'")
+                                next_step = "Stop"
+                        
                         next_prompt = next_step
                         prev_step_description = element_purpose
                         
@@ -1394,7 +1481,12 @@ class TestRunner:
                                         else:
                                             processed_element_locator = element_locator
                                         
-                                        # Save the corrected step to the database
+                                        # TRY TO EXECUTE THE CORRECTED STEP FIRST
+                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
+                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
+                                        
+                                        # EXECUTION SUCCEEDED - Now save the corrected step to the database
+                                        self.logger.info(f"[PID:{pid}] Corrected step execution succeeded, saving to database")
                                         corrected_step_id = self._save_step(
                                             test_case_id=test_case_id,
                                             step_order=step_order,
@@ -1405,10 +1497,6 @@ class TestRunner:
                                             by_strategy=by_strategy,
                                             css_selector=css_selector
                                         )
-                                        
-                                        # Try to execute the corrected step
-                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
-                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
                                         
                                         # If successful, update next_prompt and continue
                                         self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
@@ -1427,15 +1515,51 @@ class TestRunner:
                                             'error': str(recovery_error)
                                         })
                                         
-                                        # If this was the last attempt, give up
+                                        # If this was the last attempt, save as risky step instead of stopping
                                         if recovery_attempt >= max_recovery_attempts:
-                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, stopping test generation")
-                                            return
-                                    
-                                    # If we've exhausted all recovery attempts, stop test generation
-                                    if recovery_attempt >= max_recovery_attempts and next_prompt != next_step:
-                                        self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
-                                        return
+                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, saving step as risky with very low confidence")
+                                            
+                                            # Save the failed step with very low confidence
+                                            try:
+                                                step_id = self._save_step(
+                                                    test_case_id=test_case_id,
+                                                    step_order=step_order,
+                                                    element_purpose=f"[RISKY] {element_purpose}",
+                                                    action=action,
+                                                    element_locator=original_element_locator,
+                                                    value=original_value,
+                                                    by_strategy=by_strategy,
+                                                    css_selector=css_selector
+                                                )
+                                                
+                                                # Save very low confidence score for this step
+                                                if step_id and step_id != -1:
+                                                    with self.get_db_connection() as conn:
+                                                        with conn.cursor() as cursor:
+                                                            cursor.execute("""
+                                                                INSERT INTO confidence_scores 
+                                                                (test_case_id, step_id, overall_confidence, selector_confidence, 
+                                                                 action_confidence, data_confidence, pattern_confidence, risk_level)
+                                                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                                                ON CONFLICT (test_case_id, step_id) 
+                                                                DO UPDATE SET 
+                                                                    overall_confidence = %s,
+                                                                    risk_level = %s
+                                                            """, (
+                                                                test_case_id, step_id, 0.15, 0.2, 0.1, 0.1, 0.1, 'very_low',
+                                                                0.15, 'very_low'
+                                                            ))
+                                                            conn.commit()
+                                                    
+                                                    self.logger.info(f"[PID:{pid}] Saved risky step {step_id} with very low confidence (15%)")
+                                                    
+                                                    # Move to next step instead of stopping
+                                                    next_prompt = next_step
+                                                    step_order += 1
+                                                    break
+                                            except Exception as risky_save_error:
+                                                self.logger.error(f"[PID:{pid}] Failed to save risky step: {str(risky_save_error)}")
+                                                return
                         elif action and element_locator:
                             # Check for stop flag before executing step
                             if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
@@ -1444,34 +1568,65 @@ class TestRunner:
                             
                             self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
 
-                            # Save the step to the database first - use original values with placeholders
-                            step_id = self._save_step(
-                                test_case_id=test_case_id,
-                                step_order=step_order,
-                                element_purpose=element_purpose,
-                                action=action,
-                                element_locator=original_element_locator,
-                                value=original_value,
-                                by_strategy=by_strategy,
-                                css_selector=css_selector
-                            )
-                            
+                            # TRY TO EXECUTE FIRST (don't save yet)
+                            step_id = None
                             try:
-                                self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
-                            except Exception as e:
-                                # Take a screenshot of the failure state
+                                result = self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
+                                
+                                # Check if test was completed via stop_test action
+                                if result == "test_completed":
+                                    self.logger.info(f"[PID:{pid}] ✅ Test completed successfully via stop_test action")
+                                    break
+                                
+                                # EXECUTION SUCCEEDED - Now save the step to database
+                                self.logger.info(f"[PID:{pid}] Step execution succeeded, saving to database")
+                                step_id = self._save_step(
+                                    test_case_id=test_case_id,
+                                    step_order=step_order,
+                                    element_purpose=element_purpose,
+                                    action=action,
+                                    element_locator=original_element_locator,
+                                    value=original_value,
+                                    by_strategy=by_strategy,
+                                    css_selector=css_selector
+                                )
+                                
+                                # Skip if this was a duplicate step
+                                if step_id == -1:
+                                    self.logger.info(f"[PID:{pid}] Duplicate step detected, skipping database save")
+                                    next_prompt = next_step
+                                    continue
+                                
+                                # Take screenshot after successful step
                                 try:
-                                    failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
-                                    self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
+                                    page_source = self.browser.get_page_source()
+                                    screenshot_path = self.browser.take_screenshot()
+                                    self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
                                     
                                     # Save screenshot using session connection
-                                    with open(failure_screenshot, "rb") as image_file:
+                                    with open(screenshot_path, "rb") as image_file:
                                         encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
                                     self._update_step_with_screenshot_session(
                                         session_cursor, session_conn, step_id, 
-                                        failure_screenshot, encoded_string, 
-                                        f"Error screenshot for step {step_order}"
+                                        screenshot_path, encoded_string, 
+                                        f"Screenshot for step {step_order}"
                                     )
+                                except Exception as screenshot_error:
+                                    self.logger.error(f"[PID:{pid}] Failed to save screenshot: {str(screenshot_error)}")
+                                
+                                # Move to next step
+                                next_prompt = next_step
+                                step_order += 1
+                                continue
+                            except Exception as e:
+                                # EXECUTION FAILED - Don't save the step yet, try to fix it with AI
+                                self.logger.error(f"[PID:{pid}] Step execution failed: {str(e)}")
+                                
+                                # Take a screenshot of the failure state
+                                failure_screenshot = None
+                                try:
+                                    failure_screenshot = self.browser.take_screenshot(f"error_step_{step_order}")
+                                    self.logger.error(f"[PID:{pid}] Error screenshot saved to: {failure_screenshot}")
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to capture failure screenshot: {str(screenshot_error)}")
                                 
@@ -1482,22 +1637,6 @@ class TestRunner:
                                     self.logger.error(f"[PID:{pid}] Page at failure: URL={current_url}, Title={current_title}")
                                 except Exception as page_error:
                                     self.logger.error(f"[PID:{pid}] Failed to get page details: {str(page_error)}")
-                                
-                                # Update the step in the database to mark it as failed
-                                try:
-                                    with self.get_db_connection() as connection:
-                                        with connection.cursor() as cursor:
-                                            cursor.execute(
-                                                """
-                                                UPDATE test_steps 
-                                                SET error_message = %s
-                                                WHERE id = %s
-                                                """,
-                                                (str(e), step_id)
-                                            )
-                                            connection.commit()
-                                except Exception as db_error:
-                                    self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
                                 
                                 # Try to recover from the error using AI
                                 max_recovery_attempts = 5
@@ -1593,7 +1732,12 @@ class TestRunner:
                                         else:
                                             processed_element_locator = element_locator
                                         
-                                        # Save the corrected step to the database
+                                        # TRY TO EXECUTE THE CORRECTED STEP FIRST
+                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
+                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
+                                        
+                                        # EXECUTION SUCCEEDED - Now save the corrected step to the database
+                                        self.logger.info(f"[PID:{pid}] Corrected step execution succeeded, saving to database")
                                         corrected_step_id = self._save_step(
                                             test_case_id=test_case_id,
                                             step_order=step_order,
@@ -1604,10 +1748,6 @@ class TestRunner:
                                             by_strategy=by_strategy,
                                             css_selector=css_selector
                                         )
-                                        
-                                        # Try to execute the corrected step
-                                        self.logger.info(f"[PID:{pid}] Executing corrected step: {action} on {element_locator}")
-                                        self.execute_step(action, processed_element_locator, processed_value, by_strategy, env)
                                         
                                         # If successful, update next_prompt and continue
                                         self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
@@ -1626,30 +1766,51 @@ class TestRunner:
                                             'error': str(recovery_error)
                                         })
                                         
-                                        # If this was the last attempt, give up
+                                        # If this was the last attempt, save as risky step instead of stopping
                                         if recovery_attempt >= max_recovery_attempts:
-                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, stopping test generation")
-                                            return
-                                    
-                                    # If we've exhausted all recovery attempts, stop test generation
-                                    if recovery_attempt >= max_recovery_attempts and next_prompt != next_step:
-                                        self.logger.warning(f"[PID:{pid}] Stopping test generation due to step failure")
-                                        return
-
-                        page_source = self.browser.get_page_source()
-                        # Take a screenshot after getting page source
-                        screenshot_path = self.browser.take_screenshot()
-                        self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
-                        
-                        # Save screenshot using session connection
-                        with open(screenshot_path, "rb") as image_file:
-                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                        self._update_step_with_screenshot_session(
-                            session_cursor, session_conn, step_id, 
-                            screenshot_path, encoded_string, 
-                            f"Screenshot for step {step_order}"
-                        )
-                        step_order += 1
+                                            self.logger.warning(f"[PID:{pid}] Maximum recovery attempts reached, saving step as risky with very low confidence")
+                                            
+                                            # Save the failed step with very low confidence
+                                            try:
+                                                step_id = self._save_step(
+                                                    test_case_id=test_case_id,
+                                                    step_order=step_order,
+                                                    element_purpose=f"[RISKY] {element_purpose}",
+                                                    action=action,
+                                                    element_locator=original_element_locator,
+                                                    value=original_value,
+                                                    by_strategy=by_strategy,
+                                                    css_selector=css_selector
+                                                )
+                                                
+                                                # Save very low confidence score for this step
+                                                if step_id and step_id != -1:
+                                                    with self.get_db_connection() as conn:
+                                                        with conn.cursor() as cursor:
+                                                            cursor.execute("""
+                                                                INSERT INTO confidence_scores 
+                                                                (test_case_id, step_id, overall_confidence, selector_confidence, 
+                                                                 action_confidence, data_confidence, pattern_confidence, risk_level)
+                                                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                                                ON CONFLICT (test_case_id, step_id) 
+                                                                DO UPDATE SET 
+                                                                    overall_confidence = %s,
+                                                                    risk_level = %s
+                                                            """, (
+                                                                test_case_id, step_id, 0.15, 0.2, 0.1, 0.1, 0.1, 'very_low',
+                                                                0.15, 'very_low'
+                                                            ))
+                                                            conn.commit()
+                                                    
+                                                    self.logger.info(f"[PID:{pid}] Saved risky step {step_id} with very low confidence (15%)")
+                                                    
+                                                    # Move to next step instead of stopping
+                                                    next_prompt = next_step
+                                                    step_order += 1
+                                                    break
+                                            except Exception as risky_save_error:
+                                                self.logger.error(f"[PID:{pid}] Failed to save risky step: {str(risky_save_error)}")
+                                                return
                 except Exception as step_gen_error:
                     self.logger.error(f"[PID:{pid}] Error during step generation: {str(step_gen_error)}")
                     import traceback
@@ -2226,7 +2387,15 @@ class TestRunner:
                             started_at = row[3]
                             run_id = row[4] if not test_run_id else test_run_id
                             
-                            execution_time_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+                            # Use timezone-aware datetime to avoid "can't subtract offset-naive and offset-aware datetimes" error
+                            from datetime import datetime as dt, timezone
+                            now_utc = dt.now(timezone.utc)
+                            
+                            # Make started_at timezone-aware if it's naive
+                            if started_at.tzinfo is None:
+                                started_at = started_at.replace(tzinfo=timezone.utc)
+                            
+                            execution_time_ms = int((now_utc - started_at).total_seconds() * 1000)
                             cursor.execute(
                                 """
                                 UPDATE test_step_execution_results 
@@ -2234,7 +2403,7 @@ class TestRunner:
                                 WHERE id = %s
                                 """,
                                 ("failed", "Step was orphaned - process may have crashed or been killed", 
-                                 execution_time_ms, datetime.now(), step_result_id)
+                                 execution_time_ms, now_utc, step_result_id)
                             )
                             self.logger.info(f"Cleaned up orphaned step {step_id} (order {step_order}) in test run {run_id}")
                         

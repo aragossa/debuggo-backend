@@ -29,7 +29,19 @@ from auroqa.models.user import User, UserCreate, UserLogin, Token, OAuthUserInfo
 from auroqa.models.client import Client, ClientCreate
 from auroqa.models.test import GenerateStepsRequest
 from auroqa.Utils.System import System
-from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
+import os as env_os
+
+# Phase 3 Integration: Use wrapper classes if enabled
+if env_os.getenv('USE_PHASE3', 'true').lower() == 'true':
+    from auroqa.Utils.BrowserAutomation.EnhancedTestRunner import EnhancedTestRunner as TestRunner
+    from auroqa.Utils.AIHelper.EnhancedAIHelper import EnhancedAIHelper as AIHelper
+    logger_init = logging.getLogger(__name__)
+    logger_init.info("✓ Phase 3 integration enabled: Using EnhancedTestRunner and EnhancedAIHelper")
+else:
+    from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
+    logger_init = logging.getLogger(__name__)
+    logger_init.info("⊘ Phase 3 integration disabled: Using standard TestRunner")
+
 from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from auroqa.Utils.Connectors.KafkaMessageConsumer import KafkaMessageConsumer
 from auroqa.Utils.Connectors.KafkaMessageProducer import KafkaMessageProducer
@@ -50,6 +62,9 @@ import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
 from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
+from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
+from auroqa.Services.FineTuningService import FineTuningService, FineTuningDataCollector
+from auroqa.Services.ContinuousImprovement import ContinuousImprovement
 import signal
 import atexit
 
@@ -5715,7 +5730,822 @@ async def get_alerts(admin_user: User = Depends(check_admin_access)):
         logger.error(f"Error checking alerts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/monitoring/trends")
+# ==================== Phase 4 Pydantic Models ====================
+
+class CacheEmbeddingRequest(BaseModel):
+    """Request model for caching embeddings"""
+    content_hash: str
+    embedding: List[float]
+    metadata: Optional[Dict] = None
+
+class BatchProcessRequest(BaseModel):
+    """Request model for batch processing"""
+    items: List[Dict]
+    batch_size: Optional[int] = 32
+
+class OptimizationRecommendationRequest(BaseModel):
+    """Request model for getting optimization recommendations"""
+    analysis_type: str  # 'cache', 'query', 'index', 'all'
+
+class FineTuningJobRequest(BaseModel):
+    """Request model for submitting fine-tuning jobs"""
+    model_id: str
+    training_data: List[Dict]
+    hyperparameters: Optional[Dict] = None
+    job_name: Optional[str] = None
+
+class ModelDeploymentRequest(BaseModel):
+    """Request model for deploying models"""
+    model_id: str
+    environment: str  # 'staging', 'production'
+    version: Optional[str] = None
+
+class FailureAnalysisRequest(BaseModel):
+    """Request model for failure analysis"""
+    days_back: Optional[int] = 7
+    include_recovery: Optional[bool] = True
+
+class PromptImprovementRequest(BaseModel):
+    """Request model for prompt improvement"""
+    analysis_type: str  # 'weekly', 'monthly'
+    focus_areas: Optional[List[str]] = None
+
+class ABTestRequest(BaseModel):
+    """Request model for running A/B tests"""
+    test_case_id_a: int
+    test_case_id_b: int
+    variant_a_id: str
+    variant_b_id: str
+    project_id: Optional[UUID4] = None
+    notes: Optional[str] = None
+    sample_size: Optional[int] = 10  # Number of times to run each variant
+
+# ==================== Phase 4 API Endpoints ====================
+
+# ==================== Performance Optimizer Endpoints ====================
+
+@app.post("/api/phase4/performance/cache-embedding")
+async def cache_embedding(
+    request: CacheEmbeddingRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Cache an embedding in the database.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - content_hash: Hash of the content
+    - embedding: Vector embedding (list of floats)
+    - metadata: Optional metadata dictionary
+    
+    Returns:
+    - success: Boolean indicating if caching succeeded
+    - cache_key: The key used to store the embedding
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        success = optimizer.cache_embedding(
+            request.content_hash,
+            request.embedding,
+            request.metadata
+        )
+        
+        return {
+            'status': 'success' if success else 'failed',
+            'success': success,
+            'cache_key': request.content_hash,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error caching embedding: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/performance/cache-stats")
+async def get_cache_stats(current_user: User = Depends(check_admin_access)):
+    """
+    Get cache statistics and performance metrics.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - total_cached: Total number of cached items
+    - cache_hit_rate: Percentage of cache hits
+    - avg_access_time: Average access time in ms
+    - memory_usage: Estimated memory usage
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        stats = optimizer.get_cache_statistics()
+        
+        return {
+            'status': 'success',
+            'data': stats,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/performance/batch-process")
+async def batch_process(
+    request: BatchProcessRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Process items in batches for optimization.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - items: List of items to process
+    - batch_size: Size of each batch (default 32)
+    
+    Returns:
+    - processed_count: Number of items processed
+    - batch_count: Number of batches created
+    - processing_time: Total processing time in seconds
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        result = optimizer.batch_process(request.items, request.batch_size or 32)
+        
+        return {
+            'status': 'success',
+            'data': result,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in batch processing: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/performance/query-logs")
+async def get_query_logs(
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get query performance logs.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - limit: Maximum number of logs to return (1-1000, default 100)
+    
+    Returns:
+    - logs: List of query performance logs
+    - slow_queries: Number of slow queries detected
+    - avg_query_time: Average query execution time
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        logs = optimizer.get_slow_queries(limit=limit)
+        
+        return {
+            'status': 'success',
+            'data': logs,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting query logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/performance/optimization-recommendations")
+async def get_optimization_recommendations(
+    analysis_type: str = Query("all", regex="^(cache|query|index|all)$"),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get optimization recommendations based on system analysis.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - analysis_type: Type of analysis (cache, query, index, all)
+    
+    Returns:
+    - recommendations: List of optimization recommendations
+    - priority: Priority level of each recommendation
+    - estimated_improvement: Estimated performance improvement percentage
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        recommendations = optimizer.generate_optimization_recommendations()
+        
+        return {
+            'status': 'success',
+            'data': recommendations,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting optimization recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/performance/index-analysis")
+async def get_index_analysis(current_user: User = Depends(check_admin_access)):
+    """
+    Analyze database indexes for optimization opportunities.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - used_indexes: List of actively used indexes
+    - unused_indexes: List of unused indexes that could be removed
+    - missing_indexes: Suggested indexes for frequently queried columns
+    """
+    try:
+        optimizer = PerformanceOptimizer()
+        analysis = optimizer.analyze_index_usage()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing indexes: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== Fine-Tuning Service Endpoints ====================
+
+@app.get("/api/phase4/finetuning/collect-successful-tests")
+async def collect_successful_tests(
+    min_success_rate: float = Query(0.95, ge=0.0, le=1.0),
+    limit: int = Query(1000, ge=1, le=10000),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Collect successful test cases for fine-tuning.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - min_success_rate: Minimum success rate threshold (0.0-1.0, default 0.95)
+    - limit: Maximum number of tests to collect (1-10000, default 1000)
+    
+    Returns:
+    - collected_count: Number of tests collected
+    - tests: List of successful test cases with metadata
+    - avg_success_rate: Average success rate of collected tests
+    """
+    try:
+        collector = FineTuningDataCollector()
+        tests = collector.collect_successful_tests(min_success_rate, limit)
+        
+        return {
+            'status': 'success',
+            'collected_count': len(tests),
+            'data': tests,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error collecting successful tests: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/finetuning/submit-job")
+async def submit_finetuning_job(
+    request: FineTuningJobRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Submit a fine-tuning job for model training.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - model_id: ID of the model to fine-tune
+    - training_data: List of training examples
+    - hyperparameters: Optional hyperparameters (epochs, learning_rate, batch_size)
+    - job_name: Optional name for the job
+    
+    Returns:
+    - job_id: Unique ID of the submitted job
+    - status: Current job status
+    - estimated_duration: Estimated time to completion in seconds
+    """
+    try:
+        service = FineTuningService()
+        job_id = service.submit_finetuning_job(
+            request.model_id,
+            request.training_data,
+            request.hyperparameters,
+            request.job_name
+        )
+        
+        return {
+            'status': 'success',
+            'job_id': job_id,
+            'job_status': 'submitted',
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error submitting fine-tuning job: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/finetuning/job-status/{job_id}")
+async def get_finetuning_job_status(
+    job_id: str,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get the status of a fine-tuning job.
+    
+    **Admin only endpoint**
+    
+    Path Parameters:
+    - job_id: ID of the fine-tuning job
+    
+    Returns:
+    - job_id: Job ID
+    - status: Current status (submitted, processing, completed, failed)
+    - progress: Progress percentage (0-100)
+    - error_message: Error message if job failed
+    """
+    try:
+        service = FineTuningService()
+        status = service.get_job_status(job_id)
+        
+        return {
+            'status': 'success',
+            'data': status,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting job status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/finetuning/deploy-model")
+async def deploy_finetuned_model(
+    request: ModelDeploymentRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Deploy a fine-tuned model to an environment.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - model_id: ID of the fine-tuned model
+    - environment: Target environment (staging, production)
+    - version: Optional version tag
+    
+    Returns:
+    - deployment_id: Unique ID of the deployment
+    - status: Deployment status
+    - deployed_at: Timestamp of deployment
+    """
+    try:
+        service = FineTuningService()
+        deployment_id = service.deploy_model(
+            request.model_id,
+            request.environment,
+            request.version
+        )
+        
+        return {
+            'status': 'success',
+            'deployment_id': deployment_id,
+            'environment': request.environment,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error deploying model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/finetuning/job-history")
+async def get_finetuning_job_history(
+    limit: int = Query(50, ge=1, le=500),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get history of fine-tuning jobs.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - limit: Maximum number of jobs to return (1-500, default 50)
+    
+    Returns:
+    - jobs: List of fine-tuning jobs with status and results
+    - total_jobs: Total number of jobs in history
+    """
+    try:
+        service = FineTuningService()
+        jobs = service.get_job_history(limit)
+        
+        return {
+            'status': 'success',
+            'total_jobs': len(jobs),
+            'data': jobs,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting job history: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/finetuning/evaluate-model")
+async def evaluate_finetuned_model(
+    model_id: str = Query(...),
+    test_data: List[Dict] = Body(...),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Evaluate a fine-tuned model on test data.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - model_id: ID of the model to evaluate
+    
+    Request Body:
+    - test_data: List of test examples
+    
+    Returns:
+    - accuracy: Model accuracy on test data
+    - precision: Precision metric
+    - recall: Recall metric
+    - f1_score: F1 score
+    """
+    try:
+        service = FineTuningService()
+        metrics = service.evaluate_model(model_id, test_data)
+        
+        return {
+            'status': 'success',
+            'model_id': model_id,
+            'metrics': metrics,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error evaluating model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== Continuous Improvement Endpoints ====================
+
+@app.post("/api/phase4/improvement/analyze-failures")
+async def analyze_failures(
+    request: FailureAnalysisRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Analyze test failures to identify patterns and improvement opportunities.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - days_back: Number of days to analyze (default 7)
+    - include_recovery: Include recovery attempt analysis (default true)
+    
+    Returns:
+    - total_failures: Total number of failures analyzed
+    - failure_categories: Failures grouped by type
+    - top_errors: Most common error types
+    - recovery_success_rate: Percentage of successful recoveries
+    """
+    try:
+        service = ContinuousImprovement()
+        start_date = datetime.utcnow() - timedelta(days=request.days_back or 7)
+        end_date = datetime.utcnow()
+        
+        failures = service.analyze_failures(start_date, end_date)
+        
+        return {
+            'status': 'success',
+            'total_failures': len(failures),
+            'data': failures,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing failures: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/improvement/generate-weekly-report")
+async def generate_weekly_report(current_user: User = Depends(check_admin_access)):
+    """
+    Generate a comprehensive weekly improvement report.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - report_id: Unique ID of the generated report
+    - period: Week covered by the report
+    - key_metrics: Summary of key metrics
+    - recommendations: List of improvement recommendations
+    - generated_at: Timestamp of report generation
+    """
+    try:
+        service = ContinuousImprovement()
+        report = service.generate_weekly_report()
+        
+        return {
+            'status': 'success',
+            'report_id': str(uuid.uuid4()),
+            'data': report,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error generating weekly report: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/improvement/generate-monthly-report")
+async def generate_monthly_report(current_user: User = Depends(check_admin_access)):
+    """
+    Generate a comprehensive monthly improvement report.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - report_id: Unique ID of the generated report
+    - period: Month covered by the report
+    - key_metrics: Summary of key metrics
+    - trend_analysis: Analysis of trends over the month
+    - strategic_recommendations: Strategic improvement recommendations
+    - generated_at: Timestamp of report generation
+    """
+    try:
+        service = ContinuousImprovement()
+        report = service.generate_monthly_report()
+        
+        return {
+            'status': 'success',
+            'report_id': str(uuid.uuid4()),
+            'data': report,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error generating monthly report: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/improvement/improve-prompts")
+async def improve_prompts(
+    request: PromptImprovementRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Generate prompt improvement suggestions based on analysis.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - analysis_type: Type of analysis (weekly, monthly)
+    - focus_areas: Optional list of areas to focus on
+    
+    Returns:
+    - improvements: List of suggested prompt improvements
+    - impact_estimate: Estimated impact on performance
+    - implementation_priority: Priority order for implementation
+    """
+    try:
+        service = ContinuousImprovement()
+        improvements = service.improve_prompts(
+            request.analysis_type,
+            request.focus_areas
+        )
+        
+        return {
+            'status': 'success',
+            'data': improvements,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error improving prompts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/phase4/improvement/run-ab-test")
+async def run_ab_test(
+    request: ABTestRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Run an A/B test comparing two test case variants.
+    
+    **Admin only endpoint**
+    
+    Request Body:
+    - test_case_id_a: ID of first test case variant
+    - test_case_id_b: ID of second test case variant
+    - variant_a_id: Identifier for variant A
+    - variant_b_id: Identifier for variant B
+    - project_id: Optional project ID
+    - notes: Optional notes about the test
+    - sample_size: Number of times to run each variant (default 10)
+    
+    Returns:
+    - test_id: ID of the A/B test record
+    - status: Test status (active)
+    - message: Confirmation message
+    """
+    try:
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cur:
+                # Get current user's client_id
+                cur.execute("SELECT client_id FROM users WHERE id = %s", (current_user.id,))
+                user_row = cur.fetchone()
+                if not user_row:
+                    raise HTTPException(status_code=401, detail="User not found")
+                
+                client_id = user_row[0]
+                
+                # Insert A/B test record
+                cur.execute("""
+                    INSERT INTO ab_test_results 
+                    (client_id, project_id, test_case_id_a, test_case_id_b, 
+                     variant_a_id, variant_b_id, status, notes, 
+                     sample_size_a, sample_size_b)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    client_id, request.project_id, request.test_case_id_a, request.test_case_id_b,
+                    request.variant_a_id, request.variant_b_id, 'active', request.notes,
+                    request.sample_size, request.sample_size
+                ))
+                
+                test_id = cur.fetchone()[0]
+                conn.commit()
+                
+                logger.info(f"Created A/B test {test_id}: variant {request.variant_a_id} vs {request.variant_b_id}")
+                
+                return {
+                    'status': 'success',
+                    'test_id': test_id,
+                    'variant_a': request.variant_a_id,
+                    'variant_b': request.variant_b_id,
+                    'message': f'A/B test created successfully. Test ID: {test_id}',
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+    except Exception as e:
+        logger.error(f"Error running A/B test: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/confidence-calibration")
+async def get_confidence_calibration(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get confidence score calibration analysis.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - calibration_score: Overall calibration quality (0-100)
+    - overconfident_areas: Areas where confidence is too high
+    - underconfident_areas: Areas where confidence is too low
+    - recommendations: Calibration improvement recommendations
+    """
+    try:
+        service = ContinuousImprovement()
+        calibration = service.analyze_confidence_calibration()
+        
+        return {
+            'status': 'success',
+            'data': calibration,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting confidence calibration: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/tool-usage-analysis")
+async def get_tool_usage_analysis(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Analyze tool usage patterns and effectiveness.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - tools: List of tools with usage statistics
+    - most_used: Most frequently used tools
+    - most_effective: Tools with highest success rate
+    - recommendations: Tool usage optimization recommendations
+    """
+    try:
+        service = ContinuousImprovement()
+        analysis = service.analyze_tool_usage()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing tool usage: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/ab-test-analysis")
+async def get_ab_test_analysis(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Analyze A/B test results and determine winners.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - active_tests: List of active A/B tests
+    - completed_tests: List of completed tests with results
+    - winners: Identified winning variants
+    - statistical_significance: Confidence levels for each test
+    """
+    try:
+        service = ContinuousImprovement()
+        analysis = service.analyze_ab_test_results()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing A/B tests: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/ensemble-performance")
+async def get_ensemble_performance(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Analyze model ensemble performance and contribution.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - ensemble_accuracy: Overall ensemble accuracy
+    - model_contributions: Contribution of each model to ensemble
+    - consensus_quality: Quality of model consensus
+    - improvement_opportunities: Ways to improve ensemble performance
+    """
+    try:
+        service = ContinuousImprovement()
+        analysis = service.analyze_ensemble_performance()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing ensemble performance: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/error-categories")
+async def get_error_categories(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get analysis of error categories and patterns.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - error_categories: List of error categories with frequency
+    - root_causes: Identified root causes for each category
+    - recovery_strategies: Recommended recovery strategies
+    - prevention_recommendations: Ways to prevent errors
+    """
+    try:
+        service = ContinuousImprovement()
+        analysis = service.get_error_categories()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing error categories: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/improvement/planning-accuracy")
+async def get_planning_accuracy(
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Analyze test case planning accuracy and effectiveness.
+    
+    **Admin only endpoint**
+    
+    Returns:
+    - planning_accuracy: Overall accuracy of test planning
+    - coverage_analysis: Test coverage metrics
+    - gap_analysis: Identified gaps in test coverage
+    - improvement_recommendations: Ways to improve planning
+    """
+    try:
+        service = ContinuousImprovement()
+        analysis = service.analyze_planning_accuracy()
+        
+        return {
+            'status': 'success',
+            'data': analysis,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing planning accuracy: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/phase4/monitoring/trends")
 async def get_trends(
     hours: int = Query(24, ge=1, le=720),
     interval_minutes: int = Query(60, ge=5, le=1440),
@@ -5745,6 +6575,413 @@ async def get_trends(
     except Exception as e:
         logger.error(f"Error getting trends: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== API Aliases (without phase numbers) ====================
+# These endpoints provide simpler naming without phase numbers
+
+@app.post("/api/performance/cache-embedding")
+async def cache_embedding_alias(
+    request: CacheEmbeddingRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/performance/cache-embedding"""
+    return await cache_embedding(request, current_user)
+
+@app.get("/api/performance/cache-stats")
+async def get_cache_stats_alias(current_user: User = Depends(check_admin_access)):
+    """Alias for /api/phase4/performance/cache-stats"""
+    return await get_cache_stats(current_user)
+
+@app.post("/api/performance/batch-process")
+async def batch_process_alias(
+    request: BatchProcessRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/performance/batch-process"""
+    return await batch_process(request, current_user)
+
+@app.get("/api/performance/query-logs")
+async def get_query_logs_alias(
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/performance/query-logs"""
+    return await get_query_logs(limit, current_user)
+
+@app.get("/api/performance/optimization-recommendations")
+async def get_optimization_recommendations_alias(
+    analysis_type: str = Query("all", regex="^(cache|query|index|all)$"),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/performance/optimization-recommendations"""
+    return await get_optimization_recommendations(analysis_type, current_user)
+
+@app.get("/api/performance/index-analysis")
+async def get_index_analysis_alias(current_user: User = Depends(check_admin_access)):
+    """Alias for /api/phase4/performance/index-analysis"""
+    return await get_index_analysis(current_user)
+
+@app.get("/api/finetuning/collect-successful-tests")
+async def collect_successful_tests_alias(
+    min_success_rate: float = Query(0.95, ge=0.0, le=1.0),
+    limit: int = Query(1000, ge=1, le=10000),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/collect-successful-tests"""
+    return await collect_successful_tests(min_success_rate, limit, current_user)
+
+@app.post("/api/finetuning/submit-job")
+async def submit_finetuning_job_alias(
+    request: FineTuningJobRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/submit-job"""
+    return await submit_finetuning_job(request, current_user)
+
+@app.get("/api/finetuning/job-status/{job_id}")
+async def get_finetuning_job_status_alias(
+    job_id: str,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/job-status/{job_id}"""
+    return await get_finetuning_job_status(job_id, current_user)
+
+@app.post("/api/finetuning/deploy-model")
+async def deploy_finetuned_model_alias(
+    request: ModelDeploymentRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/deploy-model"""
+    return await deploy_finetuned_model(request, current_user)
+
+@app.get("/api/finetuning/job-history")
+async def get_finetuning_job_history_alias(
+    limit: int = Query(50, ge=1, le=500),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/job-history"""
+    return await get_finetuning_job_history(limit, current_user)
+
+@app.post("/api/finetuning/evaluate-model")
+async def evaluate_finetuned_model_alias(
+    model_id: str = Query(...),
+    test_data: List[Dict] = Body(...),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/finetuning/evaluate-model"""
+    return await evaluate_finetuned_model(model_id, test_data, current_user)
+
+@app.post("/api/improvement/analyze-failures")
+async def analyze_failures_alias(
+    request: FailureAnalysisRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/analyze-failures"""
+    return await analyze_failures(request, current_user)
+
+@app.post("/api/improvement/generate-weekly-report")
+async def generate_weekly_report_alias(current_user: User = Depends(check_admin_access)):
+    """Alias for /api/phase4/improvement/generate-weekly-report"""
+    return await generate_weekly_report(current_user)
+
+@app.post("/api/improvement/generate-monthly-report")
+async def generate_monthly_report_alias(current_user: User = Depends(check_admin_access)):
+    """Alias for /api/phase4/improvement/generate-monthly-report"""
+    return await generate_monthly_report(current_user)
+
+@app.post("/api/improvement/improve-prompts")
+async def improve_prompts_alias(
+    request: PromptImprovementRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/improve-prompts"""
+    return await improve_prompts(request, current_user)
+
+@app.post("/api/improvement/run-ab-test")
+async def run_ab_test_alias(
+    request: ABTestRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/run-ab-test"""
+    return await run_ab_test(request, current_user)
+
+
+# ================================
+# A/B Test Result Tracking
+# ================================
+
+class LinkTestRunRequest(BaseModel):
+    """Request model for linking test run to A/B test"""
+    test_run_id: int
+    ab_test_id: int
+    variant: str  # 'A' or 'B'
+
+
+class BatchLinkTestRunsRequest(BaseModel):
+    """Request model for batch linking test runs to A/B test"""
+    ab_test_id: int
+    variant_a_run_ids: List[int] = []
+    variant_b_run_ids: List[int] = []
+
+
+@app.post("/api/phase4/improvement/link-test-run-to-ab-test")
+async def link_test_run_to_ab_test(
+    request: LinkTestRunRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Link a test run to an A/B test and mark which variant it belongs to.
+    This is called after a test run completes to track results for A/B testing.
+    
+    Request Body:
+    - test_run_id: ID of the completed test run
+    - ab_test_id: ID of the A/B test
+    - variant: 'A' or 'B' to indicate which variant was executed
+    
+    Returns:
+    - success: True if linked successfully
+    - message: Confirmation message
+    """
+    try:
+        from auroqa.Services.ABTestResultTracker import ABTestResultTracker
+        
+        tracker = ABTestResultTracker()
+        
+        # Link the test run to the A/B test
+        success = tracker.link_test_run_to_ab_test(
+            request.test_run_id,
+            request.ab_test_id,
+            request.variant
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to link test run to A/B test")
+        
+        # Update A/B test results
+        tracker.update_ab_test_results(request.ab_test_id)
+        
+        # Get updated status
+        status = tracker.get_ab_test_status(request.ab_test_id)
+        
+        logger.info(f"Linked test run {request.test_run_id} to A/B test {request.ab_test_id} (variant {request.variant})")
+        
+        return {
+            'status': 'success',
+            'message': f'Test run linked to A/B test (variant {request.variant})',
+            'ab_test_status': status
+        }
+    except Exception as e:
+        logger.error(f"Error linking test run to A/B test: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/phase4/improvement/batch-link-test-runs")
+async def batch_link_test_runs(
+    request: BatchLinkTestRunsRequest,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Link multiple test runs to an A/B test in batch.
+    This is useful for linking many test runs at once after running tests.
+    
+    Request Body:
+    - ab_test_id: ID of the A/B test
+    - variant_a_run_ids: List of test run IDs for variant A
+    - variant_b_run_ids: List of test run IDs for variant B
+    
+    Returns:
+    - total_linked: Total number of runs linked
+    - variant_a_linked: Number of variant A runs linked
+    - variant_b_linked: Number of variant B runs linked
+    - errors: List of any errors encountered
+    - ab_test_status: Updated A/B test status
+    """
+    try:
+        from auroqa.Services.ABTestResultTracker import ABTestResultTracker
+        
+        tracker = ABTestResultTracker()
+        
+        # Batch link the test runs
+        link_results = tracker.batch_link_test_runs(
+            request.ab_test_id,
+            request.variant_a_run_ids,
+            request.variant_b_run_ids
+        )
+        
+        if link_results['total_linked'] == 0:
+            raise HTTPException(status_code=400, detail="No test runs were linked")
+        
+        # Update A/B test results
+        tracker.update_ab_test_results(request.ab_test_id)
+        
+        # Get updated status
+        status = tracker.get_ab_test_status(request.ab_test_id)
+        
+        logger.info(f"Batch linked {link_results['total_linked']} test runs to A/B test {request.ab_test_id}")
+        
+        return {
+            'status': 'success',
+            'message': f'Linked {link_results["total_linked"]} test runs to A/B test',
+            'linked': link_results,
+            'ab_test_status': status
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error batch linking test runs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/phase4/improvement/ab-test/{ab_test_id}/status")
+async def get_ab_test_status(
+    ab_test_id: int,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get current status of an A/B test including progress and results.
+    
+    Returns:
+    - ab_test_id: ID of the A/B test
+    - variant_a_id, variant_b_id: Variant identifiers
+    - sample_size_a, sample_size_b: Target sample sizes
+    - status: 'active' or 'completed'
+    - results: Current results including success rates and winner
+    """
+    try:
+        from auroqa.Services.ABTestResultTracker import ABTestResultTracker
+        
+        tracker = ABTestResultTracker()
+        status = tracker.get_ab_test_status(ab_test_id)
+        
+        if not status:
+            raise HTTPException(status_code=404, detail=f"A/B test {ab_test_id} not found")
+        
+        return {
+            'status': 'success',
+            'data': status
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting A/B test status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/phase4/improvement/ab-tests/progress")
+async def get_all_ab_tests_progress(
+    limit: int = 50,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get all A/B tests with their current progress and results.
+    
+    Query Parameters:
+    - limit: Maximum number of tests to return (default 50)
+    
+    Returns:
+    - List of A/B tests with progress information
+    """
+    try:
+        from auroqa.Services.ABTestResultTracker import ABTestResultTracker
+        
+        tracker = ABTestResultTracker()
+        ab_tests = tracker.get_all_ab_tests_with_progress(limit)
+        
+        return {
+            'status': 'success',
+            'total': len(ab_tests),
+            'data': ab_tests
+        }
+    except Exception as e:
+        logger.error(f"Error getting A/B tests progress: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/phase4/improvement/available-test-runs/{test_case_id}")
+async def get_available_test_runs(
+    test_case_id: int,
+    limit: int = 100,
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get available test runs for a test case that haven't been linked to an A/B test.
+    This helps you select which runs to link in batch linking.
+    
+    Path Parameters:
+    - test_case_id: ID of the test case
+    
+    Query Parameters:
+    - limit: Maximum number of runs to return (default 100)
+    
+    Returns:
+    - List of available test runs with their results
+    """
+    try:
+        from auroqa.Services.ABTestResultTracker import ABTestResultTracker
+        
+        tracker = ABTestResultTracker()
+        runs = tracker.get_available_test_runs(test_case_id, limit)
+        
+        return {
+            'status': 'success',
+            'total': len(runs),
+            'test_case_id': test_case_id,
+            'data': runs
+        }
+    except Exception as e:
+        logger.error(f"Error getting available test runs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/improvement/confidence-calibration")
+async def get_confidence_calibration_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/confidence-calibration"""
+    return await get_confidence_calibration(current_user)
+
+@app.get("/api/improvement/tool-usage-analysis")
+async def get_tool_usage_analysis_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/tool-usage-analysis"""
+    return await get_tool_usage_analysis(current_user)
+
+@app.get("/api/improvement/ab-test-analysis")
+async def get_ab_test_analysis_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/ab-test-analysis"""
+    return await get_ab_test_analysis(current_user)
+
+@app.get("/api/improvement/ensemble-performance")
+async def get_ensemble_performance_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/ensemble-performance"""
+    return await get_ensemble_performance(current_user)
+
+@app.get("/api/improvement/error-categories")
+async def get_error_categories_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/error-categories"""
+    return await get_error_categories(current_user)
+
+@app.get("/api/improvement/planning-accuracy")
+async def get_planning_accuracy_alias(
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/improvement/planning-accuracy"""
+    return await get_planning_accuracy(current_user)
+
+@app.get("/api/monitoring/trends")
+async def get_trends_alias(
+    hours: int = Query(24, ge=1, le=720),
+    interval_minutes: int = Query(60, ge=5, le=1440),
+    current_user: User = Depends(check_admin_access)
+):
+    """Alias for /api/phase4/monitoring/trends"""
+    return await get_trends(hours, interval_minutes, current_user)
 
 if __name__ == "__main__":
     import uvicorn

@@ -188,3 +188,9 @@ def close_db_pool():
         db_pool.closeall()
         logger.info("Database pool closed")
         db_pool = None
+
+# Initialize pool on module import
+try:
+    init_db_pool()
+except Exception as e:
+    logger.warning(f"Failed to initialize pool on import: {e}")

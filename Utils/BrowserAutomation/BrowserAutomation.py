@@ -501,6 +501,45 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Error finding element {selector}: {str(e)}")
             raise
 
+    def wait_for_element_to_be_visible(self, selector, by='xpath', timeout=None):
+        """
+        Wait for an element to be visible on the page.
+        This is an alias for wait_for_element but specifically checks for visibility.
+        """
+        timeout = timeout or self.timeout
+        try:
+            by_strategy = By.XPATH if by.lower() == 'xpath' else By.CSS_SELECTOR
+            
+            self.logger.info(f"[PID:{self.pid}] Waiting for element to be visible: '{selector}' using strategy: {by_strategy}")
+            
+            # Wait for the page to be loaded completely
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
+            
+            # Wait for the element to be visible (not just present)
+            element = WebDriverWait(self.driver, timeout).until(
+                EC.visibility_of_element_located((by_strategy, selector))
+            )
+            
+            self.logger.info(f"[PID:{self.pid}] Element is now visible: '{selector}'")
+            return element
+            
+        except TimeoutException:
+            screenshot_path = self.take_screenshot()
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element to be visible: '{selector}'. Screenshot: {screenshot_path}")
+            raise
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for element to be visible {selector}: {str(e)}")
+            raise
+
+    def wait_for_element_visible(self, selector, by='xpath', timeout=None):
+        """
+        Alias for wait_for_element_to_be_visible.
+        AI sometimes generates this variant without the 'to_be' part.
+        """
+        return self.wait_for_element_to_be_visible(selector, by, timeout)
+
     def wait_for_clickable(self, selector, by='xpath', timeout=None):
         """
         Wait for an element to be clickable (visible and enabled).
@@ -1037,6 +1076,63 @@ class BrowserAutomation:
             self.logger.info(f"[PID:{self.pid}] Cleared content from element: {selector}")
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to clear element {selector}: {str(e)}")
+            raise
+
+    def assert_text(self, element_path: str, expected_text: str, by_strategy: str = None):
+        """
+        Assert that an element's text exactly matches the expected text.
+        
+        Args:
+            element_path (str): The locator path to find the element
+            expected_text (str): The exact text that should match the element's text
+            by_strategy (str, optional): The strategy to locate the element (e.g., 'xpath', 'css')
+            
+        Raises:
+            AssertionError: If the element's text does not exactly match the expected text
+            ValueError: If expected_text is not provided
+        """
+        # Handle None or empty by_strategy
+        if not by_strategy:
+            by_strategy = 'xpath'  # Default to xpath if by_strategy is None or empty
+        
+        if not expected_text:
+            raise ValueError(f"[PID:{self.pid}] Expected text cannot be empty for text assertion")
+        
+        self.logger.info(f"[PID:{self.pid}] Asserting that element '{element_path}' has exact text: '{expected_text}' using {by_strategy}")
+        
+        try:
+            element = self.find_element(element_path, by_strategy)
+            
+            if not element:
+                raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
+            
+            # Get the actual text from the element
+            actual_text = element.text.strip()
+            expected_text = expected_text.strip()
+            
+            self.logger.info(f"[PID:{self.pid}] Element actual text: '{actual_text}'")
+            
+            # Check if the expected text exactly matches the actual text (case-sensitive)
+            if expected_text != actual_text:
+                raise AssertionError(
+                    f"[PID:{self.pid}] Text does not match. "
+                    f"Expected: '{expected_text}', "
+                    f"Actual: '{actual_text}'"
+                )
+            
+            self.logger.info(f"[PID:{self.pid}] Text assertion passed: '{expected_text}' matches element text")
+            return True
+            
+        except TimeoutException:
+            # Take a screenshot for debugging
+            screenshot_path = self.take_screenshot()
+            
+            # Log additional debugging information
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element: {element_path}")
+            self.logger.error(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
+            raise AssertionError(f"[PID:{self.pid}] Timeout waiting for element: {element_path}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error asserting text: {str(e)}")
             raise
 
     def assert_text_contains(self, element_path: str, expected_text: str, by_strategy: str = None):

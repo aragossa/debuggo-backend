@@ -1,12 +1,18 @@
 import json
 import logging
+import os
 from typing import Dict, Any, List, Optional
-from auroqa.Utils.AIHelper.AIHelper import AIHelper
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Services.ValidationAgent import ValidationAgent
 from auroqa.Services.ConfidenceScorer import ConfidenceScorer
+
+# Phase 3 Integration: Use wrapper if enabled
+if os.getenv('USE_PHASE3', 'true').lower() == 'true':
+    from auroqa.Utils.AIHelper.EnhancedAIHelper import EnhancedAIHelper as AIHelper
+else:
+    from auroqa.Utils.AIHelper.AIHelper import AIHelper
 
 
 class ApiSchemaService:
