@@ -195,6 +195,9 @@ class TestGenerationStateMachine:
         # Execute state entry handler
         self._execute_state_handler(new_state, 'enter')
 
+        # Save to Redis for UI visualization
+        self._save_to_redis()
+
         self.logger.info(
             f"✓ Transitioned: {previous_state.value} → {new_state.value} "
             f"(event: {event.value})"
@@ -262,7 +265,7 @@ class TestGenerationStateMachine:
         return self.context.history
 
     def get_summary(self) -> Dict[str, Any]:
-        """Get state machine summary."""
+        """Get summary of state machine execution."""
         return {
             'test_case_id': self.test_case_id,
             'current_state': self.state.value,
@@ -301,6 +304,42 @@ class TestGenerationStateMachine:
                 self.logger.debug(f"✓ Executed handler: {key}")
             except Exception as e:
                 self.logger.error(f"Error executing handler {key}: {e}")
+
+    def _save_to_redis(self) -> None:
+        """Save state machine data to Redis for UI visualization."""
+        try:
+            import redis
+            from auroqa.Utils.System import System
+            
+            system = System()
+            redis_client = redis.Redis(
+                host=system.redis_host,
+                port=system.redis_port,
+                decode_responses=True
+            )
+            
+            # Save current state
+            state_key = f"state_machine:{self.test_case_id}:current_state"
+            redis_client.set(state_key, self.state.value, ex=3600)
+            
+            # Save context
+            context_key = f"state_machine:{self.test_case_id}:context"
+            context_data = {
+                'previous_state': self.context.previous_state.value if self.context.previous_state else None,
+                'step_number': self.context.step_number,
+                'total_steps': self.context.total_steps,
+                'confidence': self.context.confidence,
+                'error_count': self.context.error_count,
+                'retry_count': self.context.retry_count
+            }
+            redis_client.set(context_key, json.dumps(context_data), ex=3600)
+            
+            # Save history
+            history_key = f"state_machine:{self.test_case_id}:history"
+            redis_client.set(history_key, json.dumps(self.context.history), ex=3600)
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to save state machine data to Redis: {str(e)}")
 
 
 class StateMachineBuilder:

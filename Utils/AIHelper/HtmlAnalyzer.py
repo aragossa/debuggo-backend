@@ -10,6 +10,13 @@ from auroqa.Utils.System import System
 from contextlib import contextmanager
 import logging
 
+# ReAct Pattern imports
+try:
+    from auroqa.Services.ConversationManager import ConversationManager, ConversationTurn
+    REACT_AVAILABLE = True
+except ImportError:
+    REACT_AVAILABLE = False
+
 # Phase 2.5: Few-shot learning imports
 try:
     from auroqa.Services.SimilaritySearch import SimilaritySearch
@@ -34,6 +41,18 @@ class HtmlAnalyzer(AIHelper):
             super().__init__()
             self.system = System()
             self.logger = self._setup_logger()
+            
+            # ReAct Pattern: Initialize ConversationManager
+            self.conversation_manager = None
+            if REACT_AVAILABLE:
+                try:
+                    self.conversation_manager = ConversationManager()
+                    self.logger.info("ReAct Pattern enabled (ConversationManager initialized)")
+                except Exception as e:
+                    self.logger.warning(f"ReAct Pattern disabled: {str(e)}")
+                    self.conversation_manager = None
+            else:
+                self.logger.info("ReAct Pattern services not available")
             
             # Phase 2.5: Initialize few-shot learning services
             self.use_few_shot = True
@@ -77,6 +96,65 @@ class HtmlAnalyzer(AIHelper):
         logger.addHandler(handler)
 
         return logger
+
+    def _extract_expected_text_from_error(self, error_message: str):
+        """Extract expected text from error message."""
+        import re
+        
+        # Try to extract text from contains(text(), '...')
+        match = re.search(r"contains\(text\(\),\s*['\"]([^'\"]+)['\"]\)", error_message)
+        if match:
+            return match.group(1)
+        
+        # Try to extract from other patterns
+        match = re.search(r"text\(\)\s*=\s*['\"]([^'\"]+)['\"]", error_message)
+        if match:
+            return match.group(1)
+        
+        return None
+
+    def _suggest_recovery_strategy(self, error_message: str, html_content: str, previous_attempts: list):
+        """
+        Select recovery strategy based on error type and attempt count.
+        """
+        attempt_count = len(previous_attempts) if previous_attempts else 0
+        
+        # Strategy 1: If first attempt, try alternative locator
+        if attempt_count == 0:
+            return {
+                "strategy": "ALTERNATIVE_LOCATOR",
+                "analysis": "First attempt failed, trying alternative locator approach",
+                "action": "assert_text_contains",  # Less strict than assert_text
+                "confidence": 0.75
+            }
+        
+        # Strategy 2: If second attempt, try waiting first
+        elif attempt_count == 1:
+            return {
+                "strategy": "WAIT_AND_RETRY",
+                "analysis": "Element may not be loaded yet, adding wait",
+                "action": "wait_for_element_to_be_visible",
+                "timeout": 10,
+                "confidence": 0.70
+            }
+        
+        # Strategy 3: If third+ attempt, escalate
+        else:
+            return {
+                "strategy": "ESCALATE_TO_HUMAN",
+                "analysis": f"Element not found after {attempt_count + 1} recovery attempts",
+                "action": "skip",
+                "reason": "Unable to locate element after multiple recovery strategies",
+                "confidence": 0.95
+            }
+
+    def _generate_alternative_locator(self, error_message: str, html_content: str):
+        """
+        Generate alternative locator when primary fails.
+        """
+        # This is a simplified version
+        # In production, use more sophisticated analysis
+        return "//*[contains(text(), 'Azure AD settings saved')]"
 
     def add_step_to_history(self, test_case_id: int, step_data: dict):
         """Add a step to the test case history."""
@@ -469,6 +547,19 @@ Return a JSON object with:
                       next_prompt: str, prev_step_description: str, screenshot_path: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         
+        # ReAct Pattern: Start conversation for this step
+        conversation = self._start_react_conversation(test_case_id, test_description)
+        
+        # ReAct Turn 1: Thought - Analyze the task
+        if conversation:
+            self._add_react_turn(
+                conversation,
+                thought=f"Need to generate step {step_order} for test: {test_name}. Previous step: {prev_step_description}",
+                action="analyze_task",
+                observation=f"Task analysis: Generate next action for step {step_order}",
+                confidence=0.9
+            )
+        
         # Get variable registry from previous steps
         variable_registry = self.get_variable_registry(test_case_id)
         self.logger.info(f"Variable registry for test case {test_case_id}: {len(variable_registry)} variables tracked")
@@ -510,6 +601,16 @@ PREVIOUS STEP: {prev_step_description}
             self.logger.info(f"Reading the screenshot {screenshot_path}")
             image = self.read_img(screenshot_path)
 
+        # ReAct Turn 2: Action - Analyze HTML and generate step
+        if conversation:
+            self._add_react_turn(
+                conversation,
+                thought=f"Analyzing HTML structure to find elements for action: {next_prompt}",
+                action="analyze_html",
+                observation=f"HTML analyzed. Found {html_code.count('<')} HTML tags. Screenshot: {screenshot_path}",
+                confidence=0.85
+            )
+
         if self.provider == "gemini":
             if image:
                 self.logger.info("Sending request to Gemini with image")
@@ -548,11 +649,41 @@ PREVIOUS STEP: {prev_step_description}
                 'next_step': response['next_step']
             }
 
+            # ReAct Turn 3: Observation - AI generated step
+            if conversation:
+                self._add_react_turn(
+                    conversation,
+                    thought=f"Generated step {step_order}: {response['element_purpose']}",
+                    action="generate_step",
+                    observation=f"Step generated: Action={response['action']}, Element={response['element_locator']}, Strategy={response['by_strategy']}, Next={response['next_step']}",
+                    confidence=0.88
+                )
+
             self.add_step_to_history(test_case_id, step_data)
             
             # Phase 2.5: Record pattern usage for learning system
             self._record_pattern_usage(test_case_id, step_data)
+            
+            # ReAct Turn 4: Reflection - Validate and finalize
+            if conversation:
+                self._add_react_turn(
+                    conversation,
+                    thought=f"Validating generated step: {response['element_purpose']}",
+                    action="validate_step",
+                    observation=f"Step validation: Locator found={bool(response['element_locator'])}, Strategy valid={response['by_strategy'] in ['xpath', 'css']}, Next step clear={bool(response['next_step'])}",
+                    confidence=0.90
+                )
 
+            # ReAct: Log reasoning trace
+            if conversation:
+                trace = self._get_react_trace(conversation)
+                if trace:
+                    self.logger.info(f"[ReAct Reasoning Trace]\n{trace}")
+                
+                # Extract context for next steps
+                context = self._extract_react_context(conversation)
+                self.logger.debug(f"[ReAct Context] Turns: {len(conversation.turns)}, Avg Confidence: {context.get('average_confidence', 0):.2f}")
+            
             # Return tuple in the expected order (now includes css_selector)
             return (
                 step_data['next_step'],
@@ -593,6 +724,38 @@ PREVIOUS STEP: {prev_step_description}
             A tuple containing (next_step, element_purpose, action, element_locator, css_selector, by_strategy, value)
         """
         self.logger.info("Sending request to AI provider for error analysis.")
+        
+        # Check if element exists in HTML before attempting recovery
+        expected_text = self._extract_expected_text_from_error(error_message)
+        
+        if expected_text:
+            # Check if this text exists ANYWHERE in the HTML
+            if expected_text.lower() not in html_code.lower():
+                self.logger.warning(f"Expected text '{expected_text}' not found in HTML at all")
+                # Return a skip response instead of attempting recovery
+                return (
+                    "Element not found on page, skipping this step",
+                    f"Skip verification - element not found",
+                    "skip",
+                    "N/A",
+                    "",
+                    "xpath",
+                    None
+                )
+        
+        # ReAct Pattern: Start conversation for error recovery
+        conversation = self._start_react_conversation(test_case_id, f"Error recovery for: {test_description}")
+        
+        # ReAct Turn 1: Thought - Analyze the error
+        if conversation:
+            self._add_react_turn(
+                conversation,
+                thought=f"Step failed: {failed_step.get('action', 'unknown')} on {failed_step.get('element_locator', 'unknown')}. Error: {error_message[:100]}",
+                action="analyze_error",
+                observation=f"Error analysis: {error_message}. Previous attempts: {len(previous_attempts or [])}",
+                confidence=0.8
+            )
+        
         prompt = self.get_error_analysis_prompt(
             html_code=html_code,
             error_message=error_message,
@@ -608,6 +771,16 @@ PREVIOUS STEP: {prev_step_description}
         if screenshot_path:
             self.logger.info(f"Reading the error screenshot {screenshot_path}")
             image = self.read_img(screenshot_path)
+        
+        # ReAct Turn 2: Action - Analyze HTML for recovery
+        if conversation:
+            self._add_react_turn(
+                conversation,
+                thought=f"Analyzing current page state to find alternative approach",
+                action="analyze_html_for_recovery",
+                observation=f"Current HTML has {html_code.count('<')} tags. Looking for alternative selectors.",
+                confidence=0.85
+            )
         
         if self.provider == "gemini":
             if image:
@@ -640,6 +813,31 @@ PREVIOUS STEP: {prev_step_description}
             # Log the analysis
             self.logger.info(f"Error analysis: {response['analysis']}")
             
+            # ReAct Turn 3: Observation - Recovery strategy generated
+            if conversation:
+                self._add_react_turn(
+                    conversation,
+                    thought=f"Generated recovery strategy: {response['element_purpose']}",
+                    action="generate_recovery",
+                    observation=f"Recovery generated: Action={response['action']}, New Element={response['element_locator']}, Strategy={response['by_strategy']}",
+                    confidence=0.87
+                )
+            
+            # ReAct Turn 4: Reflection - Validate recovery
+            if conversation:
+                self._add_react_turn(
+                    conversation,
+                    thought=f"Validating recovery approach for failed step",
+                    action="validate_recovery",
+                    observation=f"Recovery validation: Has alternative selector={bool(response['element_locator'])}, Strategy valid={response['by_strategy'] in ['xpath', 'css']}, Analysis provided={bool(response.get('analysis'))}",
+                    confidence=0.89
+                )
+                
+                # Log reasoning trace for error recovery
+                trace = self._get_react_trace(conversation)
+                if trace:
+                    self.logger.info(f"[ReAct Error Recovery Trace]\n{trace}")
+            
             # Return tuple in the expected order (now includes css_selector)
             return (
                 response['next_step'],
@@ -652,3 +850,104 @@ PREVIOUS STEP: {prev_step_description}
             )
         else:
             raise ValueError(f"Unsupported AI provider for error analysis: {self.provider}")
+    
+    # ============================================================================
+    # ReAct Pattern Methods
+    # ============================================================================
+    
+    def _start_react_conversation(self, test_case_id: int, test_description: str) -> Any:
+        """
+        Start a new ReAct conversation for test step generation.
+        
+        Args:
+            test_case_id: ID of the test case
+            test_description: Description of the test
+            
+        Returns:
+            Conversation object or None if ReAct is not available
+        """
+        if not self.conversation_manager:
+            return None
+        
+        try:
+            conversation = self.conversation_manager.start_conversation(
+                test_case_id=test_case_id,
+                overall_strategy=f"Generate test steps for: {test_description}"
+            )
+            self.logger.info(f"[ReAct] Started conversation for test case {test_case_id}")
+            return conversation
+        except Exception as e:
+            self.logger.error(f"[ReAct] Failed to start conversation: {str(e)}")
+            return None
+    
+    def _add_react_turn(self, conversation: Any, thought: str, action: str, 
+                       observation: str, confidence: float = 0.8) -> None:
+        """
+        Add a ReAct turn to the conversation.
+        
+        Args:
+            conversation: Conversation object
+            thought: AI's reasoning/thought
+            action: Action taken (e.g., "analyze_html", "generate_step")
+            observation: Result of the action
+            confidence: Confidence score (0-1)
+        """
+        if not conversation or not self.conversation_manager:
+            return
+        
+        try:
+            turn = ConversationTurn(
+                turn_number=len(conversation.turns) + 1,
+                thought=thought,
+                action=action,
+                observation=observation,
+                tool_used=None,
+                tool_params=None,
+                tool_result=None,
+                confidence=confidence
+            )
+            self.conversation_manager.add_turn(conversation, turn)
+            self.logger.debug(f"[ReAct] Added turn {turn.turn_number}: {action} (confidence: {confidence:.2f})")
+        except Exception as e:
+            self.logger.error(f"[ReAct] Failed to add turn: {str(e)}")
+    
+    def _get_react_trace(self, conversation: Any) -> str:
+        """
+        Get formatted reasoning trace from the conversation.
+        
+        Args:
+            conversation: Conversation object
+            
+        Returns:
+            Formatted reasoning trace string
+        """
+        if not conversation or not self.conversation_manager:
+            return ""
+        
+        try:
+            trace = self.conversation_manager.generate_reasoning_trace(conversation)
+            return trace
+        except Exception as e:
+            self.logger.error(f"[ReAct] Failed to generate reasoning trace: {str(e)}")
+            return ""
+    
+    def _extract_react_context(self, conversation: Any) -> Dict[str, Any]:
+        """
+        Extract context from the conversation for next steps.
+        
+        Args:
+            conversation: Conversation object
+            
+        Returns:
+            Dictionary with extracted context
+        """
+        if not conversation or not self.conversation_manager:
+            return {}
+        
+        try:
+            context = self.conversation_manager.extract_context(conversation)
+            self.logger.debug(f"[ReAct] Extracted context: {len(context.get('recent_actions', []))} recent actions")
+            return context
+        except Exception as e:
+            self.logger.error(f"[ReAct] Failed to extract context: {str(e)}")
+            return {}

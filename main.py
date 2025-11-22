@@ -65,6 +65,7 @@ from auroqa.Services.TestExecutionService import TestExecutionService
 from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
 from auroqa.Services.FineTuningService import FineTuningService, FineTuningDataCollector
 from auroqa.Services.ContinuousImprovement import ContinuousImprovement
+from auroqa.Services.PlanningCollector import PlanningCollector
 import signal
 import atexit
 
@@ -7065,3 +7066,168 @@ if __name__ == "__main__":
             log_level="debug",
             reload=False
         )
+
+# ==================== Planning & Reasoning Visualization Endpoints ====================
+
+@app.get("/api/test-cases/{id}/planning")
+async def get_planning_data(
+    id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get planning and reasoning data for a test case.
+    
+    This endpoint returns comprehensive planning, reasoning, and error recovery data
+    collected during test generation, including:
+    - Strategic planning (requirement analysis, decomposition, dependencies, risks)
+    - Multi-turn reasoning (ReAct pattern, tool usage, reasoning traces)
+    - Error recovery (failure analysis, recovery strategies, statistics)
+    
+    Args:
+        id: Test case ID
+        current_user: Authenticated user
+    
+    Returns:
+        {
+            "status": "success",
+            "data": {
+                "strategic_planning": {...},
+                "multi_turn_reasoning": {...},
+                "error_recovery": {...}
+            },
+            "timestamp": "2024-01-21T10:30:45Z"
+        }
+    """
+    try:
+        # Verify user has access to this test case
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT tc.id, tc.client_id 
+            FROM test_cases tc
+            WHERE tc.id = %s
+        """, (id,))
+        
+        test_case = cursor.fetchone()
+        cursor.close()
+        return_db_connection(conn)
+        
+        if not test_case:
+            raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Verify user's client matches test case's client
+        if str(test_case[1]) != str(current_user.client_id):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get planning data from Redis
+        collector = PlanningCollector(
+            redis_host=System().redis_host,
+            redis_port=System().redis_port
+        )
+        planning_data = collector.get_planning_data(id)
+        
+        return {
+            "status": "success",
+            "data": planning_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching planning data for test case {id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/state-machine/{test_case_id}")
+async def get_state_machine_data(
+    test_case_id: int,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get State Machine data for a test case.
+    Returns current state, history, and statistics.
+    """
+    try:
+        # Verify user has access to this test case
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT tc.id, tc.client_id 
+            FROM test_cases tc
+            WHERE tc.id = %s
+        """, (test_case_id,))
+        
+        test_case = cursor.fetchone()
+        cursor.close()
+        return_db_connection(conn)
+        
+        if not test_case:
+            raise HTTPException(status_code=404, detail="Test case not found")
+        
+        # Verify user's client matches test case's client
+        if str(test_case[1]) != str(current_user.client_id):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get State Machine data from Redis
+        try:
+            from auroqa.Utils.System import System
+            import redis
+            
+            system = System()
+            redis_client = redis.Redis(
+                host=system.redis_host,
+                port=system.redis_port,
+                decode_responses=True
+            )
+            
+            # Get current state
+            state_key = f"state_machine:{test_case_id}:current_state"
+            current_state = redis_client.get(state_key) or "INIT"
+            
+            # Get context
+            context_key = f"state_machine:{test_case_id}:context"
+            context_json = redis_client.get(context_key)
+            context = json.loads(context_json) if context_json else {}
+            
+            # Get history
+            history_key = f"state_machine:{test_case_id}:history"
+            history_json = redis_client.get(history_key)
+            history = json.loads(history_json) if history_json else []
+            
+            return {
+                "status": "success",
+                "current_state": current_state,
+                "previous_state": context.get("previous_state"),
+                "step_number": context.get("step_number", 0),
+                "total_steps": context.get("total_steps", 0),
+                "confidence": context.get("confidence", 0.0),
+                "error_count": context.get("error_count", 0),
+                "retry_count": context.get("retry_count", 0),
+                "history": history[-20:] if history else [],  # Last 20 transitions
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        except Exception as redis_error:
+            logger.warning(f"Failed to get State Machine data from Redis: {str(redis_error)}")
+            # Return default data if Redis is not available
+            return {
+                "status": "success",
+                "current_state": "INIT",
+                "previous_state": None,
+                "step_number": 0,
+                "total_steps": 0,
+                "confidence": 0.0,
+                "error_count": 0,
+                "retry_count": 0,
+                "history": [],
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching State Machine data for test case {test_case_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

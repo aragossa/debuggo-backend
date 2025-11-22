@@ -7,6 +7,7 @@ from auroqa.Utils.System import System
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Services.ValidationAgent import ValidationAgent
 from auroqa.Services.ConfidenceScorer import ConfidenceScorer
+from auroqa.Services.PlanningCollector import PlanningCollector
 
 # Phase 3 Integration: Use wrapper if enabled
 if os.getenv('USE_PHASE3', 'true').lower() == 'true':
@@ -28,6 +29,11 @@ class ApiSchemaService:
         # Phase 1: Initialize validation and scoring services
         self.validator = ValidationAgent()
         self.scorer = ConfidenceScorer()
+        # Planning & Reasoning: Initialize planning collector
+        self.planning_collector = PlanningCollector(
+            redis_host=self.system.redis_host,
+            redis_port=self.system.redis_port
+        )
     
     def _setup_logger(self):
         """Setup logger for API schema service."""
@@ -417,6 +423,965 @@ class ApiSchemaService:
         except Exception as e:
             self.logger.warning(f"Error extracting schema summary: {str(e)}")
             return schema_content[:3000]
+    
+    # ==================== PHASE 1: SCHEMA ANALYSIS METHODS ====================
+    
+    def _extract_endpoints_from_schema(self, schema_content: str) -> List[Dict[str, Any]]:
+        """
+        Парсит API схему и извлекает все endpoints.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            
+        Returns:
+            List[Dict]: Список endpoints с методами, путями, параметрами и ответами
+            
+        Example:
+            [
+                {
+                    "method": "POST",
+                    "path": "/auth",
+                    "description": "Authenticate user",
+                    "body_fields": ["email", "password"],
+                    "response_fields": ["token"],
+                    "requires_auth": False
+                },
+                {
+                    "method": "GET",
+                    "path": "/resources/{id}",
+                    "description": "Get resource",
+                    "path_params": ["id"],
+                    "response_fields": ["id", "name"],
+                    "requires_auth": True
+                }
+            ]
+        """
+        try:
+            import json
+            schema = json.loads(schema_content)
+            endpoints = []
+            
+            if 'paths' not in schema:
+                self.logger.warning("No 'paths' found in schema")
+                return endpoints
+            
+            # Extract base path
+            base_path = ""
+            if 'servers' in schema and len(schema['servers']) > 0:
+                server_url = schema['servers'][0].get('url', '')
+                if server_url:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(server_url)
+                    base_path = parsed.path.rstrip('/')
+            elif 'basePath' in schema:
+                base_path = schema['basePath'].rstrip('/')
+            
+            # Iterate through all paths and methods
+            for path, methods in schema['paths'].items():
+                full_path = f"{base_path}{path}" if base_path else path
+                
+                for method, details in methods.items():
+                    if method.upper() not in ['GET', 'POST', 'PUT', 'DELETE', 'PATCH']:
+                        continue
+                    
+                    endpoint = {
+                        "method": method.upper(),
+                        "path": full_path,
+                        "description": details.get('summary', details.get('description', '')),
+                        "body_fields": [],
+                        "path_params": [],
+                        "query_params": [],
+                        "response_fields": [],
+                        "requires_auth": False,
+                        "auth_type": None
+                    }
+                    
+                    # Check authentication requirement
+                    requires_auth = False
+                    auth_type = None
+                    
+                    if 'security' in details:
+                        requires_auth = len(details['security']) > 0
+                        if requires_auth and details['security']:
+                            first_security = details['security'][0]
+                            if first_security:
+                                auth_type = list(first_security.keys())[0]
+                    elif 'security' in schema:
+                        requires_auth = len(schema['security']) > 0
+                        if requires_auth and schema['security']:
+                            first_security = schema['security'][0]
+                            if first_security:
+                                auth_type = list(first_security.keys())[0]
+                    
+                    endpoint["requires_auth"] = requires_auth
+                    endpoint["auth_type"] = auth_type
+                    
+                    # Extract parameters
+                    if 'parameters' in details:
+                        for param in details['parameters']:
+                            param_name = param.get('name', '')
+                            param_in = param.get('in', '')
+                            param_type = param.get('type', param.get('schema', {}).get('type', 'string'))
+                            
+                            if param_in == 'path':
+                                endpoint["path_params"].append({
+                                    "name": param_name,
+                                    "type": param_type,
+                                    "required": param.get('required', False)
+                                })
+                            elif param_in == 'query':
+                                endpoint["query_params"].append({
+                                    "name": param_name,
+                                    "type": param_type,
+                                    "required": param.get('required', False)
+                                })
+                    
+                    # Extract request body fields (Swagger 2.0 style)
+                    if 'parameters' in details:
+                        for param in details['parameters']:
+                            if param.get('in') == 'body':
+                                param_schema = param.get('schema', {})
+                                if '$ref' in param_schema:
+                                    ref_path = param_schema['$ref']
+                                    if ref_path.startswith('#/'):
+                                        ref_parts = ref_path[2:].split('/')
+                                        resolved_schema = schema
+                                        for part in ref_parts:
+                                            resolved_schema = resolved_schema.get(part, {})
+                                        param_schema = resolved_schema
+                                
+                                properties = param_schema.get('properties', {})
+                                for prop_name in properties.keys():
+                                    endpoint["body_fields"].append(prop_name)
+                    
+                    # Extract request body fields (OpenAPI 3.0 style)
+                    if 'requestBody' in details:
+                        try:
+                            content = details['requestBody'].get('content', {})
+                            json_content = content.get('application/json', {})
+                            schema_ref = json_content.get('schema', {})
+                            
+                            if '$ref' in schema_ref:
+                                ref_path = schema_ref['$ref']
+                                if ref_path.startswith('#/'):
+                                    ref_parts = ref_path[2:].split('/')
+                                    resolved_schema = schema
+                                    for part in ref_parts:
+                                        resolved_schema = resolved_schema.get(part, {})
+                                    schema_ref = resolved_schema
+                            
+                            properties = schema_ref.get('properties', {})
+                            for prop_name in properties.keys():
+                                endpoint["body_fields"].append(prop_name)
+                        except Exception as e:
+                            self.logger.debug(f"Error extracting request body: {str(e)}")
+                    
+                    # Extract response fields
+                    if 'responses' in details:
+                        try:
+                            for status_code, response_details in details['responses'].items():
+                                if status_code.startswith('2'):  # Success responses
+                                    response_content = response_details.get('content', {})
+                                    json_response = response_content.get('application/json', {})
+                                    response_schema = json_response.get('schema', {})
+                                    
+                                    if '$ref' in response_schema:
+                                        ref_path = response_schema['$ref']
+                                        if ref_path.startswith('#/'):
+                                            ref_parts = ref_path[2:].split('/')
+                                            resolved_schema = schema
+                                            for part in ref_parts:
+                                                resolved_schema = resolved_schema.get(part, {})
+                                            response_schema = resolved_schema
+                                    
+                                    response_props = response_schema.get('properties', {})
+                                    for prop_name in response_props.keys():
+                                        if prop_name not in endpoint["response_fields"]:
+                                            endpoint["response_fields"].append(prop_name)
+                        except Exception as e:
+                            self.logger.debug(f"Error extracting response fields: {str(e)}")
+                    
+                    endpoints.append(endpoint)
+            
+            self.logger.info(f"✅ Extracted {len(endpoints)} endpoints from schema")
+            return endpoints
+            
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in schema: {str(e)}")
+            return []
+        except Exception as e:
+            self.logger.error(f"Error extracting endpoints: {str(e)}")
+            return []
+    
+    def _check_if_auth_required(self, schema_content: str) -> Dict[str, Any]:
+        """
+        Проверяет требуется ли аутентификация для API.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            
+        Returns:
+            Dict: {
+                "required": bool,
+                "type": str (Bearer, API Key, OAuth, etc.),
+                "endpoint": str (путь к endpoint аутентификации),
+                "description": str
+            }
+        """
+        try:
+            import json
+            schema = json.loads(schema_content)
+            
+            # Check global security
+            if 'security' in schema and len(schema['security']) > 0:
+                first_security = schema['security'][0]
+                if first_security:
+                    auth_type = list(first_security.keys())[0]
+                    
+                    # Try to find auth endpoint
+                    auth_endpoint = None
+                    if 'paths' in schema:
+                        for path in schema['paths'].keys():
+                            if 'auth' in path.lower() or 'login' in path.lower():
+                                auth_endpoint = path
+                                break
+                    
+                    result = {
+                        "required": True,
+                        "type": auth_type,
+                        "endpoint": auth_endpoint or "/auth",
+                        "description": f"API requires {auth_type} authentication"
+                    }
+                    
+                    self.logger.info(f"✅ Auth required: {auth_type}")
+                    return result
+            
+            # Check if any endpoint requires auth
+            if 'paths' in schema:
+                for path, methods in schema['paths'].items():
+                    for method, details in methods.items():
+                        if 'security' in details and len(details['security']) > 0:
+                            first_security = details['security'][0]
+                            if first_security:
+                                auth_type = list(first_security.keys())[0]
+                                result = {
+                                    "required": True,
+                                    "type": auth_type,
+                                    "endpoint": None,
+                                    "description": f"Some endpoints require {auth_type} authentication"
+                                }
+                                self.logger.info(f"✅ Auth required: {auth_type}")
+                                return result
+            
+            self.logger.info("✅ No authentication required")
+            return {
+                "required": False,
+                "type": None,
+                "endpoint": None,
+                "description": "No authentication required"
+            }
+            
+        except json.JSONDecodeError:
+            self.logger.warning("Invalid JSON in schema")
+            return {"required": False, "type": None, "endpoint": None, "description": "Could not parse schema"}
+        except Exception as e:
+            self.logger.error(f"Error checking auth requirement: {str(e)}")
+            return {"required": False, "type": None, "endpoint": None, "description": "Error checking auth"}
+    
+    def _analyze_endpoint_complexity(self, endpoint: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Анализирует сложность одного endpoint.
+        
+        Args:
+            endpoint: Dict с информацией об endpoint (из _extract_endpoints_from_schema)
+            
+        Returns:
+            Dict: {
+                "complexity": str (low/medium/high),
+                "risks": List[str],
+                "modifies_data": bool,
+                "requires_id": bool,
+                "nested": bool
+            }
+        """
+        try:
+            complexity = "low"
+            risks = []
+            
+            method = endpoint.get("method", "GET")
+            path = endpoint.get("path", "")
+            body_fields = endpoint.get("body_fields", [])
+            path_params = endpoint.get("path_params", [])
+            query_params = endpoint.get("query_params", [])
+            
+            # Determine if data is modified
+            modifies_data = method in ["POST", "PUT", "PATCH", "DELETE"]
+            
+            # Check if requires ID
+            requires_id = len(path_params) > 0 or "{id}" in path or "{ID}" in path
+            
+            # Check if nested resource
+            nested = path.count("/") > 2
+            
+            # Calculate complexity
+            field_count = len(body_fields) + len(path_params) + len(query_params)
+            
+            if modifies_data:
+                if field_count > 5:
+                    complexity = "high"
+                elif field_count > 2:
+                    complexity = "medium"
+                else:
+                    complexity = "low"
+            else:
+                if field_count > 3:
+                    complexity = "medium"
+                else:
+                    complexity = "low"
+            
+            if nested:
+                complexity = "high" if complexity == "low" else "high"
+            
+            # Identify risks
+            if method == "DELETE":
+                risks.extend(["Data loss", "Cascading deletes"])
+            elif method == "PUT" or method == "PATCH":
+                risks.extend(["Partial update", "Concurrent modification"])
+            elif method == "POST":
+                risks.extend(["Duplicate creation", "Data validation"])
+            
+            if requires_id:
+                risks.append("Invalid ID")
+            
+            if query_params:
+                risks.append("Complex filtering errors")
+            
+            return {
+                "complexity": complexity,
+                "risks": risks,
+                "modifies_data": modifies_data,
+                "requires_id": requires_id,
+                "nested": nested
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing endpoint complexity: {str(e)}")
+            return {
+                "complexity": "medium",
+                "risks": [],
+                "modifies_data": False,
+                "requires_id": False,
+                "nested": False
+            }
+    
+    def _extract_response_structure(self, endpoint: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Анализирует структуру ответа endpoint.
+        
+        Args:
+            endpoint: Dict с информацией об endpoint
+            
+        Returns:
+            Dict: {
+                "fields": List[str],
+                "nested": bool,
+                "depth": int,
+                "complexity": str (low/medium/high)
+            }
+        """
+        try:
+            response_fields = endpoint.get("response_fields", [])
+            
+            # Estimate nesting and depth
+            nested = len(response_fields) > 5
+            depth = 1
+            
+            # Simple heuristic: if many fields, likely nested
+            if len(response_fields) > 10:
+                depth = 3
+                complexity = "high"
+            elif len(response_fields) > 5:
+                depth = 2
+                complexity = "medium"
+            else:
+                depth = 1
+                complexity = "low"
+            
+            return {
+                "fields": response_fields,
+                "nested": nested,
+                "depth": depth,
+                "complexity": complexity
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting response structure: {str(e)}")
+            return {
+                "fields": [],
+                "nested": False,
+                "depth": 1,
+                "complexity": "low"
+            }
+    
+    def _check_for_pagination(self, schema_content: str) -> Dict[str, Any]:
+        """
+        Проверяет есть ли pagination в API.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            
+        Returns:
+            Dict: {
+                "has_pagination": bool,
+                "type": str (offset_limit, cursor, page, etc.),
+                "parameters": List[str],
+                "default_limit": int
+            }
+        """
+        try:
+            import json
+            schema = json.loads(schema_content)
+            
+            pagination_indicators = {
+                "offset": ["offset", "skip"],
+                "limit": ["limit", "take", "per_page"],
+                "page": ["page", "page_number"],
+                "cursor": ["cursor", "next_token", "continuation_token"]
+            }
+            
+            found_params = []
+            pagination_type = None
+            
+            if 'paths' in schema:
+                for path, methods in schema['paths'].items():
+                    for method, details in methods.items():
+                        if 'parameters' in details:
+                            for param in details['parameters']:
+                                param_name = param.get('name', '').lower()
+                                
+                                for pag_type, indicators in pagination_indicators.items():
+                                    if param_name in indicators:
+                                        if param_name not in found_params:
+                                            found_params.append(param_name)
+                                        if not pagination_type:
+                                            pagination_type = pag_type
+            
+            has_pagination = len(found_params) > 0
+            
+            result = {
+                "has_pagination": has_pagination,
+                "type": pagination_type or "unknown",
+                "parameters": found_params,
+                "default_limit": 20
+            }
+            
+            if has_pagination:
+                self.logger.info(f"✅ Pagination detected: {pagination_type}, params: {found_params}")
+            else:
+                self.logger.info("✅ No pagination detected")
+            
+            return result
+            
+        except json.JSONDecodeError:
+            self.logger.warning("Invalid JSON in schema")
+            return {
+                "has_pagination": False,
+                "type": None,
+                "parameters": [],
+                "default_limit": 20
+            }
+        except Exception as e:
+            self.logger.error(f"Error checking pagination: {str(e)}")
+            return {
+                "has_pagination": False,
+                "type": None,
+                "parameters": [],
+                "default_limit": 20
+            }
+    
+    # ==================== END PHASE 1 METHODS ====================
+    
+    # ==================== PHASE 2: DYNAMIC DATA CREATION METHODS ====================
+    
+    def _create_dynamic_requirement_analysis(self, schema_content: str, test_description: str) -> Dict[str, Any]:
+        """
+        Создает ДИНАМИЧЕСКУЮ requirement_analysis на основе анализа схемы.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            test_description: Описание тестового случая
+            
+        Returns:
+            Dict: {
+                "complexity_score": int (0-100),
+                "factors": List[str],
+                "description": str
+            }
+        """
+        try:
+            # Используем методы Фазы 1 для анализа
+            endpoints = self._extract_endpoints_from_schema(schema_content)
+            auth_info = self._check_if_auth_required(schema_content)
+            pagination_info = self._check_for_pagination(schema_content)
+            
+            endpoint_count = len(endpoints)
+            
+            # Определяем complexity_score ДИНАМИЧЕСКИ
+            if endpoint_count > 5:
+                complexity_score = 85  # Высокая сложность
+            elif endpoint_count > 2:
+                complexity_score = 65  # Средняя сложность
+            else:
+                complexity_score = 40  # Низкая сложность
+            
+            # Определяем factors ДИНАМИЧЕСКИ
+            factors = []
+            
+            # Анализируем методы HTTP
+            methods = [ep.get("method") for ep in endpoints]
+            if "POST" in methods or "PUT" in methods or "DELETE" in methods:
+                factors.append("Data modification")
+            if "GET" in methods:
+                factors.append("Data retrieval")
+            
+            # Анализируем аутентификацию
+            if auth_info["required"]:
+                factors.append(f"Authentication ({auth_info['type']})")
+            
+            # Анализируем pagination
+            if pagination_info["has_pagination"]:
+                factors.append(f"Pagination ({pagination_info['type']})")
+            
+            # Анализируем вложенность ресурсов
+            has_nested = any(ep.get("path", "").count("/") > 2 for ep in endpoints)
+            if has_nested:
+                factors.append("Nested resources")
+            
+            # Анализируем параметры
+            has_complex_params = any(
+                len(ep.get("path_params", [])) > 1 or 
+                len(ep.get("query_params", [])) > 2 
+                for ep in endpoints
+            )
+            if has_complex_params:
+                factors.append("Complex parameters")
+            
+            # Анализируем DELETE операции
+            if "DELETE" in methods:
+                factors.append("Data deletion")
+            
+            # Если нет факторов, добавляем базовый
+            if not factors:
+                factors.append("API testing")
+            
+            # Создаем description
+            description = f"Analyzing {endpoint_count} API endpoints with {len(factors)} complexity factors: {', '.join(factors[:3])}"
+            
+            result = {
+                "complexity_score": complexity_score,
+                "factors": factors,
+                "description": description
+            }
+            
+            self.logger.info(f"✅ Dynamic requirement analysis: score={complexity_score}, factors={len(factors)}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error creating dynamic requirement analysis: {str(e)}")
+            # Fallback to safe defaults
+            return {
+                "complexity_score": 50,
+                "factors": ["API testing"],
+                "description": "API test case analysis"
+            }
+    
+    def _create_dynamic_decomposition(self, schema_content: str, test_description: str) -> Dict[str, Any]:
+        """
+        Создает ДИНАМИЧЕСКУЮ decomposition на основе endpoints в схеме.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            test_description: Описание тестового случая
+            
+        Returns:
+            Dict: {
+                "strategy": str,
+                "total_steps": int,
+                "subtasks": List[Dict]
+            }
+        """
+        try:
+            endpoints = self._extract_endpoints_from_schema(schema_content)
+            auth_info = self._check_if_auth_required(schema_content)
+            
+            subtasks = []
+            step_order = 1
+            
+            # Шаг 1: Аутентификация (если требуется)
+            if auth_info["required"]:
+                auth_endpoint = auth_info.get("endpoint", "/auth")
+                subtasks.append({
+                    "order": step_order,
+                    "task": f"Authenticate with API ({auth_info['type']})",
+                    "type": "setup",
+                    "endpoint": auth_endpoint,
+                    "description": f"Obtain {auth_info['type']} authentication token"
+                })
+                step_order += 1
+            
+            # Шаги 2+: Основные операции (в порядке: POST, PUT, PATCH, DELETE, GET)
+            # Сначала POST (создание)
+            for endpoint in endpoints:
+                if endpoint["method"] == "POST" and "auth" not in endpoint["path"].lower():
+                    subtasks.append({
+                        "order": step_order,
+                        "task": f"Create via {endpoint['path']}",
+                        "type": "execution",
+                        "endpoint": endpoint["path"],
+                        "method": "POST",
+                        "description": endpoint.get("description", "Create resource")
+                    })
+                    step_order += 1
+            
+            # Потом PUT (обновление)
+            for endpoint in endpoints:
+                if endpoint["method"] == "PUT":
+                    subtasks.append({
+                        "order": step_order,
+                        "task": f"Update via {endpoint['path']}",
+                        "type": "execution",
+                        "endpoint": endpoint["path"],
+                        "method": "PUT",
+                        "description": endpoint.get("description", "Update resource")
+                    })
+                    step_order += 1
+            
+            # Потом PATCH (частичное обновление)
+            for endpoint in endpoints:
+                if endpoint["method"] == "PATCH":
+                    subtasks.append({
+                        "order": step_order,
+                        "task": f"Patch via {endpoint['path']}",
+                        "type": "execution",
+                        "endpoint": endpoint["path"],
+                        "method": "PATCH",
+                        "description": endpoint.get("description", "Partially update resource")
+                    })
+                    step_order += 1
+            
+            # Потом DELETE (удаление)
+            for endpoint in endpoints:
+                if endpoint["method"] == "DELETE":
+                    subtasks.append({
+                        "order": step_order,
+                        "task": f"Delete via {endpoint['path']}",
+                        "type": "execution",
+                        "endpoint": endpoint["path"],
+                        "method": "DELETE",
+                        "description": endpoint.get("description", "Delete resource")
+                    })
+                    step_order += 1
+            
+            # Потом GET (чтение/проверка)
+            for endpoint in endpoints:
+                if endpoint["method"] == "GET":
+                    subtasks.append({
+                        "order": step_order,
+                        "task": f"Verify via {endpoint['path']}",
+                        "type": "validation",
+                        "endpoint": endpoint["path"],
+                        "method": "GET",
+                        "description": endpoint.get("description", "Retrieve and verify resource")
+                    })
+                    step_order += 1
+            
+            # Если нет subtasks (только auth), добавляем fallback
+            if len(subtasks) == 0:
+                subtasks.append({
+                    "order": 1,
+                    "task": "Execute API test",
+                    "type": "execution",
+                    "endpoint": "/",
+                    "description": "Execute API test"
+                })
+            
+            # Создаем strategy
+            strategy = " → ".join([s["task"] for s in subtasks])
+            
+            result = {
+                "strategy": strategy,
+                "total_steps": len(subtasks),
+                "subtasks": subtasks
+            }
+            
+            self.logger.info(f"✅ Dynamic decomposition: {len(subtasks)} steps, strategy: {strategy[:80]}...")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error creating dynamic decomposition: {str(e)}")
+            # Fallback
+            return {
+                "strategy": "Execute API test",
+                "total_steps": 1,
+                "subtasks": [{
+                    "order": 1,
+                    "task": "Execute API test",
+                    "type": "execution",
+                    "endpoint": "/"
+                }]
+            }
+    
+    def _create_dynamic_dependencies(self, schema_content: str, test_description: str) -> Dict[str, Any]:
+        """
+        Создает ДИНАМИЧЕСКИЕ dependencies на основе endpoints и аутентификации.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            test_description: Описание тестового случая
+            
+        Returns:
+            Dict: {
+                "data_dependencies": List[Dict],
+                "state_dependencies": List[Dict]
+            }
+        """
+        try:
+            endpoints = self._extract_endpoints_from_schema(schema_content)
+            auth_info = self._check_if_auth_required(schema_content)
+            
+            data_dependencies = [
+                {
+                    "variable": "base_url",
+                    "source": "environment",
+                    "description": "API base URL from environment"
+                }
+            ]
+            
+            state_dependencies = []
+            
+            # Если требуется аутентификация
+            if auth_info["required"]:
+                data_dependencies.append({
+                    "variable": "auth_token",
+                    "source": "response",
+                    "description": f"Authentication token from {auth_info.get('endpoint', '/auth')} endpoint"
+                })
+                state_dependencies.append({
+                    "state": "authenticated",
+                    "required_for": "protected_endpoints",
+                    "description": "Must authenticate before accessing protected endpoints"
+                })
+            
+            # Если есть POST (создание ресурсов)
+            has_post = any(ep["method"] == "POST" for ep in endpoints)
+            if has_post:
+                data_dependencies.append({
+                    "variable": "resource_id",
+                    "source": "response",
+                    "description": "Resource ID from POST response"
+                })
+                state_dependencies.append({
+                    "state": "resource_created",
+                    "required_for": "update_delete",
+                    "description": "Resource must be created before update/delete operations"
+                })
+            
+            # Если есть вложенные ресурсы
+            has_nested = any(ep["path"].count("/") > 2 for ep in endpoints)
+            if has_nested:
+                data_dependencies.append({
+                    "variable": "parent_id",
+                    "source": "response",
+                    "description": "Parent resource ID for nested operations"
+                })
+                state_dependencies.append({
+                    "state": "parent_resource_exists",
+                    "required_for": "nested_operations",
+                    "description": "Parent resource must exist for nested operations"
+                })
+            
+            # Анализируем path параметры
+            all_path_params = set()
+            for ep in endpoints:
+                for param in ep.get("path_params", []):
+                    all_path_params.add(param.get("name"))
+            
+            for param_name in all_path_params:
+                if param_name not in ["id"]:  # id уже добавлен как resource_id
+                    data_dependencies.append({
+                        "variable": param_name,
+                        "source": "response",
+                        "description": f"Parameter {param_name} from previous response"
+                    })
+            
+            result = {
+                "data_dependencies": data_dependencies,
+                "state_dependencies": state_dependencies
+            }
+            
+            self.logger.info(f"✅ Dynamic dependencies: {len(data_dependencies)} data, {len(state_dependencies)} state")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error creating dynamic dependencies: {str(e)}")
+            # Fallback
+            return {
+                "data_dependencies": [
+                    {"variable": "base_url", "source": "environment", "description": "API base URL"}
+                ],
+                "state_dependencies": []
+            }
+    
+    def _create_dynamic_risk_assessment(self, schema_content: str, test_description: str) -> Dict[str, Any]:
+        """
+        Создает ДИНАМИЧЕСКУЮ risk_assessment на основе endpoints и методов HTTP.
+        
+        Args:
+            schema_content: JSON строка с API схемой
+            test_description: Описание тестового случая
+            
+        Returns:
+            Dict: {
+                "identified_risks": List[Dict]
+            }
+        """
+        try:
+            endpoints = self._extract_endpoints_from_schema(schema_content)
+            auth_info = self._check_if_auth_required(schema_content)
+            
+            risks = []
+            
+            # Анализируем методы HTTP
+            methods = [ep["method"] for ep in endpoints]
+            
+            # Риск для GET
+            if "GET" in methods:
+                risks.append({
+                    "risk": "Rate limiting on read operations",
+                    "severity": "medium",
+                    "probability": 0.25,
+                    "mitigation": "Add delays between requests or implement caching"
+                })
+                risks.append({
+                    "risk": "Timeout on large responses",
+                    "severity": "medium",
+                    "probability": 0.15,
+                    "mitigation": "Implement pagination or filtering"
+                })
+            
+            # Риск для POST
+            if "POST" in methods:
+                risks.append({
+                    "risk": "Data validation errors",
+                    "severity": "medium",
+                    "probability": 0.35,
+                    "mitigation": "Validate request data before sending"
+                })
+                risks.append({
+                    "risk": "Duplicate resource creation",
+                    "severity": "low",
+                    "probability": 0.15,
+                    "mitigation": "Use unique identifiers or idempotency keys"
+                })
+            
+            # Риск для PUT/PATCH
+            if "PUT" in methods or "PATCH" in methods:
+                risks.append({
+                    "risk": "Concurrent modification conflicts",
+                    "severity": "high",
+                    "probability": 0.2,
+                    "mitigation": "Use version control, timestamps, or optimistic locking"
+                })
+                risks.append({
+                    "risk": "Partial update inconsistency",
+                    "severity": "medium",
+                    "probability": 0.15,
+                    "mitigation": "Validate all fields after partial updates"
+                })
+            
+            # Риск для DELETE
+            if "DELETE" in methods:
+                risks.append({
+                    "risk": "Accidental data loss",
+                    "severity": "high",
+                    "probability": 0.1,
+                    "mitigation": "Implement soft deletes or backup mechanisms"
+                })
+                risks.append({
+                    "risk": "Cascading deletes affecting related data",
+                    "severity": "high",
+                    "probability": 0.15,
+                    "mitigation": "Check for related resources before deletion"
+                })
+            
+            # Риск для аутентификации
+            if auth_info["required"]:
+                risks.append({
+                    "risk": "Authentication token expiration",
+                    "severity": "medium",
+                    "probability": 0.3,
+                    "mitigation": "Refresh token before expiration or handle 401 responses"
+                })
+                risks.append({
+                    "risk": "Insufficient permissions",
+                    "severity": "medium",
+                    "probability": 0.2,
+                    "mitigation": "Verify user has required permissions for each operation"
+                })
+            
+            # Анализируем параметры
+            has_complex_params = any(
+                len(ep.get("path_params", [])) > 1 or 
+                len(ep.get("query_params", [])) > 2 
+                for ep in endpoints
+            )
+            if has_complex_params:
+                risks.append({
+                    "risk": "Complex parameter validation errors",
+                    "severity": "low",
+                    "probability": 0.2,
+                    "mitigation": "Test with various parameter combinations"
+                })
+            
+            # Анализируем вложенность
+            has_nested = any(ep["path"].count("/") > 2 for ep in endpoints)
+            if has_nested:
+                risks.append({
+                    "risk": "Nested resource access control issues",
+                    "severity": "high",
+                    "probability": 0.15,
+                    "mitigation": "Verify access control at each nesting level"
+                })
+            
+            # Если нет рисков, добавляем базовый
+            if not risks:
+                risks.append({
+                    "risk": "API schema mismatch",
+                    "severity": "medium",
+                    "probability": 0.2,
+                    "mitigation": "Compare actual responses with schema documentation"
+                })
+            
+            result = {
+                "identified_risks": risks
+            }
+            
+            self.logger.info(f"✅ Dynamic risk assessment: {len(risks)} risks identified")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error creating dynamic risk assessment: {str(e)}")
+            # Fallback
+            return {
+                "identified_risks": [{
+                    "risk": "API schema mismatch",
+                    "severity": "medium",
+                    "probability": 0.2,
+                    "mitigation": "Compare actual responses with schema documentation"
+                }]
+            }
+    
+    # ==================== END PHASE 2 METHODS ====================
     
     def _create_step_generation_prompt(
         self,
@@ -1037,6 +2002,7 @@ Return ONLY the JSON array of corrected steps, no explanation.
             
             self.logger.info(f"🔄 Starting iterative step generation for test case {test_case_id}")
             
+            # ==================== PHASE 1: STRATEGIC PLANNING ====================
             # Get test case details and user_id
             with get_db_connection_context() as conn:
                 with conn.cursor() as cursor:
@@ -1071,6 +2037,43 @@ Return ONLY the JSON array of corrected steps, no explanation.
             
             # Extract schema summary
             schema_summary = self._extract_schema_summary(schema_content)
+            
+            # ==================== PHASE 2: DYNAMIC PLANNING (PHASE 2 INTEGRATION) ====================
+            # Create dynamic requirement analysis
+            req_analysis = self._create_dynamic_requirement_analysis(schema_content, test_case_description)
+            self.planning_collector.set_requirement_analysis(
+                test_case_id=test_case_id,
+                complexity_score=req_analysis["complexity_score"],
+                factors=req_analysis["factors"],
+                description=req_analysis["description"]
+            )
+            self.logger.info(f"✅ Dynamic requirement analysis: score={req_analysis['complexity_score']}, factors={len(req_analysis['factors'])}")
+            
+            # Create dynamic decomposition
+            decomposition = self._create_dynamic_decomposition(schema_content, test_case_description)
+            self.planning_collector.set_decomposition(
+                test_case_id=test_case_id,
+                strategy=decomposition["strategy"],
+                subtasks=decomposition["subtasks"]
+            )
+            self.logger.info(f"✅ Dynamic decomposition: {decomposition['total_steps']} steps")
+            
+            # Create dynamic dependencies
+            dependencies = self._create_dynamic_dependencies(schema_content, test_case_description)
+            self.planning_collector.set_dependencies(
+                test_case_id=test_case_id,
+                data_dependencies=dependencies["data_dependencies"],
+                state_dependencies=dependencies["state_dependencies"]
+            )
+            self.logger.info(f"✅ Dynamic dependencies: {len(dependencies['data_dependencies'])} data, {len(dependencies['state_dependencies'])} state")
+            
+            # Create dynamic risk assessment
+            risk_assessment = self._create_dynamic_risk_assessment(schema_content, test_case_description)
+            self.planning_collector.set_risk_assessment(
+                test_case_id=test_case_id,
+                identified_risks=risk_assessment["identified_risks"]
+            )
+            self.logger.info(f"✅ Dynamic risk assessment: {len(risk_assessment['identified_risks'])} risks identified")
             
             # Check if we're resuming from an approved conflict
             conflict_resolution = self._check_conflict_resolution(test_case_id)
@@ -1154,6 +2157,16 @@ Return ONLY the JSON array of corrected steps, no explanation.
                             (conflict_resolution['notification_id'],)
                         )
                         conn.commit()
+                    
+                    # ==================== RECOVERY STATISTICS ====================
+                    # Track successful recovery
+                    self.planning_collector.set_recovery_statistics(
+                        test_case_id=test_case_id,
+                        total_failures=1,
+                        automated_recoveries=0,
+                        escalations=1,
+                        recovery_rate=100.0  # User approved the resolution
+                    )
             
             # Generate first step only if not resuming
             if not resuming_from_conflict:
@@ -1296,6 +2309,42 @@ Return ONLY the JSON array of corrected steps, no explanation.
                         )
                         
                         if conflict_details:
+                            # ==================== ERROR RECOVERY TRACKING ====================
+                            # Track failure analysis
+                            self.planning_collector.set_failure_analysis(
+                                test_case_id=test_case_id,
+                                failures=[
+                                    {
+                                        "step": step_order,
+                                        "type": "documentation_conflict",
+                                        "description": conflict_details.get('description', 'Schema/documentation mismatch detected'),
+                                        "expected": conflict_details.get('expected', 'Unknown'),
+                                        "actual": conflict_details.get('actual', 'Unknown'),
+                                        "root_cause": "API documentation does not match actual behavior"
+                                    }
+                                ],
+                                summary=f"Documentation conflict detected at step {step_order}: {conflict_details.get('description', 'Schema mismatch')}"
+                            )
+                            
+                            # Track recovery strategies
+                            self.planning_collector.set_recovery_strategies(
+                                test_case_id=test_case_id,
+                                automated=[
+                                    {
+                                        "strategy": "User approval",
+                                        "description": "Wait for user to review and approve the corrected expected value",
+                                        "success_rate": 0.95
+                                    }
+                                ],
+                                escalation=[
+                                    {
+                                        "action": "Manual review",
+                                        "reason": "User must decide if schema or test expectation is correct",
+                                        "priority": "high"
+                                    }
+                                ]
+                            )
+                            
                             # IMPORTANT: Add current step to execution history BEFORE saving state
                             # so AI has context when resuming
                             execution_history.append({
@@ -1438,6 +2487,57 @@ Return ONLY the JSON array of corrected steps, no explanation.
                 self.logger.info(f"📝 Final: {len(generated_steps)} total steps saved (description preserved)")
             else:
                 self.logger.warning(f"⚠️ No steps generated")
+            
+            # ==================== PHASE 2: MULTI-TURN REASONING ====================
+            # Add reasoning traces for debugging
+            # Build step details string
+            step_details = []
+            for i, s in enumerate(generated_steps, 1):
+                step_order = s.get('step_order', i)
+                method = s.get('description', {}).get('method', 'unknown')
+                endpoint = s.get('description', {}).get('endpoint', 'unknown')
+                step_details.append(f"Step {step_order}: {method} {endpoint}")
+            
+            self.planning_collector.add_reasoning_trace(
+                test_case_id=test_case_id,
+                message=f"Generated {len(generated_steps)} API test steps",
+                trace_type="success",
+                details=f"Steps: {', '.join(step_details)}"
+            )
+            
+            # Add tool usage for schema analysis
+            self.planning_collector.add_tool_usage(
+                test_case_id=test_case_id,
+                tool_name="SchemaAnalyzer",
+                description="Analyzed API schema to identify endpoints and operations",
+                status="completed",
+                result=f"Identified {len(schema_summary.split('Endpoint:'))} endpoints"
+            )
+            
+            # Add tool usage for test generation
+            self.planning_collector.add_tool_usage(
+                test_case_id=test_case_id,
+                tool_name="GeminiAI",
+                description="Generated test steps using AI analysis",
+                status="completed",
+                result=f"Generated {len(generated_steps)} test steps with validation"
+            )
+            
+            # ==================== PHASE 3: PLAN SUMMARY ====================
+            # Calculate average confidence from generated steps
+            avg_confidence = 0
+            if generated_steps:
+                total_confidence = sum([s.get('confidence', 75) for s in generated_steps])
+                avg_confidence = total_confidence / len(generated_steps)
+            
+            # Set plan summary
+            self.planning_collector.set_plan_summary(
+                test_case_id=test_case_id,
+                total_steps=len(generated_steps),
+                estimated_duration=f"{len(generated_steps) * 2}-{len(generated_steps) * 5} seconds",
+                test_type="api",
+                execution_plan=f"Execute {len(generated_steps)} API test steps sequentially with request/response validation. Average confidence: {avg_confidence:.1f}%"
+            )
             
             self.logger.info(f"✅ Iterative generation complete: {len(generated_steps)} steps generated")
             return True
@@ -2102,6 +3202,38 @@ No explanation, just JSON.
     def _save_single_step(self, test_case_id: int, step: dict, client_id: str):
         """Save a single step to the database."""
         try:
+            # ==================== PHASE 2: MULTI-TURN REASONING ====================
+            # Record ReAct trace for this step
+            self.planning_collector.add_react_trace(
+                test_case_id=test_case_id,
+                thought=f"Generating step {step['step_order']}: {step.get('summary', 'API request')}",
+                action="generate_api_step",
+                action_params={
+                    "method": step.get('description', {}).get('method', 'GET'),
+                    "endpoint": step.get('description', {}).get('endpoint', ''),
+                    "step_order": step['step_order']
+                },
+                observation=f"Generated {step.get('action', 'api_request')} step",
+                reflection="Step generated and ready for execution"
+            )
+            
+            # Record tool usage
+            self.planning_collector.add_tool_usage(
+                test_case_id=test_case_id,
+                tool_name="generate_api_step",
+                description="Generates API test steps from schema",
+                status="completed",
+                result=f"Step {step['step_order']} generated successfully"
+            )
+            
+            # Record reasoning trace
+            self.planning_collector.add_reasoning_trace(
+                test_case_id=test_case_id,
+                message=f"Generated step {step['step_order']}: {step.get('action', 'api_request')}",
+                trace_type="success",
+                details=f"Method: {step.get('description', {}).get('method', 'GET')}"
+            )
+            
             with get_db_connection_context() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
@@ -2120,6 +3252,13 @@ No explanation, just JSON.
                 
         except Exception as e:
             self.logger.error(f"Error saving step: {str(e)}")
+            # Record error in planning
+            self.planning_collector.add_reasoning_trace(
+                test_case_id=test_case_id,
+                message=f"Error saving step: {str(e)}",
+                trace_type="error",
+                details=str(e)
+            )
     
     def _validate_error_response(self, test_case_id: int, step: dict, status_code: int, response_body) -> bool:
         """

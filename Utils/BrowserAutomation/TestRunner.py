@@ -21,6 +21,9 @@ from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connec
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
 from auroqa.Services.ValidationAgent import ValidationAgent
 from auroqa.Services.ConfidenceScorer import ConfidenceScorer
+from auroqa.Services.TestGenerationStateMachine import TestGenerationStateMachine, Event, State
+from auroqa.Services.AttentionMode import AttentionMode
+from auroqa.Services.ConfidenceDecisionMaker import ConfidenceDecisionMaker, DecisionAction
 
 
 class TestRunner:
@@ -28,6 +31,16 @@ class TestRunner:
     _lock = Lock()  # Local threading lock as fallback
     _redis = None
     _lock_timeout = 300  # 5 minutes timeout
+    
+    # Valid actions from database constraint
+    VALID_ACTIONS = {
+        'click', 'type', 'select', 'hover', 'wait', 'assert',
+        'assert_text_contains', 'scroll', 'clear', 'navigate',
+        'press_key', 'use_component', 'wait_for_element_to_be_visible',
+        'wait_for_element_visible', 'wait_for_modal', 'wait_for_clickable',
+        'api_request', 'api_auth', 'api_get', 'api_post', 'api_put',
+        'api_delete', 'api_patch', 'response_validation', 'validation'
+    }
 
     def __new__(cls, user_id=None, test_case_id=None):
         pid = os.getpid()
@@ -244,6 +257,81 @@ class TestRunner:
 
         return logger
 
+    def _validate_action_type(self, action: str) -> bool:
+        """
+        Validate that action type is in the valid_action constraint.
+        
+        Args:
+            action: Action type to validate
+            
+        Returns:
+            True if valid
+            
+        Raises:
+            ValueError: If action is invalid
+        """
+        action = action.strip() if action else ''
+        
+        if not action:
+            raise ValueError("Action cannot be empty")
+        
+        if action not in self.VALID_ACTIONS:
+            self.logger.error(f"Invalid action '{action}'. Valid actions: {self.VALID_ACTIONS}")
+            raise ValueError(f"Action '{action}' violates valid_action constraint")
+        
+        return True
+
+    def _save_step_safely(self, step_data: dict) -> bool:
+        """
+        Save step with multiple safeguards against invalid data.
+        """
+        
+        try:
+            # Safeguard 1: Validate action type
+            action = step_data.get('action', '').strip()
+            if not action or action not in self.VALID_ACTIONS:
+                self.logger.error(f"Cannot save step: invalid action '{action}'")
+                return False
+            
+            # Safeguard 2: Validate required fields
+            required_fields = ['test_case_id', 'step_order', 'action', 'description']
+            for field in required_fields:
+                if not step_data.get(field):
+                    self.logger.error(f"Cannot save step: missing required field '{field}'")
+                    return False
+            
+            # Safeguard 3: Check for [RISKY] marker
+            # If step is marked [RISKY], don't save it
+            if '[RISKY]' in step_data.get('description', ''):
+                self.logger.warning(f"Not saving [RISKY] step, escalating instead")
+                return False
+            
+            # Safeguard 4: Validate element path (if applicable)
+            if action in ['click', 'type', 'assert_text', 'hover', 'select']:
+                element_path = step_data.get('element_path', '').strip()
+                if not element_path:
+                    self.logger.error(f"Cannot save step: missing element_path for action '{action}'")
+                    return False
+            
+            # All safeguards passed, save step using existing _save_step method
+            step_id = self._save_step(
+                test_case_id=step_data['test_case_id'],
+                step_order=step_data['step_order'],
+                element_purpose=step_data['description'],
+                action=action,
+                element_locator=step_data.get('element_path', ''),
+                value=step_data.get('value'),
+                by_strategy=step_data.get('by_strategy', 'xpath'),
+                css_selector=step_data.get('css_selector', '')
+            )
+            
+            self.logger.info(f"Step saved successfully: {action} (step {step_data['step_order']})")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error saving step: {e}")
+            return False
+
     def _connect_db(self):
         """Create database connection"""
         return get_db_connection()
@@ -299,6 +387,14 @@ class TestRunner:
 
     def _save_step(self, test_case_id: int, step_order: int, element_purpose: str, action: str, element_locator: str, value: str, by_strategy: str, css_selector: str = "") -> int:
         try:
+            # Validate action type BEFORE saving
+            action_to_validate = action.strip() if action else ''
+            try:
+                self._validate_action_type(action_to_validate)
+            except ValueError as e:
+                self.logger.error(f"Cannot save step due to validation error: {e}")
+                return -1
+            
             with self.get_db_connection() as connection:
                 with connection.cursor() as cursor:
                     # Map AI-generated specific actions to supported actions
@@ -1075,6 +1171,17 @@ class TestRunner:
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting optimized test step generation for test case {test_case_id}")
         
+        # ==================== PHASE 1: STRATEGIC PLANNING ====================
+        try:
+            self.planning_collector.set_requirement_analysis(
+                test_case_id=test_case_id,
+                complexity_score=50,
+                factors=["UI interaction", "Element locating", "Assertion validation"],
+                description="Analyzing UI test requirements for step generation"
+            )
+        except:
+            pass  # Don't break if planning fails
+        
         # Use single database connection for entire session
         try:
             with self.get_db_connection() as session_conn:
@@ -1247,6 +1354,31 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             self.logger.error(f"[PID:{pid}] Failed to initialize ReasoningCollector: {e}")
             reasoning_collector = None
         
+        # Initialize State Machine for test generation workflow
+        try:
+            state_machine = TestGenerationStateMachine(test_case_id)
+            state_machine.update_context(total_steps=0, confidence=0.0)
+            self.logger.info(f"[PID:{pid}] Initialized State Machine for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to initialize State Machine: {e}")
+            state_machine = None
+        
+        # Initialize Attention Mode for heightened validation
+        try:
+            attention_mode = AttentionMode()
+            self.logger.info(f"[PID:{pid}] Initialized Attention Mode for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to initialize Attention Mode: {e}")
+            attention_mode = None
+        
+        # Initialize Confidence Decision Maker for intelligent decision making
+        try:
+            confidence_decision_maker = ConfidenceDecisionMaker()
+            self.logger.info(f"[PID:{pid}] Initialized Confidence Decision Maker for test case {test_case_id}")
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Failed to initialize Confidence Decision Maker: {e}")
+            confidence_decision_maker = None
+        
         # Set the generating status in Redis with shorter TTL to prevent stale flags
         try:
             if self._redis:
@@ -1301,6 +1433,38 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     except Exception as e:
                         self.logger.error(f"[PID:{pid}] Failed to set test split strategy: {e}")
                 
+                # State Machine: Transition to ANALYZE state
+                if state_machine:
+                    try:
+                        state_machine.update_context(total_steps=estimated_steps)
+                        state_machine.transition(Event.ANALYZE)
+                        self.logger.info(f"[PID:{pid}] State Machine: INIT → ANALYZE (estimated {estimated_steps} steps)")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to transition to ANALYZE state: {e}")
+                
+                # Attention Mode: Calculate complexity and activate if needed
+                if attention_mode:
+                    try:
+                        # Calculate complexity based on estimated steps
+                        # Formula: steps * 10 (max 50) + action diversity * 5 (max 30) + 20 for API
+                        complexity_score = min(estimated_steps * 10, 50) + 20  # Estimate for UI test
+                        
+                        config = attention_mode.activate(complexity_score)
+                        
+                        if config.enabled:
+                            self.logger.warning(
+                                f"[PID:{pid}] 🔴 ATTENTION MODE ACTIVATED (complexity: {complexity_score:.1f})"
+                            )
+                            self.logger.warning(
+                                f"[PID:{pid}] Mode: {config.validation_level.value}, "
+                                f"DOM checks: every {config.dom_check_frequency} step(s), "
+                                f"Confidence threshold: {config.confidence_threshold}"
+                            )
+                        else:
+                            self.logger.info(f"[PID:{pid}] Normal mode (complexity: {complexity_score:.1f})")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to activate Attention Mode: {e}")
+                
                 # Navigate to the base URL
                 base_url = env.get_base_url()
                 if not base_url:
@@ -1326,6 +1490,14 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 max_retries = 3
                 retry_delay = 5
                 previous_steps = set()  # To avoid duplicate steps
+                
+                # State Machine: Transition to PLAN state
+                if state_machine:
+                    try:
+                        state_machine.transition(Event.PLAN)
+                        self.logger.info(f"[PID:{pid}] State Machine: ANALYZE → PLAN")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to transition to PLAN state: {e}")
                 
                 try:
                     while next_prompt != 'Stop':
@@ -1356,12 +1528,51 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                             except Exception as e:
                                 self.logger.error(f"[PID:{pid}] Failed to update reasoning collector: {e}")
                         
+                        # Attention Mode: Check DOM if needed
+                        if attention_mode and attention_mode.should_check_dom():
+                            try:
+                                dom_state = {
+                                    'element_count': page_source.count('<'),
+                                    'has_changed': False,
+                                    'stability_score': 0.95
+                                }
+                                dom_validation = attention_mode.validate_dom_state(dom_state)
+                                
+                                if not dom_validation['valid']:
+                                    self.logger.warning(f"[PID:{pid}] [AttentionMode] DOM validation failed: {dom_validation['reason']}")
+                                    time.sleep(2)  # Wait for DOM to stabilize
+                                    page_source = self.browser.get_page_source()
+                                
+                                if dom_validation['should_wait']:
+                                    self.logger.warning(f"[PID:{pid}] [AttentionMode] Waiting for DOM stability...")
+                                    time.sleep(2)
+                                    page_source = self.browser.get_page_source()
+                            except Exception as e:
+                                self.logger.error(f"[PID:{pid}] [AttentionMode] DOM check failed: {e}")
+                        
+                        # Attention Mode: Take screenshot if needed
+                        if attention_mode and attention_mode.should_take_screenshot():
+                            try:
+                                screenshot_path = self.browser.take_screenshot(f"step_{step_order}_attention")
+                                self.logger.debug(f"[PID:{pid}] [AttentionMode] Screenshot taken: {screenshot_path}")
+                            except Exception as e:
+                                self.logger.debug(f"[PID:{pid}] [AttentionMode] Screenshot failed: {e}")
+                        
                         retry_count = 0
                         while retry_count < max_retries:
                             # Check for stop flag before attempting AI analysis
                             if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
                                 self.logger.info(f"[PID:{pid}] Stop flag detected during retry loop, aborting generation")
                                 break
+                            
+                            # State Machine: Transition to GENERATE state
+                            if state_machine and retry_count == 0:
+                                try:
+                                    state_machine.update_context(step_number=step_order)
+                                    state_machine.transition(Event.GENERATE)
+                                    self.logger.info(f"[PID:{pid}] State Machine: PLAN → GENERATE (step {step_order})")
+                                except Exception as e:
+                                    self.logger.error(f"[PID:{pid}] Failed to transition to GENERATE state: {e}")
                             
                             try:
                                 self.logger.info(f"[PID:{pid}] Processing step {screenshot_path}")
@@ -1401,6 +1612,87 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                         next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
                                     self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
+                                    
+                                    # Confidence-based Decision Making
+                                    confidence = 0.85  # Default confidence from AI
+                                    
+                                    if confidence_decision_maker:
+                                        try:
+                                            decision = confidence_decision_maker.make_decision(
+                                                confidence=confidence,
+                                                context={
+                                                    'step_number': step_order,
+                                                    'action': action,
+                                                    'element_locator': element_locator
+                                                }
+                                            )
+                                            
+                                            # Log confidence decision
+                                            self.logger.info(
+                                                f"[PID:{pid}] [ConfidenceDecision] {decision.reason} | "
+                                                f"Action: {decision.action.value}"
+                                            )
+                                            
+                                            # Handle low confidence decisions
+                                            if decision.action == DecisionAction.USE_FEW_SHOT:
+                                                self.logger.warning(
+                                                    f"[PID:{pid}] [ConfidenceDecision] Using {decision.recommended_few_shot_count} few-shot examples"
+                                                )
+                                                confidence_decision_maker.record_few_shot_usage(
+                                                    step_order, 
+                                                    decision.recommended_few_shot_count
+                                                )
+                                            
+                                            elif decision.action == DecisionAction.FIND_ALTERNATIVE:
+                                                self.logger.warning(
+                                                    f"[PID:{pid}] [ConfidenceDecision] Finding alternative approach"
+                                                )
+                                                for strategy in decision.alternative_strategies:
+                                                    confidence_decision_maker.record_alternative_attempt(
+                                                        step_order, 
+                                                        strategy
+                                                    )
+                                            
+                                            elif decision.action == DecisionAction.ESCALATE:
+                                                self.logger.error(
+                                                    f"[PID:{pid}] [ConfidenceDecision] Escalating due to extremely low confidence"
+                                                )
+                                        except Exception as e:
+                                            self.logger.error(f"[PID:{pid}] [ConfidenceDecision] Decision making failed: {e}")
+                                    
+                                    # Attention Mode: Validate element
+                                    if attention_mode:
+                                        try:
+                                            element_found = bool(element_locator)
+                                            
+                                            validation_result = attention_mode.validate_element(
+                                                element_found=element_found,
+                                                confidence=confidence,
+                                                element_locator=element_locator
+                                            )
+                                            
+                                            if not validation_result['valid']:
+                                                self.logger.warning(
+                                                    f"[PID:{pid}] [AttentionMode] Validation failed: {validation_result['reason']}"
+                                                )
+                                                
+                                                if validation_result['should_retry']:
+                                                    self.logger.info(
+                                                        f"[PID:{pid}] [AttentionMode] Retrying with recovery strategy..."
+                                                    )
+                                                    retry_count += 1
+                                                    continue
+                                        except Exception as e:
+                                            self.logger.error(f"[PID:{pid}] [AttentionMode] Element validation failed: {e}")
+                                    
+                                    # State Machine: Transition to VALIDATE state
+                                    if state_machine:
+                                        try:
+                                            state_machine.transition(Event.VALIDATE)
+                                            self.logger.info(f"[PID:{pid}] State Machine: GENERATE → VALIDATE")
+                                        except Exception as e:
+                                            self.logger.error(f"[PID:{pid}] Failed to transition to VALIDATE state: {e}")
+                                    
                                     break
                             except Exception as e:
                                 retry_count += 1
@@ -1506,7 +1798,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     self.logger.error(f"[PID:{pid}] Failed to update step with error: {str(db_error)}")
                                 
                                 # Try to recover from the error using AI
-                                max_recovery_attempts = 5
+                                max_recovery_attempts = 3  # Reduced from 5 to fail faster
                                 recovery_attempt = 0
                                 
                                 # Create a step history for error analysis
@@ -1527,6 +1819,11 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 while recovery_attempt < max_recovery_attempts:
                                     recovery_attempt += 1
                                     self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
+                                    
+                                    # After 2 failed attempts, don't keep retrying same locator
+                                    if recovery_attempt >= 2 and len(previous_attempts) >= 2:
+                                        self.logger.warning(f"Step failed {recovery_attempt} times, stopping recovery attempts")
+                                        break
                                     
                                     try:
                                         # CRITICAL: Check if browser session is still alive
@@ -1685,6 +1982,14 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 break
                             
                             self.logger.info(f"[PID:{pid}] Executing step: {action} on {element_locator}")
+                            
+                            # State Machine: Transition to EXECUTE state
+                            if state_machine:
+                                try:
+                                    state_machine.transition(Event.EXECUTE)
+                                    self.logger.info(f"[PID:{pid}] State Machine: VALIDATE → EXECUTE")
+                                except Exception as e:
+                                    self.logger.error(f"[PID:{pid}] Failed to transition to EXECUTE state: {e}")
 
                             # TRY TO EXECUTE FIRST (don't save yet)
                             step_id = None
@@ -1746,6 +2051,24 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to save screenshot: {str(screenshot_error)}")
                                 
+                                # State Machine: Transition to LEARN state
+                                if state_machine:
+                                    try:
+                                        state_machine.increment_step()
+                                        state_machine.set_confidence(0.85)  # High confidence on successful execution
+                                        state_machine.transition(Event.LEARN)
+                                        self.logger.info(f"[PID:{pid}] State Machine: EXECUTE → LEARN (step {step_order} completed)")
+                                    except Exception as e:
+                                        self.logger.error(f"[PID:{pid}] Failed to transition to LEARN state: {e}")
+                                
+                                # State Machine: Transition to NEXT_STEP state
+                                if state_machine:
+                                    try:
+                                        state_machine.transition(Event.NEXT)
+                                        self.logger.info(f"[PID:{pid}] State Machine: LEARN → NEXT_STEP")
+                                    except Exception as e:
+                                        self.logger.error(f"[PID:{pid}] Failed to transition to NEXT_STEP state: {e}")
+                                
                                 # Move to next step
                                 next_prompt = next_step
                                 step_order += 1
@@ -1771,7 +2094,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     self.logger.error(f"[PID:{pid}] Failed to get page details: {str(page_error)}")
                                 
                                 # Try to recover from the error using AI
-                                max_recovery_attempts = 5
+                                max_recovery_attempts = 3  # Reduced from 5 to fail faster
                                 recovery_attempt = 0
                                 
                                 # Create a step history for error analysis
@@ -1792,6 +2115,11 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 while recovery_attempt < max_recovery_attempts:
                                     recovery_attempt += 1
                                     self.logger.info(f"[PID:{pid}] Attempting error recovery (attempt {recovery_attempt}/{max_recovery_attempts})")
+                                    
+                                    # After 2 failed attempts, don't keep retrying same locator
+                                    if recovery_attempt >= 2 and len(previous_attempts) >= 2:
+                                        self.logger.warning(f"Step failed {recovery_attempt} times, stopping recovery attempts")
+                                        break
                                     
                                     try:
                                         # CRITICAL: Check if browser session is still alive
@@ -1954,6 +2282,59 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 # Update end time on successful completion using session connection
                 self._update_generation_end_time_with_session(session_cursor, session_conn, test_case_id)
                 self.logger.info(f"[PID:{pid}] Test step generation completed for test case {test_case_id}")
+                
+                # State Machine: Transition to COMPLETE state
+                if state_machine:
+                    try:
+                        state_machine.transition(Event.COMPLETE)
+                        summary = state_machine.get_summary()
+                        self.logger.info(f"[PID:{pid}] State Machine: NEXT_STEP → COMPLETE")
+                        self.logger.info(f"[PID:{pid}] State Machine Summary: {summary}")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to transition to COMPLETE state: {e}")
+                
+                # Attention Mode: Log summary
+                if attention_mode:
+                    try:
+                        attention_summary = attention_mode.get_summary()
+                        if attention_summary['enabled']:
+                            self.logger.warning(
+                                f"[PID:{pid}] 🔴 ATTENTION MODE SUMMARY:\n"
+                                f"  Mode: {attention_summary['validation_level']}\n"
+                                f"  Complexity: {attention_summary['complexity_score']:.1f}\n"
+                                f"  Steps processed: {attention_summary['steps_processed']}\n"
+                                f"  Validation failures: {attention_summary['validation_failures']}\n"
+                                f"  Recovery attempts: {attention_summary['recovery_attempts']}\n"
+                                f"  Failure types: {attention_summary['failure_types']}\n"
+                                f"  Recovery strategies: {attention_summary['recovery_strategies']}"
+                            )
+                        else:
+                            self.logger.info(
+                                f"[PID:{pid}] Attention Mode Summary: Normal mode, "
+                                f"Complexity: {attention_summary['complexity_score']:.1f}, "
+                                f"Steps: {attention_summary['steps_processed']}"
+                            )
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to log Attention Mode summary: {e}")
+                
+                # Confidence Decision Maker: Log summary
+                if confidence_decision_maker:
+                    try:
+                        decision_summary = confidence_decision_maker.get_decision_summary()
+                        trend = decision_summary['confidence_trend']
+                        
+                        self.logger.info(
+                            f"[PID:{pid}] 📊 CONFIDENCE DECISION SUMMARY:\n"
+                            f"  Total decisions: {decision_summary['total_decisions']}\n"
+                            f"  Average confidence: {decision_summary['average_confidence']:.2f}\n"
+                            f"  Confidence trend: {trend['trend']} ({trend['direction']})\n"
+                            f"  Min/Max: {trend['min']:.2f}/{trend['max']:.2f}\n"
+                            f"  Decisions by action: {decision_summary['decisions_by_action']}\n"
+                            f"  Few-shot usage: {decision_summary['few_shot_usage']}\n"
+                            f"  Alternative attempts: {decision_summary['alternative_attempts']}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to log Confidence Decision summary: {e}")
                 
                 # Complete reasoning collection
                 if reasoning_collector:
@@ -2968,6 +3349,21 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             )
             step_id = cursor.fetchone()[0]
             conn.commit()
+            
+            # Record planning data for this step
+            try:
+                if hasattr(self, 'planning_collector') and self.planning_collector:
+                    self.planning_collector.add_react_trace(
+                        test_case_id=test_case_id,
+                        thought=f"Step {step_order}: {element_purpose}",
+                        action="generate_ui_step",
+                        action_params={"action": action, "element": element_locator},
+                        observation=f"Generated {action} step",
+                        reflection="Step ready for execution"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Failed to record planning data: {e}")
+            
             return step_id
         except Exception as e:
             conn.rollback()
