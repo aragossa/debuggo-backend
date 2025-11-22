@@ -14,6 +14,7 @@ import requests
 import glob
 
 from auroqa.Utils.System import System
+from auroqa.Services.AIRequestLogger import AIRequestLogger
 
 
 class AIHelper:
@@ -29,6 +30,7 @@ class AIHelper:
         self.claude_api_key = system.claude_api_key
         self.deepseek_api_key = system.deepseek_api_key
         self.logger = self._setup_logger()
+        self.request_logger = AIRequestLogger()
         self.logger.info(f"Initialized AIHelper with provider: {self.provider}")
         # Don't store DB connection - get it when needed to avoid pool exhaustion
 
@@ -724,11 +726,19 @@ IMPORTANT:
 3. Consider if a parent menu needs to be expanded first
 4. For hidden elements, consider using hover actions or JavaScript execution
 5. If timing is the issue, suggest adding a wait step
-6. For notification/toast assertions that fail with empty text (''):
-   - The notification appeared but faded before assertion ran
-   - Suggest adding wait action BEFORE the assertion
-   - Example fix: Insert "wait" step for 1-2 seconds, then retry assertion
-   - Notifications are transient - timing is critical!
+6. ⚠️ FOR TRANSIENT NOTIFICATIONS/TOASTS (appear briefly then disappear):
+   - AVOID waiting for notification elements as they disappear quickly
+   - INSTEAD: Verify the ACTION RESULT by checking:
+     * Page URL changed (e.g., redirect after save)
+     * New item appears in list/table
+     * Form was cleared/reset
+     * Success indicator/badge changed state
+     * Page title or heading changed
+   - Example: Instead of "wait for 'Client saved' notification"
+     → "Wait for URL to change to /admin/client/[id]" or
+     → "Wait for new client to appear in clients list" or
+     → "Wait for form to be cleared"
+   - This approach is more reliable than waiting for transient UI elements
 7. Ensure your solution follows the logical flow of the application
 8. DO NOT suggest solutions that have already been tried in the previous attempts
 
@@ -852,9 +862,9 @@ IMPORTANT:
             
             try:
                 with conn.cursor() as cur:
-                    # Query the database for the active default model
+                    # Query the database for the active default model (get the integer ID, not model_id)
                     cur.execute("""
-                        SELECT model_id FROM ai_models 
+                        SELECT id FROM ai_models 
                         WHERE is_active = TRUE AND is_default = TRUE
                         LIMIT 1
                     """)
@@ -877,7 +887,63 @@ IMPORTANT:
             self.logger.warning(f"Using default model ID: gemini-2.5-pro-preview-06-05")
             return "gemini-2.5-pro-preview-06-05"
 
-    def send_request_to_gemini(self, prompt: str, image: Optional[Image.Image] = None, text_content: str = None) -> Union[bool, Any]:
+    def _get_model_id_and_name(self) -> tuple:
+        """Get both the integer model ID and the model name from the database."""
+        try:
+            # Default values in case database query fails
+            default_model_id = 1
+            default_model_name = "gemini-2.5-pro-preview-06-05"
+            
+            # If provider is not gemini, return the default values
+            if self.provider != 'gemini':
+                self.logger.info(f"Provider is not Gemini, using default model")
+                return (default_model_id, default_model_name)
+            
+            # Get a connection from the pool (and return it immediately after use)
+            try:
+                conn = System.get_db_connection()
+            except Exception as e:
+                self.logger.warning(f"Failed to get database connection: {e}, using default model")
+                return (default_model_id, default_model_name)
+            
+            try:
+                with conn.cursor() as cur:
+                    # Query the database for the active default model (get both id and model_id)
+                    cur.execute("""
+                        SELECT id, model_id FROM ai_models 
+                        WHERE is_active = TRUE AND is_default = TRUE
+                        LIMIT 1
+                    """)
+                    
+                    result = cur.fetchone()
+                    
+                    if result and result[0] and result[1]:
+                        model_id = result[0]
+                        model_name = result[1]
+                        self.logger.info(f"Using model ID {model_id} with name {model_name} from database")
+                        return (model_id, model_name)
+                    else:
+                        self.logger.warning(f"No default active model found in database, using defaults")
+                        return (default_model_id, default_model_name)
+            finally:
+                # CRITICAL: Always return connection to pool
+                System.return_connection(conn)
+                    
+        except Exception as e:
+            self.logger.error(f"Error retrieving model from database: {str(e)}")
+            self.logger.warning(f"Using default model")
+            return (default_model_id, default_model_name)
+
+    def send_request_to_gemini(
+        self, 
+        prompt: str, 
+        image: Optional[Image.Image] = None, 
+        text_content: str = None,
+        request_type: str = 'other',
+        request_context: Optional[str] = None,
+        client_id: Optional[int] = None,
+        user_id: Optional[int] = None
+    ) -> Union[bool, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
         
@@ -894,10 +960,10 @@ IMPORTANT:
         # self.logger.info(f"Prompt preview: {truncated_prompt}")
         # self.logger.info(f"====== GEMINI REQUEST END ======")
         
-        # Get the model ID from the database
-        model_id = self._get_model_id()
+        # Get the model ID and name from the database
+        model_id, model_name = self._get_model_id_and_name()
         genai.configure(api_key=self.gemini_api_key)
-        model = genai.GenerativeModel(model_id)
+        model = genai.GenerativeModel(model_name)
         response = None
         max_retries = 5
         base_delay = 2  # Start with 2 seconds delay
@@ -947,6 +1013,9 @@ IMPORTANT:
                 # Save screenshot, prompt, and response to page_sources folder
                 self._save_to_page_sources(image=image, prompt=prompt, response=response_text)
 
+                # Extract token counts for logging
+                token_counts = self._extract_token_counts(response)
+                
                 # Try to parse as JSON
                 self.logger.info("====== JSON PARSING START ======")
                 try:
@@ -955,6 +1024,21 @@ IMPORTANT:
                     self.logger.info("✓ Successfully parsed full response as JSON")
                     self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
                     self.logger.info("====== JSON PARSING END ======")
+                    
+                    # Log the request with token counts
+                    self._log_ai_request(
+                        prompt=prompt,
+                        response_text=response_text,
+                        token_counts=token_counts,
+                        response_time=response_time,
+                        status='success',
+                        request_type=request_type,
+                        request_context=request_context,
+                        client_id=client_id,
+                        user_id=user_id,
+                        model_id=model_id
+                    )
+                    
                     return parsed_response
                 except json.JSONDecodeError as e:
                     self.logger.info(f"✗ Direct JSON parsing failed: {str(e)}")
@@ -1011,6 +1095,22 @@ IMPORTANT:
                     self.logger.error("✗ All JSON parsing attempts failed")
                     self.logger.error(f"Raw response that failed parsing (first 300 chars): {response_text[:300]}")
                     self.logger.info("====== JSON PARSING END ======")
+                    
+                    # Log the failed request
+                    self._log_ai_request(
+                        prompt=prompt,
+                        response_text=response_text,
+                        token_counts=token_counts,
+                        response_time=response_time,
+                        status='error',
+                        error_message='JSON parsing failed after all attempts',
+                        request_type=request_type,
+                        request_context=request_context,
+                        client_id=client_id,
+                        user_id=user_id,
+                        model_id=model_id
+                    )
+                    
                     raise ValueError('Cannot parse the response - all parsing attempts failed')
                 break
             except google.api_core.exceptions.InternalServerError as e:
@@ -1038,6 +1138,112 @@ IMPORTANT:
             raise ValueError("No response received from Gemini API after retries")
         
         return response.text.strip()  # Return raw text if we couldn't parse JSON
+
+    def _log_ai_request(
+        self,
+        prompt: str,
+        response_text: str,
+        token_counts: Dict[str, int],
+        response_time: float,
+        status: str = 'success',
+        error_message: Optional[str] = None,
+        request_type: str = 'other',
+        request_context: Optional[str] = None,
+        client_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+        model_id: Optional[int] = None
+    ):
+        """
+        Log an AI request with token counts and pricing.
+        
+        Args:
+            prompt: The prompt sent to the AI
+            response_text: The response from the AI
+            token_counts: Dict with 'input_tokens' and 'output_tokens'
+            response_time: Response time in seconds
+            status: Request status ('success', 'error', etc.)
+            error_message: Optional error message
+            request_type: Type of request (ui_step, api_test, etc.)
+            request_context: Optional context (test_case_id, etc.)
+            client_id: Optional client ID
+            user_id: Optional user ID
+            model_id: Optional model ID (if not provided, will be retrieved from database)
+        """
+        try:
+            # Get the default AI model ID if not provided
+            if not model_id:
+                model_id = self._get_model_id()
+            if not model_id:
+                self.logger.warning("Could not determine model ID for logging")
+                return
+            
+            # Convert response time to milliseconds
+            response_time_ms = int(response_time * 1000)
+            
+            # Log the request
+            request_id = self.request_logger.log_request(
+                ai_model_id=model_id,
+                request_type=request_type,
+                input_tokens=token_counts.get('input_tokens', 0),
+                output_tokens=token_counts.get('output_tokens', 0),
+                response_time_ms=response_time_ms,
+                client_id=client_id,
+                user_id=user_id,
+                request_context=request_context,
+                prompt_length=len(prompt),
+                response_length=len(response_text),
+                status=status,
+                error_message=error_message
+            )
+            
+            if request_id:
+                self.logger.info(f"✅ AI request logged with ID {request_id}")
+            
+        except Exception as e:
+            self.logger.warning(f"Error logging AI request: {str(e)}")
+
+    def _extract_token_counts(self, response) -> Dict[str, int]:
+        """
+        Extract token counts from Gemini API response.
+        
+        Args:
+            response: The Gemini API response object
+            
+        Returns:
+            Dict with 'input_tokens' and 'output_tokens' keys
+        """
+        try:
+            tokens = {
+                'input_tokens': 0,
+                'output_tokens': 0
+            }
+            
+            # Check if response has usage_metadata
+            if hasattr(response, 'usage_metadata'):
+                usage = response.usage_metadata
+                
+                # Extract prompt token count
+                if hasattr(usage, 'prompt_token_count'):
+                    tokens['input_tokens'] = usage.prompt_token_count
+                
+                # Extract candidates token count (output)
+                if hasattr(usage, 'candidates_token_count'):
+                    tokens['output_tokens'] = usage.candidates_token_count
+                
+                self.logger.info(
+                    f"📊 Token counts extracted: "
+                    f"input={tokens['input_tokens']}, "
+                    f"output={tokens['output_tokens']}, "
+                    f"total={tokens['input_tokens'] + tokens['output_tokens']}"
+                )
+            else:
+                self.logger.warning("Response does not have usage_metadata attribute")
+            
+            return tokens
+            
+        except Exception as e:
+            self.logger.warning(f"Error extracting token counts: {str(e)}")
+            return {'input_tokens': 0, 'output_tokens': 0}
 
     def send_message_to_claude(self, prompt: str, image: Union[Image.Image, None] = None):
         """Send a message to Claude API."""

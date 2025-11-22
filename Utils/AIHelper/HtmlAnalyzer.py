@@ -614,10 +614,19 @@ PREVIOUS STEP: {prev_step_description}
         if self.provider == "gemini":
             if image:
                 self.logger.info("Sending request to Gemini with image")
-                response = self.send_request_to_gemini(prompt, image)
+                response = self.send_request_to_gemini(
+                    prompt, 
+                    image,
+                    request_type='html_analysis',
+                    request_context=f'test_case_{test_case_id}_step_{step_order}'
+                )
             else:
                 self.logger.info("Sending request to Gemini without image")
-                response = self.send_request_to_gemini(prompt)
+                response = self.send_request_to_gemini(
+                    prompt,
+                    request_type='html_analysis',
+                    request_context=f'test_case_{test_case_id}_step_{step_order}'
+                )
             self.logger.info("=== HTML ANALYZER RESPONSE START ===")
 
             # Validate required keys
@@ -785,10 +794,19 @@ PREVIOUS STEP: {prev_step_description}
         if self.provider == "gemini":
             if image:
                 self.logger.info("Sending error analysis request to Gemini with image")
-                response = self.send_request_to_gemini(prompt, image)
+                response = self.send_request_to_gemini(
+                    prompt, 
+                    image,
+                    request_type='ui_error',
+                    request_context=f'test_case_{test_case_id}_error_recovery'
+                )
             else:
                 self.logger.info("Sending error analysis request to Gemini without image")
-                response = self.send_request_to_gemini(prompt)
+                response = self.send_request_to_gemini(
+                    prompt,
+                    request_type='ui_error',
+                    request_context=f'test_case_{test_case_id}_error_recovery'
+                )
             
             self.logger.info("=== ERROR ANALYSIS RESPONSE START ===")
             

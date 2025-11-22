@@ -4533,6 +4533,14 @@ class AIModelCreate(BaseModel):
     description: Optional[str] = None
     is_active: Optional[bool] = True
     is_default: Optional[bool] = False
+    input_price_per_1m: Optional[float] = 0
+    output_price_per_1m: Optional[float] = 0
+    tier_threshold: Optional[int] = 0
+    input_price_per_1m_above: Optional[float] = None
+    output_price_per_1m_above: Optional[float] = None
+    cache_input_price_per_1m: Optional[float] = 0
+    cache_input_price_per_1m_above: Optional[float] = None
+    cache_storage_price_per_1m_hour: Optional[float] = 0
 
 class AIModelUpdate(BaseModel):
     name: Optional[str] = None
@@ -4540,18 +4548,31 @@ class AIModelUpdate(BaseModel):
     description: Optional[str] = None
     is_active: Optional[bool] = None
     is_default: Optional[bool] = None
+    input_price_per_1m: Optional[float] = None
+    output_price_per_1m: Optional[float] = None
+    tier_threshold: Optional[int] = None
+    input_price_per_1m_above: Optional[float] = None
+    output_price_per_1m_above: Optional[float] = None
+    cache_input_price_per_1m: Optional[float] = None
+    cache_input_price_per_1m_above: Optional[float] = None
+    cache_storage_price_per_1m_hour: Optional[float] = None
 
 @app.get("/api/ai-models", response_model=List[Dict])
 async def list_ai_models(current_user: User = Depends(get_current_user)):
     """
-    List all available AI models.
+    List all available AI models with pricing information.
     """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute("""
-                SELECT id, name, model_id, description, is_active, is_default, created_at, updated_at
+                SELECT id, name, model_id, description, is_active, is_default, 
+                       input_price_per_1m, output_price_per_1m, tier_threshold,
+                       input_price_per_1m_above, output_price_per_1m_above,
+                       cache_input_price_per_1m, cache_input_price_per_1m_above,
+                       cache_storage_price_per_1m_hour,
+                       created_at, updated_at
                 FROM ai_models
                 ORDER BY name
             """)
@@ -4607,17 +4628,31 @@ async def create_ai_model(model_data: AIModelCreate, current_user: User = Depend
                     UPDATE ai_models SET is_default = FALSE WHERE is_default = TRUE
                 """)
             
-            # Insert new model
+            # Insert new model with pricing
             cursor.execute("""
-                INSERT INTO ai_models (name, model_id, description, is_active, is_default)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO ai_models (
+                    name, model_id, description, is_active, is_default,
+                    input_price_per_1m, output_price_per_1m, tier_threshold,
+                    input_price_per_1m_above, output_price_per_1m_above,
+                    cache_input_price_per_1m, cache_input_price_per_1m_above,
+                    cache_storage_price_per_1m_hour
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 model_data.name,
                 model_data.model_id,
                 model_data.description,
                 model_data.is_active,
-                model_data.is_default
+                model_data.is_default,
+                model_data.input_price_per_1m or 0,
+                model_data.output_price_per_1m or 0,
+                model_data.tier_threshold or 0,
+                model_data.input_price_per_1m_above,
+                model_data.output_price_per_1m_above,
+                model_data.cache_input_price_per_1m or 0,
+                model_data.cache_input_price_per_1m_above,
+                model_data.cache_storage_price_per_1m_hour or 0
             ))
             model_id = cursor.fetchone()[0]
             conn.commit()
@@ -4693,6 +4728,38 @@ async def update_ai_model(
             if model_data.is_default is not None:
                 update_fields.append("is_default = %s")
                 params.append(model_data.is_default)
+            
+            if model_data.input_price_per_1m is not None:
+                update_fields.append("input_price_per_1m = %s")
+                params.append(model_data.input_price_per_1m)
+            
+            if model_data.output_price_per_1m is not None:
+                update_fields.append("output_price_per_1m = %s")
+                params.append(model_data.output_price_per_1m)
+            
+            if model_data.tier_threshold is not None:
+                update_fields.append("tier_threshold = %s")
+                params.append(model_data.tier_threshold)
+            
+            if model_data.input_price_per_1m_above is not None:
+                update_fields.append("input_price_per_1m_above = %s")
+                params.append(model_data.input_price_per_1m_above)
+            
+            if model_data.output_price_per_1m_above is not None:
+                update_fields.append("output_price_per_1m_above = %s")
+                params.append(model_data.output_price_per_1m_above)
+            
+            if model_data.cache_input_price_per_1m is not None:
+                update_fields.append("cache_input_price_per_1m = %s")
+                params.append(model_data.cache_input_price_per_1m)
+            
+            if model_data.cache_input_price_per_1m_above is not None:
+                update_fields.append("cache_input_price_per_1m_above = %s")
+                params.append(model_data.cache_input_price_per_1m_above)
+            
+            if model_data.cache_storage_price_per_1m_hour is not None:
+                update_fields.append("cache_storage_price_per_1m_hour = %s")
+                params.append(model_data.cache_storage_price_per_1m_hour)
             
             # Add updated_at timestamp
             update_fields.append("updated_at = CURRENT_TIMESTAMP")
@@ -4836,6 +4903,177 @@ async def set_user_ai_model(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to set user AI model preference: {str(e)}"
+        )
+    finally:
+        if conn:
+            return_db_connection(conn)
+
+# AI Usage Tracking Endpoints
+
+@app.get("/api/ai-usage/stats", response_model=Dict)
+async def get_ai_usage_stats(
+    current_user: User = Depends(get_current_user),
+    client_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    Get AI usage statistics (tokens and costs).
+    Admin can see all clients, regular users see their own client.
+    """
+    try:
+        from auroqa.Services.AIRequestLogger import AIRequestLogger
+        from datetime import datetime
+        
+        logger = AIRequestLogger()
+        
+        # Determine which client to query
+        query_client_id = client_id
+        if not current_user.is_admin and client_id and client_id != current_user.client_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view usage for your own client"
+            )
+        
+        if not current_user.is_admin and not client_id:
+            query_client_id = current_user.client_id
+        
+        # Parse dates if provided
+        start = None
+        end = None
+        if start_date:
+            start = datetime.fromisoformat(start_date)
+        if end_date:
+            end = datetime.fromisoformat(end_date)
+        
+        stats = logger.get_usage_stats(
+            client_id=query_client_id,
+            start_date=start,
+            end_date=end
+        )
+        
+        return stats
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get AI usage stats: {str(e)}"
+        )
+
+@app.get("/api/ai-usage/by-type", response_model=Dict)
+async def get_ai_usage_by_type(
+    current_user: User = Depends(get_current_user),
+    client_id: Optional[str] = None
+):
+    """
+    Get AI usage statistics grouped by request type.
+    Request types: ui_step, ui_error, api_test, api_schema, image_analysis, text_analysis, other
+    """
+    try:
+        from auroqa.Services.AIRequestLogger import AIRequestLogger
+        
+        logger = AIRequestLogger()
+        
+        # Determine which client to query
+        query_client_id = client_id
+        if not current_user.is_admin and client_id and client_id != current_user.client_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view usage for your own client"
+            )
+        
+        if not current_user.is_admin and not client_id:
+            query_client_id = current_user.client_id
+        
+        stats = logger.get_request_type_stats(client_id=query_client_id)
+        
+        return {"by_type": stats}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get AI usage by type: {str(e)}"
+        )
+
+@app.get("/api/ai-usage/requests", response_model=Dict)
+async def get_ai_request_logs(
+    current_user: User = Depends(get_current_user),
+    client_id: Optional[str] = None,
+    request_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    Get detailed AI request logs with pagination.
+    """
+    conn = None
+    try:
+        # Determine which client to query
+        query_client_id = client_id
+        if not current_user.is_admin and client_id and client_id != current_user.client_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only view logs for your own client"
+            )
+        
+        if not current_user.is_admin and not client_id:
+            query_client_id = current_user.client_id
+        
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            # Build query
+            where_clauses = []
+            params = []
+            
+            if query_client_id:
+                where_clauses.append("client_id = %s")
+                params.append(query_client_id)
+            
+            if request_type:
+                where_clauses.append("request_type = %s")
+                params.append(request_type)
+            
+            where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+            
+            # Get total count
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM ai_request_logs WHERE {where_clause}
+            """, params)
+            total_count = cursor.fetchone()[0]
+            
+            # Get paginated results
+            cursor.execute(f"""
+                SELECT 
+                    id, ai_model_id, client_id, user_id, request_type, request_context,
+                    input_tokens, output_tokens, total_tokens,
+                    input_cost, output_cost, total_cost,
+                    prompt_length, response_length, response_time_ms,
+                    status, error_message, created_at
+                FROM ai_request_logs
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """, params + [limit, offset])
+            
+            requests = cursor.fetchall()
+            
+            return {
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+                "requests": requests
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get AI request logs: {str(e)}"
         )
     finally:
         if conn:
@@ -5958,7 +6196,7 @@ async def get_query_logs(
 
 @app.get("/api/phase4/performance/optimization-recommendations")
 async def get_optimization_recommendations(
-    analysis_type: str = Query("all", regex="^(cache|query|index|all)$"),
+    analysis_type: str = Query("all", pattern="^(cache|query|index|all)$"),
     current_user: User = Depends(check_admin_access)
 ):
     """
@@ -6656,7 +6894,7 @@ async def get_query_logs_alias(
 
 @app.get("/api/performance/optimization-recommendations")
 async def get_optimization_recommendations_alias(
-    analysis_type: str = Query("all", regex="^(cache|query|index|all)$"),
+    analysis_type: str = Query("all", pattern="^(cache|query|index|all)$"),
     current_user: User = Depends(check_admin_access)
 ):
     """Alias for /api/phase4/performance/optimization-recommendations"""

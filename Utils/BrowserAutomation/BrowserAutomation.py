@@ -1203,6 +1203,153 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Error in text contains assertion for element {element_path}: {str(e)}")
             raise
 
+    def capture_transient_notifications(self, timeout=5):
+        """
+        Capture transient notifications/toasts that appear and disappear quickly.
+        Uses JavaScript to monitor DOM changes and capture notification text.
+        
+        Args:
+            timeout: How long to monitor for notifications (seconds)
+            
+        Returns:
+            List of captured notification texts
+        """
+        try:
+            script = """
+            return new Promise((resolve) => {
+                const notifications = [];
+                let captureTimeout;
+                
+                // Function to extract notification text
+                function captureNotifications() {
+                    // Common notification selectors
+                    const selectors = [
+                        '[data-notify="message"]',
+                        '.notification',
+                        '.toast',
+                        '.alert',
+                        '[role="alert"]',
+                        '.message-box',
+                        '.success-message',
+                        '.error-message',
+                        '.warning-message',
+                        '.info-message'
+                    ];
+                    
+                    selectors.forEach(selector => {
+                        const elements = document.querySelectorAll(selector);
+                        elements.forEach(el => {
+                            const text = el.textContent.trim();
+                            if (text && !notifications.includes(text)) {
+                                notifications.push(text);
+                            }
+                        });
+                    });
+                }
+                
+                // Capture initial notifications
+                captureNotifications();
+                
+                // Monitor for new notifications
+                const observer = new MutationObserver(() => {
+                    captureNotifications();
+                });
+                
+                observer.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    characterData: true
+                });
+                
+                // Stop monitoring after timeout and return captured notifications
+                captureTimeout = setTimeout(() => {
+                    observer.disconnect();
+                    resolve(notifications);
+                }, arguments[0] * 1000);
+            });
+            """
+            
+            notifications = self.driver.execute_async_script(script, timeout)
+            if notifications:
+                self.logger.info(f"[PID:{self.pid}] Captured notifications: {notifications}")
+            return notifications
+            
+        except Exception as e:
+            self.logger.warning(f"[PID:{self.pid}] Error capturing notifications: {str(e)}")
+            return []
+
+    def wait_for_page_state_change(self, initial_url=None, initial_title=None, timeout=10):
+        """
+        Wait for page state to change (URL or title change).
+        Useful for verifying actions that trigger navigation.
+        
+        Args:
+            initial_url: The URL before the action (if None, uses current URL)
+            initial_title: The page title before the action (if None, uses current title)
+            timeout: How long to wait for change (seconds)
+            
+        Returns:
+            True if page state changed, False if timeout
+        """
+        try:
+            if initial_url is None:
+                initial_url = self.driver.current_url
+            if initial_title is None:
+                initial_title = self.driver.title
+            
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                current_url = self.driver.current_url
+                current_title = self.driver.title
+                
+                if current_url != initial_url or current_title != initial_title:
+                    self.logger.info(f"[PID:{self.pid}] Page state changed. URL: {initial_url} → {current_url}")
+                    return True
+                
+                time.sleep(0.5)
+            
+            self.logger.warning(f"[PID:{self.pid}] Page state did not change within {timeout} seconds")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for page state change: {str(e)}")
+            return False
+
+    def wait_for_element_count_change(self, selector, initial_count=None, timeout=10, by=By.XPATH):
+        """
+        Wait for the number of elements matching a selector to change.
+        Useful for verifying new items were added to a list/table.
+        
+        Args:
+            selector: XPath or CSS selector for elements
+            initial_count: Initial count (if None, uses current count)
+            timeout: How long to wait for change (seconds)
+            by: Locator strategy (By.XPATH or By.CSS_SELECTOR)
+            
+        Returns:
+            True if count changed, False if timeout
+        """
+        try:
+            if initial_count is None:
+                initial_count = len(self.driver.find_elements(by, selector))
+            
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                current_count = len(self.driver.find_elements(by, selector))
+                
+                if current_count != initial_count:
+                    self.logger.info(f"[PID:{self.pid}] Element count changed: {initial_count} → {current_count}")
+                    return True
+                
+                time.sleep(0.5)
+            
+            self.logger.warning(f"[PID:{self.pid}] Element count did not change within {timeout} seconds")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error waiting for element count change: {str(e)}")
+            return False
+
     def close(self):
         """Close the browser and cleanup with better error handling"""
         if self.driver:

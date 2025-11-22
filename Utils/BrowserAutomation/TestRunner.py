@@ -24,6 +24,7 @@ from auroqa.Services.ConfidenceScorer import ConfidenceScorer
 from auroqa.Services.TestGenerationStateMachine import TestGenerationStateMachine, Event, State
 from auroqa.Services.AttentionMode import AttentionMode
 from auroqa.Services.ConfidenceDecisionMaker import ConfidenceDecisionMaker, DecisionAction
+from auroqa.Services.AIRequestLogger import AIRequestLogger
 
 
 class TestRunner:
@@ -1256,9 +1257,77 @@ class TestRunner:
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Database connection error during test generation: {e}")
     
+    def _ensure_gemini_flash_lite_model(self):
+        """
+        Ensure gemini-2.5-flash-lite model exists in database with pricing.
+        Uses UPSERT to create or update the model.
+        Returns the model ID or None if operation fails.
+        """
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                # First try to get existing model (faster than UPSERT if it exists)
+                cursor.execute("""
+                    SELECT id FROM ai_models WHERE model_id = %s
+                """, ('gemini-2.5-flash-lite',))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    model_id = existing[0]
+                    self.logger.debug(f"gemini-2.5-flash-lite model already exists (ID: {model_id})")
+                    return model_id
+                
+                # Model doesn't exist, create it with UPSERT
+                cursor.execute("""
+                    INSERT INTO ai_models (
+                        name, model_id, description, is_active, is_default,
+                        input_price_per_1m, output_price_per_1m,
+                        cache_input_price_per_1m, cache_input_price_per_1m_above,
+                        cache_storage_price_per_1m_hour
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (model_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        is_active = EXCLUDED.is_active,
+                        input_price_per_1m = EXCLUDED.input_price_per_1m,
+                        output_price_per_1m = EXCLUDED.output_price_per_1m,
+                        cache_input_price_per_1m = EXCLUDED.cache_input_price_per_1m,
+                        cache_input_price_per_1m_above = EXCLUDED.cache_input_price_per_1m_above,
+                        cache_storage_price_per_1m_hour = EXCLUDED.cache_storage_price_per_1m_hour,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                """, (
+                    'Gemini 2.5 Flash Lite',
+                    'gemini-2.5-flash-lite',
+                    'Fast and efficient model for step estimation and quick analysis',
+                    True,  # is_active
+                    False,  # is_default
+                    0.30,  # input_price_per_1m (text/image/video)
+                    2.50,  # output_price_per_1m
+                    0.03,  # cache_input_price_per_1m (text/image/video)
+                    0.03,  # cache_input_price_per_1m_above (same as base for flash-lite)
+                    1.00   # cache_storage_price_per_1m_hour
+                ))
+                model_id = cursor.fetchone()[0]
+                conn.commit()
+                self.logger.info(f"Created gemini-2.5-flash-lite model in database (ID: {model_id})")
+                return model_id
+        except Exception as e:
+            self.logger.error(f"Failed to ensure gemini-2.5-flash-lite model in database: {e}")
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                return_db_connection(conn)
+    
     def _estimate_steps_with_ai(self, test_description, html_analyzer):
         """
         Use AI to estimate the number of test steps needed for the test case.
+        Uses gemini-2.5-flash-lite from database with pricing and logs the request.
         
         Args:
             test_description: The test case description
@@ -1267,6 +1336,12 @@ class TestRunner:
         Returns:
             Estimated number of steps (between 3 and 30)
         """
+        start_time = time.time()
+        response_time_ms = 0
+        input_tokens = 0
+        output_tokens = 0
+        model_id = None
+        
         try:
             from auroqa.Utils.AIHelper.AIHelper import AIHelper
             import re
@@ -1277,6 +1352,9 @@ Consider each distinct action or verification as a separate step.
 Test Case: {test_description}
 
 Respond with ONLY a single number between 3 and 30, nothing else."""
+            
+            # Ensure model exists in database with pricing
+            model_id = self._ensure_gemini_flash_lite_model()
             
             ai_helper = AIHelper()
             
@@ -1292,6 +1370,14 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     model = genai.GenerativeModel('gemini-2.5-flash-lite')
                     gemini_response = model.generate_content(prompt)
                     response = gemini_response.text if gemini_response else None
+                    
+                    # Extract token counts from response
+                    if hasattr(gemini_response, 'usage_metadata'):
+                        usage = gemini_response.usage_metadata
+                        if hasattr(usage, 'prompt_token_count'):
+                            input_tokens = usage.prompt_token_count
+                        if hasattr(usage, 'candidates_token_count'):
+                            output_tokens = usage.candidates_token_count
                 elif ai_helper.provider == 'claude':
                     response = ai_helper.send_message_to_claude(prompt)
                 elif ai_helper.provider == 'deepseek':
@@ -1303,10 +1389,21 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     model = genai.GenerativeModel('gemini-2.5-flash-lite')
                     gemini_response = model.generate_content(prompt)
                     response = gemini_response.text if gemini_response else None
+                    
+                    # Extract token counts from response
+                    if hasattr(gemini_response, 'usage_metadata'):
+                        usage = gemini_response.usage_metadata
+                        if hasattr(usage, 'prompt_token_count'):
+                            input_tokens = usage.prompt_token_count
+                        if hasattr(usage, 'candidates_token_count'):
+                            output_tokens = usage.candidates_token_count
             finally:
                 ai_helper.provider = original_provider
             
+            response_time_ms = int((time.time() - start_time) * 1000)
+            
             # Extract the number from response
+            estimated = 5  # Default fallback
             if response:
                 # Handle both string and int responses
                 if isinstance(response, int):
@@ -1316,15 +1413,30 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     numbers = re.findall(r'\d+', response.strip())
                     if numbers:
                         estimated = int(numbers[0])
-                    else:
-                        return 5  # Fallback if no number found
-                else:
-                    return 5  # Fallback for unexpected types
                 
                 # Ensure it's within bounds
                 estimated = max(3, min(30, estimated))
-                self.logger.info(f"AI estimated {estimated} steps for test case")
-                return estimated
+            
+            # Log the request to ai_request_logs
+            if model_id:
+                try:
+                    request_logger = AIRequestLogger()
+                    request_logger.log_request(
+                        ai_model_id=model_id,
+                        request_type='ui_step',  # Step estimation is a UI step
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        response_time_ms=response_time_ms,
+                        prompt_length=len(prompt),
+                        response_length=len(response) if response else 0,
+                        status='success' if response else 'error',
+                        metadata={'purpose': 'step_estimation', 'estimated_steps': estimated}
+                    )
+                except Exception as log_error:
+                    self.logger.warning(f"Failed to log AI request: {log_error}")
+            
+            self.logger.info(f"AI estimated {estimated} steps for test case (tokens: {input_tokens} in, {output_tokens} out)")
+            return estimated
         except Exception as e:
             self.logger.warning(f"Failed to estimate steps with AI: {e}")
         

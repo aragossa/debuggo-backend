@@ -110,7 +110,12 @@ class TextAnalyzer(AIHelper):
 
     def analyze_txt(self, file_content: bytes, client_id: int = None, project_id: str = None):
         text = file_content.decode('utf-8')
-        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_txt_promt(text), text_content=text)
+        genai_response = self.send_request_to_gemini(
+            prompt=self.get_analyze_txt_promt(text), 
+            text_content=text,
+            request_type='text_analysis',
+            request_context=f'project_{project_id}'
+        )
         self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True
 
@@ -126,7 +131,12 @@ class TextAnalyzer(AIHelper):
             api_prompt = self.get_analyze_api_schema_prompt(schema_text, file_name)
             
             # Send request to Gemini for API test case generation
-            genai_response = self.send_request_to_gemini(prompt=api_prompt, text_content=schema_text)
+            genai_response = self.send_request_to_gemini(
+                prompt=api_prompt, 
+                text_content=schema_text,
+                request_type='api_schema',
+                request_context=f'project_{project_id}_schema_{file_name}'
+            )
             
             # Save test cases with API type
             self.save_api_test_cases(genai_response, client_id=client_id, project_id=project_id)

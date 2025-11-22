@@ -124,6 +124,11 @@ class ImageAnalyzer(AIHelper):
 
     def analyze_img(self, file_path: str, client_id: int = None, project_id: str = None) -> Union[Image.Image, bool]:
         image = self.read_img(file_path=file_path)
-        genai_response = self.send_request_to_gemini(prompt=self.get_analyze_img_promt(), image=image)
+        genai_response = self.send_request_to_gemini(
+            prompt=self.get_analyze_img_promt(), 
+            image=image,
+            request_type='image_analysis',
+            request_context=f'project_{project_id}_image'
+        )
         self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True
