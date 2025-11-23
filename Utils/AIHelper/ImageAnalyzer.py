@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from typing import Union
+import uuid
 
 from fastapi import UploadFile
 
@@ -123,12 +124,18 @@ class ImageAnalyzer(AIHelper):
                 continue
 
     def analyze_img(self, file_path: str, client_id: int = None, project_id: str = None) -> Union[Image.Image, bool]:
+        # Generate unique job ID for tracking all AI requests in this analysis
+        generation_job_id = str(uuid.uuid4())
+        self.logger.info(f"Analyzing image with Job ID: {generation_job_id}")
+        
         image = self.read_img(file_path=file_path)
         genai_response = self.send_request_to_gemini(
             prompt=self.get_analyze_img_promt(), 
             image=image,
             request_type='image_analysis',
-            request_context=f'project_{project_id}_image'
+            request_context=f'project_{project_id}_image',
+            client_id=client_id,
+            generation_job_id=generation_job_id
         )
         self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True

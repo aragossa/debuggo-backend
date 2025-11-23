@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import uuid
 
 from fastapi import UploadFile
 
@@ -109,12 +110,18 @@ class TextAnalyzer(AIHelper):
                 continue
 
     def analyze_txt(self, file_content: bytes, client_id: int = None, project_id: str = None):
+        # Generate unique job ID for tracking all AI requests in this analysis
+        generation_job_id = str(uuid.uuid4())
+        self.logger.info(f"Analyzing text with Job ID: {generation_job_id}")
+        
         text = file_content.decode('utf-8')
         genai_response = self.send_request_to_gemini(
             prompt=self.get_analyze_txt_promt(text), 
             text_content=text,
             request_type='text_analysis',
-            request_context=f'project_{project_id}'
+            request_context=f'project_{project_id}',
+            client_id=client_id,
+            generation_job_id=generation_job_id
         )
         self.save_test_cases(genai_response, client_id=client_id, project_id=project_id)
         return True
@@ -130,12 +137,18 @@ class TextAnalyzer(AIHelper):
             # Create API-specific prompt for Gemini
             api_prompt = self.get_analyze_api_schema_prompt(schema_text, file_name)
             
+            # Generate unique job ID for tracking all AI requests in this analysis
+            generation_job_id = str(uuid.uuid4())
+            self.logger.info(f"Analyzing API schema with Job ID: {generation_job_id}")
+            
             # Send request to Gemini for API test case generation
             genai_response = self.send_request_to_gemini(
                 prompt=api_prompt, 
                 text_content=schema_text,
                 request_type='api_schema',
-                request_context=f'project_{project_id}_schema_{file_name}'
+                request_context=f'project_{project_id}_schema_{file_name}',
+                client_id=client_id,
+                generation_job_id=generation_job_id
             )
             
             # Save test cases with API type

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import uuid
 from typing import Dict, Any, List, Optional
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
@@ -70,7 +71,9 @@ class ApiSchemaService:
             bool: True if steps were generated successfully
         """
         try:
-            self.logger.info(f"Generating API test steps for test case {test_case_id}")
+            # Generate unique job ID for tracking all AI requests in this test generation
+            generation_job_id = str(uuid.uuid4())
+            self.logger.info(f"Generating API test steps for test case {test_case_id} (Job ID: {generation_job_id})")
             
             # Get test case details
             with get_db_connection_context() as conn:
@@ -111,7 +114,11 @@ class ApiSchemaService:
             # Use Gemini to generate steps
             response = self.ai_helper.send_request_to_gemini(
                 prompt=prompt,
-                text_content=schema_content
+                text_content=schema_content,
+                request_type='api_test',
+                request_context=f'test_case_{test_case_id}',
+                client_id=client_id,
+                generation_job_id=generation_job_id
             )
             
             if not response:
@@ -135,7 +142,9 @@ class ApiSchemaService:
                     test_case_id,
                     schema_content,
                     test_case_name,
-                    test_case_description
+                    test_case_description,
+                    client_id,
+                    generation_job_id
                 )
                 self.logger.info(f"✅ Validation process completed")
                 
@@ -199,12 +208,7 @@ class ApiSchemaService:
                                 summary += details['summary']
                             elif 'description' in details:
                                 summary += details['description'][:100]
-                            
-                            # Debug: Log what we're processing
-                            self.logger.debug(f"Processing {method.upper()} {full_path}")
-                            self.logger.debug(f"Has parameters: {'parameters' in details}")
-                            self.logger.debug(f"Has requestBody: {'requestBody' in details}")
-                            
+
                             # Check if authentication is required for this endpoint
                             requires_auth = False
                             auth_type = None
@@ -245,8 +249,7 @@ class ApiSchemaService:
                                     param_type = param.get('type', param.get('schema', {}).get('type', 'any'))
                                     param_required = param.get('required', False)
                                     
-                                    self.logger.debug(f"  Param: {param_name}, in: {param_in}, type: {param_type}")
-                                    
+                                  
                                     if param_in == 'query':
                                         query_params.append(f"{param_name} ({param_type})")
                                     elif param_in == 'path':
@@ -1678,7 +1681,9 @@ Generate practical, executable test steps that cover the main flow described in 
         test_case_id: int,
         schema_content: str,
         test_case_name: str,
-        test_case_description: str
+        test_case_description: str,
+        client_id: str,
+        generation_job_id: str
     ) -> List[Dict[str, Any]]:
         """Validate generated steps by executing them and fix if needed."""
         self.logger.info(f"🔍 Starting validation for test case {test_case_id} with {len(steps)} steps...")
@@ -1824,7 +1829,10 @@ Generate practical, executable test steps that cover the main flow described in 
                     failed_steps,
                     schema_content,
                     test_case_name,
-                    test_case_description
+                    test_case_description,
+                    test_case_id,
+                    client_id,
+                    generation_job_id
                 )
                 return fixed_steps
             
@@ -1843,7 +1851,10 @@ Generate practical, executable test steps that cover the main flow described in 
         failed_steps: List[Dict[str, Any]],
         schema_content: str,
         test_case_name: str,
-        test_case_description: str
+        test_case_description: str,
+        test_case_id: int,
+        client_id: str,
+        generation_job_id: str
     ) -> List[Dict[str, Any]]:
         """Ask Gemini to fix failed steps based on actual API responses."""
         try:
@@ -1933,7 +1944,11 @@ Return ONLY the JSON array of corrected steps, no explanation.
             self.logger.info("🤖 Asking Gemini to fix failed steps...")
             response = self.ai_helper.send_request_to_gemini(
                 prompt=correction_prompt,
-                text_content=schema_content
+                text_content=schema_content,
+                request_type='api_test',
+                request_context=f'test_case_{test_case_id}_correction',
+                client_id=client_id,
+                generation_job_id=generation_job_id
             )
             
             if response:
@@ -2000,7 +2015,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
         try:
             from Services.ApiTestExecutor import ApiTestExecutor
             
-            self.logger.info(f"🔄 Starting iterative step generation for test case {test_case_id}")
+            # Generate unique job ID for tracking all AI requests in this test generation
+            generation_job_id = str(uuid.uuid4())
+            self.logger.info(f"🔄 Starting iterative step generation for test case {test_case_id} (Job ID: {generation_job_id})")
             
             # ==================== PHASE 1: STRATEGIC PLANNING ====================
             # Get test case details and user_id
@@ -2174,7 +2191,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
                 first_step = self._generate_first_step(
                     test_case_name,
                     test_case_description,
-                    schema_summary
+                    schema_summary,
+                    client_id,
+                    generation_job_id
                 )
                 
                 if not first_step:
@@ -2247,7 +2266,9 @@ Return ONLY the JSON array of corrected steps, no explanation.
                         test_case_description,
                         schema_summary,
                         execution_history,
-                        extracted_variables
+                        extracted_variables,
+                        client_id,
+                        generation_job_id
                     )
                     
                     if not current_step:
@@ -2546,7 +2567,7 @@ Return ONLY the JSON array of corrected steps, no explanation.
             self.logger.error(f"❌ Error in iterative generation: {str(e)}", exc_info=True)
             return False
     
-    def _generate_first_step(self, test_case_name: str, test_case_description: str, schema_summary: str) -> dict:
+    def _generate_first_step(self, test_case_name: str, test_case_description: str, schema_summary: str, client_id: str = None, generation_job_id: str = None) -> dict:
         """Generate the first step (usually authentication if required)."""
         
         example_json = '''{
@@ -2668,7 +2689,11 @@ Return ONLY the JSON object, no explanation.
         
         response = self.ai_helper.send_request_to_gemini(
             prompt=prompt,
-            text_content=schema_summary
+            text_content=schema_summary,
+            request_type='api_test',
+            request_context='test_case_first_step_generation',
+            client_id=client_id,
+            generation_job_id=generation_job_id
         )
         
         if not response:
@@ -2684,7 +2709,9 @@ Return ONLY the JSON object, no explanation.
         test_case_description: str,
         schema_summary: str,
         execution_history: list,
-        extracted_variables: dict = None
+        extracted_variables: dict = None,
+        client_id: str = None,
+        generation_job_id: str = None
     ) -> dict:
         """Generate the next step based on previous execution results."""
         
@@ -2878,7 +2905,11 @@ No explanation, just JSON.
         
         response = self.ai_helper.send_request_to_gemini(
             prompt=prompt,
-            text_content=schema_summary
+            text_content=schema_summary,
+            request_type='api_test',
+            request_context=f'test_case_step_generation',
+            client_id=client_id,
+            generation_job_id=generation_job_id
         )
         
         if not response:
@@ -3080,7 +3111,8 @@ No explanation, just JSON.
                     test_case_id,
                     step,
                     response.status_code,
-                    response_body
+                    response_body,
+                    client_id
                 )
                 
                 if not is_expected:
@@ -3260,7 +3292,7 @@ No explanation, just JSON.
                 details=str(e)
             )
     
-    def _validate_error_response(self, test_case_id: int, step: dict, status_code: int, response_body) -> bool:
+    def _validate_error_response(self, test_case_id: int, step: dict, status_code: int, response_body, client_id: str = None) -> bool:
         """
         Ask Gemini if an error response (4xx/5xx) is expected for this test case.
         
@@ -3329,7 +3361,10 @@ Return ONLY the JSON object, no explanation."""
             response = self.ai_helper.send_request_to_gemini(
                 prompt=prompt,
                 image=None,
-                text_content=None
+                text_content=None,
+                request_type='api_execution',
+                request_context=f'test_case_{test_case_id}_error_validation',
+                client_id=client_id  # client_id is a UUID string, not int
             )
             
             if not response:
@@ -3554,7 +3589,9 @@ Return ONLY the JSON object."""
             response = self.ai_helper.send_request_to_gemini(
                 prompt=prompt,
                 image=None,
-                text_content=None
+                text_content=None,
+                request_type='api_execution',
+                request_context=f'test_case_{test_case_id}_conflict_detection'
             )
             
             if not response:

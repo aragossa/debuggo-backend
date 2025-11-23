@@ -942,7 +942,8 @@ IMPORTANT:
         request_type: str = 'other',
         request_context: Optional[str] = None,
         client_id: Optional[int] = None,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        generation_job_id: Optional[str] = None
     ) -> Union[bool, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
@@ -1036,7 +1037,8 @@ IMPORTANT:
                         request_context=request_context,
                         client_id=client_id,
                         user_id=user_id,
-                        model_id=model_id
+                        model_id=model_id,
+                        generation_job_id=generation_job_id
                     )
                     
                     return parsed_response
@@ -1053,6 +1055,22 @@ IMPORTANT:
                             self.logger.info("✓ Successfully parsed JSON from code block")
                             self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
                             self.logger.info("====== JSON PARSING END ======")
+                            
+                            # Log the successful request
+                            self._log_ai_request(
+                                prompt=prompt,
+                                response_text=response_text,
+                                token_counts=token_counts,
+                                response_time=response_time,
+                                status='success',
+                                request_type=request_type,
+                                request_context=request_context,
+                                client_id=client_id,
+                                user_id=user_id,
+                                model_id=model_id,
+                                generation_job_id=generation_job_id
+                            )
+                            
                             return parsed_response
                         except json.JSONDecodeError as e:
                             self.logger.error(f"✗ Failed to parse JSON from ```json code block: {str(e)}")
@@ -1068,6 +1086,22 @@ IMPORTANT:
                             self.logger.info("✓ Successfully parsed JSON from generic code block")
                             self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
                             self.logger.info("====== JSON PARSING END ======")
+                            
+                            # Log the successful request
+                            self._log_ai_request(
+                                prompt=prompt,
+                                response_text=response_text,
+                                token_counts=token_counts,
+                                response_time=response_time,
+                                status='success',
+                                request_type=request_type,
+                                request_context=request_context,
+                                client_id=client_id,
+                                user_id=user_id,
+                                model_id=model_id,
+                                generation_job_id=generation_job_id
+                            )
+                            
                             return parsed_response
                         except json.JSONDecodeError as e:
                             self.logger.error(f"✗ Failed to parse JSON from generic code block: {str(e)}")
@@ -1087,6 +1121,22 @@ IMPORTANT:
                                 self.logger.info(f"✓ Successfully parsed JSON from pattern match #{i+1}")
                                 self.logger.info(f"Parsed structure: {json.dumps(parsed_response, indent=2)[:500]}..." if len(json.dumps(parsed_response)) > 500 else json.dumps(parsed_response, indent=2))
                                 self.logger.info("====== JSON PARSING END ======")
+                                
+                                # Log the successful request
+                                self._log_ai_request(
+                                    prompt=prompt,
+                                    response_text=response_text,
+                                    token_counts=token_counts,
+                                    response_time=response_time,
+                                    status='success',
+                                    request_type=request_type,
+                                    request_context=request_context,
+                                    client_id=client_id,
+                                    user_id=user_id,
+                                    model_id=model_id,
+                                    generation_job_id=generation_job_id
+                                )
+                                
                                 return parsed_response
                             except json.JSONDecodeError:
                                 self.logger.info(f"✗ Failed to parse potential JSON #{i+1}")
@@ -1108,7 +1158,8 @@ IMPORTANT:
                         request_context=request_context,
                         client_id=client_id,
                         user_id=user_id,
-                        model_id=model_id
+                        model_id=model_id,
+                        generation_job_id=generation_job_id
                     )
                     
                     raise ValueError('Cannot parse the response - all parsing attempts failed')
@@ -1151,7 +1202,8 @@ IMPORTANT:
         request_context: Optional[str] = None,
         client_id: Optional[int] = None,
         user_id: Optional[int] = None,
-        model_id: Optional[int] = None
+        model_id: Optional[int] = None,
+        generation_job_id: Optional[str] = None
     ):
         """
         Log an AI request with token counts and pricing.
@@ -1168,6 +1220,7 @@ IMPORTANT:
             client_id: Optional client ID
             user_id: Optional user ID
             model_id: Optional model ID (if not provided, will be retrieved from database)
+            generation_job_id: Optional UUID to track all AI requests for a test generation job
         """
         try:
             # Get the default AI model ID if not provided
@@ -1193,7 +1246,8 @@ IMPORTANT:
                 prompt_length=len(prompt),
                 response_length=len(response_text),
                 status=status,
-                error_message=error_message
+                error_message=error_message,
+                generation_job_id=generation_job_id
             )
             
             if request_id:

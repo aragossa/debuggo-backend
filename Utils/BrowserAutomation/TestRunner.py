@@ -5,6 +5,7 @@ import logging
 import os
 import psycopg2
 import redis
+import uuid
 from redis.lock import Lock as RedisLock
 from threading import Lock
 import time
@@ -1170,7 +1171,9 @@ class TestRunner:
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
         """
         pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] Starting optimized test step generation for test case {test_case_id}")
+        # Generate unique job ID for tracking all AI requests in this test generation
+        generation_job_id = str(uuid.uuid4())
+        self.logger.info(f"[PID:{pid}] Starting optimized test step generation for test case {test_case_id} (Job ID: {generation_job_id})")
         
         # ==================== PHASE 1: STRATEGIC PLANNING ====================
         try:
@@ -1251,7 +1254,7 @@ class TestRunner:
                 # Continue with test generation using the same connection
                 return self._generate_test_steps_with_session_connection(
                     test_case_id, session_conn, session_cursor, test_name, test_description, 
-                    environment_vars, model_id
+                    environment_vars, model_id, generation_job_id
                 )
                 
         except Exception as e:
@@ -1324,7 +1327,7 @@ class TestRunner:
             if conn:
                 return_db_connection(conn)
     
-    def _estimate_steps_with_ai(self, test_description, html_analyzer):
+    def _estimate_steps_with_ai(self, test_description, html_analyzer, generation_job_id=None):
         """
         Use AI to estimate the number of test steps needed for the test case.
         Uses gemini-2.5-flash-lite from database with pricing and logs the request.
@@ -1430,7 +1433,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         prompt_length=len(prompt),
                         response_length=len(response) if response else 0,
                         status='success' if response else 'error',
-                        metadata={'purpose': 'step_estimation', 'estimated_steps': estimated}
+                        metadata={'purpose': 'step_estimation', 'estimated_steps': estimated},
+                        generation_job_id=generation_job_id
                     )
                 except Exception as log_error:
                     self.logger.warning(f"Failed to log AI request: {log_error}")
@@ -1444,7 +1448,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
         return 5
             
     def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
-                                                   test_name, test_description, environment_vars, model_id):
+                                                   test_name, test_description, environment_vars, model_id, generation_job_id):
         """
         Generate test steps using a single database connection session.
         """
@@ -1532,7 +1536,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 html_analyzer = self.html_analyzer
                 
                 # Estimate total steps using AI
-                estimated_steps = self._estimate_steps_with_ai(test_description, html_analyzer)
+                estimated_steps = self._estimate_steps_with_ai(test_description, html_analyzer, generation_job_id)
                 if reasoning_collector:
                     try:
                         reasoning_collector.set_test_split_strategy(
@@ -1697,7 +1701,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     step_order=step_order,
                                     next_prompt=next_prompt,
                                     prev_step_description=prev_step_description,
-                                    screenshot_path=screenshot_path
+                                    screenshot_path=screenshot_path,
+                                    generation_job_id=generation_job_id
                                 )
                                 
                                 # Check for stop flag after AI response
@@ -1978,7 +1983,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             failed_step=failed_step,
                                             error_message=str(e),
                                             previous_attempts=previous_attempts,
-                                            screenshot_path=failure_screenshot
+                                            screenshot_path=failure_screenshot,
+                                            generation_job_id=generation_job_id
                                         )
                                         
                                         # Unpack the response
@@ -2274,7 +2280,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             failed_step=failed_step,
                                             error_message=str(e),
                                             previous_attempts=previous_attempts,
-                                            screenshot_path=failure_screenshot
+                                            screenshot_path=failure_screenshot,
+                                            generation_job_id=generation_job_id
                                         )
                                         
                                         # Unpack the response

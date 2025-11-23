@@ -23,7 +23,7 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
         
         # Fetch test case details
         cursor.execute('''
-            SELECT id, name, description, type, parent_id, test_case_id, client_id, project_id, updated_at, steps_generation_start_time, steps_generation_end_time
+            SELECT id, name, description, type, parent_id, test_case_id, client_id, project_id, updated_at, steps_generation_start_time, steps_generation_end_time, test_type
             FROM test_cases
             WHERE id = %s AND client_id = %s
         ''', (test_case_id, client_id))
@@ -49,7 +49,8 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
             "project_id": test_case[7],
             "updated_at": test_case[8].isoformat() if test_case[8] else None,
             "steps_generation_start_time": test_case[9].isoformat() if test_case[9] else None,
-            "steps_generation_end_time": test_case[10].isoformat() if test_case[10] else None
+            "steps_generation_end_time": test_case[10].isoformat() if test_case[10] else None,
+            "test_type": test_case[11] if len(test_case) > 11 else 'ui'  # Default to 'ui' if not present
         }
         
         # Fetch test steps if this is a test case (not a folder)

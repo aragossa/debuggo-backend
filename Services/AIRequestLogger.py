@@ -63,7 +63,8 @@ class AIRequestLogger:
         cache_input_tokens: int = 0,
         cache_creation_tokens: int = 0,
         cache_read_tokens: int = 0,
-        cache_storage_tokens: int = 0
+        cache_storage_tokens: int = 0,
+        generation_job_id: Optional[str] = None
     ) -> Optional[int]:
         """
         Log an AI API request with token usage and pricing.
@@ -86,6 +87,7 @@ class AIRequestLogger:
             cache_creation_tokens: Number of cache creation tokens
             cache_read_tokens: Number of cache read tokens
             cache_storage_tokens: Number of cache storage tokens
+            generation_job_id: Optional UUID to track all AI requests for a test generation job
             
         Returns:
             int: The ID of the logged request, or None if logging failed
@@ -179,12 +181,13 @@ class AIRequestLogger:
                             status,
                             error_message,
                             metadata,
+                            generation_job_id,
                             created_at
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s
                         )
                         RETURNING id
                     """, (
@@ -222,6 +225,7 @@ class AIRequestLogger:
                         status,
                         error_message,
                         json.dumps(metadata) if metadata else None,
+                        generation_job_id,
                         datetime.now()
                     ))
                     
