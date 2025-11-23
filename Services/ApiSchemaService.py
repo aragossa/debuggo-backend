@@ -2013,7 +2013,7 @@ Return ONLY the JSON array of corrected steps, no explanation.
             bool: True if steps were generated successfully
         """
         try:
-            from Services.ApiTestExecutor import ApiTestExecutor
+            from auroqa.Services.ApiTestExecutor import ApiTestExecutor
             
             # Generate unique job ID for tracking all AI requests in this test generation
             generation_job_id = str(uuid.uuid4())

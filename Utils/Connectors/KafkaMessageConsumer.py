@@ -153,7 +153,7 @@ class KafkaMessageConsumer:
                 self.logger.info(f"Using environment ID: {environment_id}")
             
             # Import here to avoid circular dependencies
-            from Services.ApiSchemaService import ApiSchemaService
+            from auroqa.Services.ApiSchemaService import ApiSchemaService
             
             # Generate steps using NEW iterative method
             service = ApiSchemaService()

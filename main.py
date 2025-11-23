@@ -66,6 +66,7 @@ from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
 from auroqa.Services.FineTuningService import FineTuningService, FineTuningDataCollector
 from auroqa.Services.ContinuousImprovement import ContinuousImprovement
 from auroqa.Services.PlanningCollector import PlanningCollector
+from auroqa.Services.GenerationCostAnalytics import GenerationCostAnalytics
 import signal
 import atexit
 
@@ -5813,6 +5814,7 @@ def check_admin_access(current_user: User = Depends(get_current_user)) -> User:
 
 # Initialize monitoring service
 monitoring_service = AgentMonitoring()
+generation_cost_analytics = GenerationCostAnalytics()
 
 @app.get("/api/monitoring/health")
 async def get_health_status(admin_user: User = Depends(check_admin_access)):
@@ -6012,6 +6014,85 @@ async def get_alerts(admin_user: User = Depends(check_admin_access)):
         }
     except Exception as e:
         logger.error(f"Error checking alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/generation-costs")
+async def get_generation_costs(
+    period: str = Query('day', regex='^(day|week|month|year|all)$'),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get generation job cost statistics.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - period: Time period to analyze ('day', 'week', 'month', 'year', 'all')
+    
+    Returns comprehensive statistics:
+    - mean: Average cost per job
+    - median / percentile_50: 50th percentile cost
+    - percentile_90: 90th percentile cost
+    - percentile_95: 95th percentile cost
+    - percentile_99: 99th percentile cost
+    - min: Minimum cost
+    - max: Maximum cost
+    - std_dev: Standard deviation
+    - total_sum: Total cost for period
+    - count: Number of jobs
+    - jobs: List of individual job costs (up to 100 most recent)
+    """
+    try:
+        client_id = current_user.client_id if current_user.role != 'admin' else None
+        
+        result = generation_cost_analytics.get_generation_costs(
+            client_id=client_id,
+            period=period
+        )
+        
+        return {
+            'status': 'success',
+            'data': result,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting generation costs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/generation-costs/trends")
+async def get_generation_cost_trends(
+    days: int = Query(30, ge=1, le=365),
+    current_user: User = Depends(check_admin_access)
+):
+    """
+    Get daily generation cost trends.
+    
+    **Admin only endpoint**
+    
+    Query Parameters:
+    - days: Number of days to analyze (1-365, default 30)
+    
+    Returns daily statistics:
+    - date: Date
+    - jobs_count: Number of generation jobs on that day
+    - daily_cost: Total cost for that day
+    - avg_cost_per_request: Average cost per individual AI request
+    """
+    try:
+        client_id = current_user.client_id if current_user.role != 'admin' else None
+        
+        trends = generation_cost_analytics.get_cost_trends(
+            client_id=client_id,
+            days=days
+        )
+        
+        return {
+            'status': 'success',
+            'data': trends,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting generation cost trends: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== Phase 4 Pydantic Models ====================
