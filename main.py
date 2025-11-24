@@ -306,6 +306,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Custom middleware to filter successful GET request logs
+@app.middleware("http")
+async def log_only_errors_middleware(request: Request, call_next):
+    """
+    Middleware to suppress logging for successful GET requests.
+    Only logs failed requests (4xx, 5xx status codes).
+    """
+    response = await call_next(request)
+    
+    # Log only if:
+    # 1. Request failed (status >= 400), OR
+    # 2. Request is not GET, OR
+    # 3. Request took unusually long (optional)
+    if response.status_code >= 400:
+        logger.warning(
+            f"{request.client.host}:{request.client.port} - "
+            f'"{request.method} {request.url.path}" {response.status_code}'
+        )
+    
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -7365,7 +7385,7 @@ if __name__ == "__main__":
             workers=1,  # Keep single worker in Docker for now
             timeout_keep_alive=60,
             timeout_graceful_shutdown=30,  # Give time for cleanup
-            access_log=True,
+            access_log=False,  # Disabled - using custom middleware for error-only logging
             log_level="info",
             reload=False,
             server_header=False,
@@ -7381,7 +7401,7 @@ if __name__ == "__main__":
             workers=1,
             timeout_keep_alive=30,
             timeout_graceful_shutdown=15,
-            access_log=True,
+            access_log=False,  # Disabled - using custom middleware for error-only logging
             log_level="debug",
             reload=False
         )

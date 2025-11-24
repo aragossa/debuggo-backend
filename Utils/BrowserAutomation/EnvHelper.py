@@ -172,7 +172,8 @@ class EnvHelper:
             try:
                 # Handle standard environment variables
                 if var_name == 'base_url':
-                    value = self.base_url
+                    # Remove trailing slash from base_url to prevent double slashes
+                    value = self.base_url.rstrip('/') if self.base_url else self.base_url
                 elif var_name == 'login':
                     value = self.login
                 elif var_name == 'password':
