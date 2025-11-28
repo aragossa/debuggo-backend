@@ -26,6 +26,8 @@ from auroqa.Services.TestGenerationStateMachine import TestGenerationStateMachin
 from auroqa.Services.AttentionMode import AttentionMode
 from auroqa.Services.ConfidenceDecisionMaker import ConfidenceDecisionMaker, DecisionAction
 from auroqa.Services.AIRequestLogger import AIRequestLogger
+from auroqa.Services.VariableManager import VariableManager
+from auroqa.Services.QuickRunService import QuickRunService
 
 
 class TestRunner:
@@ -111,6 +113,14 @@ class TestRunner:
             # Phase 1: Initialize confidence scorer
             self.scorer = ConfidenceScorer()
             self.logger.info(f"[PID:{self.pid}] Confidence Scorer initialized")
+            
+            # Phase 1.5: Initialize variable manager for variable scoping and substitution
+            self.variable_manager = VariableManager()
+            self.logger.info(f"[PID:{self.pid}] Variable Manager initialized")
+            
+            # Session variables extracted during test execution
+            self.session_variables = {}
+            self.logger.info(f"[PID:{self.pid}] Session variables initialized")
             
             # Each instance will have its own browser
             # But we'll create it on demand when needed rather than at initialization time
@@ -351,6 +361,45 @@ class TestRunner:
                 """, (test_case_id, result, exception, duration, stdout, stderr))
                 self.test_run_id = cursor.fetchone()[0]
                 connection.commit()
+
+    def _log_to_quick_run(self, test_case_id: int, status: str, 
+                          started_at=None, completed_at=None,
+                          duration_seconds: float = None, 
+                          error_message: str = None,
+                          screenshot_path: str = None):
+        """Log test result to quick run if quick_run_id is set"""
+        if not hasattr(self, 'quick_run_id') or not self.quick_run_id:
+            return
+        
+        try:
+            # Map internal status to quick run status
+            status_map = {
+                'completed': 'passed',
+                'success': 'passed',
+                'failure': 'failed',
+                'failed': 'failed',
+                'error': 'error',
+                'skipped': 'skipped',
+                'stopped': 'skipped'
+            }
+            quick_run_status = status_map.get(status.lower(), 'error')
+            
+            suite_id = getattr(self, 'suite_id', None)
+            
+            self.quick_run_service.log_test_run_result(
+                run_id=self.quick_run_id,
+                test_case_id=test_case_id,
+                status=quick_run_status,
+                suite_id=suite_id,
+                started_at=started_at,
+                completed_at=completed_at or datetime.now(),
+                duration_seconds=duration_seconds,
+                error_message=error_message,
+                screenshot_path=screenshot_path
+            )
+            self.logger.info(f"Logged result to quick run {self.quick_run_id}: {quick_run_status}")
+        except Exception as e:
+            self.logger.error(f"Failed to log to quick run: {e}")
 
     def _get_test_steps(self, test_case_id: int):
         """Retrieve test steps from database"""
@@ -620,6 +669,33 @@ class TestRunner:
                 if value:
                     value = env_helper.process_variables(value)
             
+            # Phase 1.5: Use VariableManager for scoped variable substitution
+            if self.variable_manager:
+                if element_path:
+                    element_path = self.variable_manager.substitute_variables(
+                        element_path,
+                        client_id=getattr(self, 'current_client_id', None),
+                        project_id=getattr(self, 'current_project_id', None),
+                        environment_id=getattr(self, 'current_environment_id', None),
+                        session_variables=self.session_variables
+                    )
+                if css_selector:
+                    css_selector = self.variable_manager.substitute_variables(
+                        css_selector,
+                        client_id=getattr(self, 'current_client_id', None),
+                        project_id=getattr(self, 'current_project_id', None),
+                        environment_id=getattr(self, 'current_environment_id', None),
+                        session_variables=self.session_variables
+                    )
+                if value:
+                    value = self.variable_manager.substitute_variables(
+                        value,
+                        client_id=getattr(self, 'current_client_id', None),
+                        project_id=getattr(self, 'current_project_id', None),
+                        environment_id=getattr(self, 'current_environment_id', None),
+                        session_variables=self.session_variables
+                    )
+            
             # Handle None or empty by_strategy
             if not by_strategy:
                 # Try to auto-detect the strategy
@@ -725,17 +801,33 @@ class TestRunner:
             if connection:
                 return_db_connection(connection)
 
-    def run_test_case(self, test_case_id: int, environment_vars=None):
+    def run_test_case(self, test_case_id: int, environment_vars=None, client_id=None, project_id=None, environment_id=None, quick_run_id=None, suite_id=None):
         """
         Run a complete test case with step-by-step result tracking
 
         Args:
             test_case_id: ID of the test case to run
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
+            client_id: Optional client ID for variable scoping
+            project_id: Optional project ID for variable scoping
+            environment_id: Optional environment ID for variable scoping
+            quick_run_id: Optional quick run ID to log results to execution_suite_plan_test_runs
+            suite_id: Optional suite ID if test case belongs to a suite
         """
+        # Store quick run parameters for logging
+        self.quick_run_id = quick_run_id
+        self.suite_id = suite_id
+        if quick_run_id:
+            self.quick_run_service = QuickRunService()
+            self.logger.info(f"Quick run ID provided: {quick_run_id} - will log to execution_suite_plan_test_runs")
         pid = os.getpid()
         self.logger.info(f"[PID:{pid}] Starting test case execution for ID: {test_case_id}")
         start_time = datetime.now()
+        
+        # Store scope information for variable resolution
+        self.current_client_id = client_id
+        self.current_project_id = project_id
+        self.current_environment_id = environment_id
         
         # Initialize environment helper with provided variables
         env = EnvHelper(environment_vars)
@@ -745,6 +837,9 @@ class TestRunner:
             self.logger.info(f"[PID:{pid}] Using environment variables: {environment_vars}")
         else:
             self.logger.warning(f"[PID:{pid}] No environment variables provided")
+        
+        # Log variable scope information
+        self.logger.info(f"[PID:{pid}] Variable scope - Client: {client_id}, Project: {project_id}, Environment: {environment_id}")
         
         # Set running flag in Redis
         try:
@@ -1058,6 +1153,15 @@ class TestRunner:
                 self._update_test_run(test_run_id, "completed", duration=duration, stdout=stdout_content)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
                 
+                # Log to quick run if applicable
+                self._log_to_quick_run(
+                    test_case_id=test_case_id,
+                    status="completed",
+                    started_at=start_time,
+                    completed_at=datetime.now(),
+                    duration_seconds=duration
+                )
+                
                 # Clean up Redis flags
                 try:
                     if self._redis:
@@ -1140,6 +1244,16 @@ class TestRunner:
                         stdout=stdout_content,
                         stderr=stderr_content
                     )
+                
+                # Log to quick run if applicable
+                self._log_to_quick_run(
+                    test_case_id=test_case_id,
+                    status="error",
+                    started_at=start_time,
+                    completed_at=datetime.now(),
+                    duration_seconds=duration,
+                    error_message=error_message
+                )
                 
                 # Clean up Redis flags
                 try:
@@ -2561,7 +2675,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             self.logger.error(f"Failed to create test run: {e}")
             raise
 
-    def start_test_case_async(self, test_case_id: int, environment_vars=None, execution_id=None):
+    def start_test_case_async(self, test_case_id: int, environment_vars=None, execution_id=None, quick_run_id=None):
         """
         Start test case execution asynchronously and return test_run_id immediately.
         
@@ -2569,12 +2683,13 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             test_case_id: ID of the test case to run
             environment_vars: Optional dictionary with environment variables
             execution_id: Optional ID of the execution to link this test run to
+            quick_run_id: Optional ID of the quick run for logging to execution_suite_plan_test_runs
             
         Returns:
             dict: Contains test_run_id and status
         """
         pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] Starting async test case execution for ID: {test_case_id}, execution_id: {execution_id}")
+        self.logger.info(f"[PID:{pid}] Starting async test case execution for ID: {test_case_id}, execution_id: {execution_id}, quick_run_id: {quick_run_id}")
         
         try:
             # Create test run record immediately with execution_id
@@ -2585,7 +2700,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             import threading
             thread = threading.Thread(
                 target=self._execute_test_case_background,
-                args=(test_run_id, test_case_id, environment_vars)
+                args=(test_run_id, test_case_id, environment_vars, quick_run_id)
             )
             thread.daemon = True
             thread.start()
@@ -2593,14 +2708,15 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             return {
                 "test_run_id": test_run_id,
                 "status": "started",
-                "message": "Test execution started in background"
+                "message": "Test execution started in background",
+                "quick_run_id": quick_run_id
             }
             
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Failed to start async test execution: {e}")
             raise
 
-    def _execute_test_case_background(self, test_run_id: int, test_case_id: int, environment_vars=None):
+    def _execute_test_case_background(self, test_run_id: int, test_case_id: int, environment_vars=None, quick_run_id=None):
         """
         Execute test case in background and update test run record with results.
         
@@ -2608,10 +2724,16 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             test_run_id: ID of the test run
             test_case_id: ID of the test case to run
             environment_vars: Optional dictionary with environment variables
+            quick_run_id: Optional ID of the quick run for logging
         """
         pid = os.getpid()
-        self.logger.info(f"[PID:{pid}] Background execution started for test run {test_run_id}")
+        self.logger.info(f"[PID:{pid}] Background execution started for test run {test_run_id}, quick_run_id: {quick_run_id}")
         start_time = datetime.now()
+        
+        # Store quick_run_id for logging
+        self.quick_run_id = quick_run_id
+        if quick_run_id:
+            self.quick_run_service = QuickRunService()
         
         try:
             # Execute the original test case logic
@@ -2628,6 +2750,16 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 result.get("stderr")
             )
             
+            # Log to quick run if applicable
+            self._log_to_quick_run(
+                test_case_id=test_case_id,
+                status=result.get("status", "completed"),
+                started_at=start_time,
+                completed_at=datetime.now(),
+                duration_seconds=duration,
+                error_message=result.get("exception")
+            )
+            
             self.logger.info(f"[PID:{pid}] Background execution completed for test run {test_run_id}")
             
         except Exception as e:
@@ -2641,6 +2773,17 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 None,
                 str(e)
             )
+            
+            # Log to quick run if applicable
+            self._log_to_quick_run(
+                test_case_id=test_case_id,
+                status="failed",
+                started_at=start_time,
+                completed_at=datetime.now(),
+                duration_seconds=duration,
+                error_message=str(e)
+            )
+            
             self.logger.error(f"[PID:{pid}] Background execution failed for test run {test_run_id}: {e}")
 
     def _run_test_case_internal(self, test_run_id: int, test_case_id: int, environment_vars=None):

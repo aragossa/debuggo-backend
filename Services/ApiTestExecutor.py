@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
+from auroqa.Services.VariableManager import VariableManager
 
 
 class ApiTestExecutor:
@@ -13,13 +14,22 @@ class ApiTestExecutor:
     variable substitution, and response validation.
     """
     
-    def __init__(self, test_case_id: int, environment_vars: Dict[str, Any] = None):
+    def __init__(self, test_case_id: int, environment_vars: Dict[str, Any] = None, 
+                 client_id: Optional[str] = None, project_id: Optional[str] = None, 
+                 environment_id: Optional[int] = None):
         self.test_case_id = test_case_id
         self.environment_vars = environment_vars or {}
         self.session_variables = {}  # Store variables extracted during test execution
         self.test_run_id = None
         self.logger = self._setup_logger()
         self.system = System()
+        
+        # Phase 1.5: Variable scoping
+        self.client_id = client_id
+        self.project_id = project_id
+        self.environment_id = environment_id
+        self.variable_manager = VariableManager()
+        self.logger.info(f"VariableManager initialized for scope - Client: {client_id}, Project: {project_id}, Environment: {environment_id}")
         
     def _setup_logger(self):
         """Setup logger for API test execution."""
@@ -356,6 +366,16 @@ class ApiTestExecutor:
         from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
         env_helper = EnvHelper(self.environment_vars)
         result = env_helper.process_variables(result)
+        
+        # Phase 1.5: Use VariableManager for scoped variable substitution
+        if self.variable_manager:
+            result = self.variable_manager.substitute_variables(
+                text=result,
+                client_id=self.client_id,
+                project_id=self.project_id,
+                environment_id=self.environment_id,
+                session_variables=self.session_variables
+            )
         
         # Substitute built-in dynamic variables (support {{}} syntax for compatibility)
         import time

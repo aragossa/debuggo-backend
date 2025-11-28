@@ -67,6 +67,14 @@ from auroqa.Services.FineTuningService import FineTuningService, FineTuningDataC
 from auroqa.Services.ContinuousImprovement import ContinuousImprovement
 from auroqa.Services.PlanningCollector import PlanningCollector
 from auroqa.Services.GenerationCostAnalytics import GenerationCostAnalytics
+from auroqa.api.suite_endpoints import router as suite_router
+from auroqa.api.variable_endpoints import router as variable_router
+from auroqa.api.execution_plan_endpoints import router as execution_plan_router
+from auroqa.api.scheduler_endpoints import router as scheduler_router
+from auroqa.api.execution_endpoints import router as execution_router
+from auroqa.api.retry_endpoints import router as retry_router
+from auroqa.api.metrics_endpoints import router as metrics_router
+from auroqa.api.quick_run_endpoints import router as quick_run_router
 import signal
 import atexit
 
@@ -293,9 +301,26 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize TestRunner: {e}")
         raise
     
+    # Initialize Execution Scheduler
+    try:
+        from auroqa.Services.ExecutionScheduler import start_scheduler
+        start_scheduler()
+        logger.info("✓ Execution scheduler started")
+    except Exception as e:
+        logger.error(f"Failed to start execution scheduler: {e}")
+        # Don't raise - app can work without scheduler
+    
     yield
 
     # Shutdown
+    # Stop scheduler
+    try:
+        from auroqa.Services.ExecutionScheduler import stop_scheduler
+        stop_scheduler()
+        logger.info("Execution scheduler stopped")
+    except Exception as e:
+        logger.error(f"Error stopping scheduler: {e}")
+    
     if kafka_consumer:
         kafka_consumer.stop()
     if consumer_thread:
@@ -341,6 +366,39 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 # Include OAuth routes
 from auroqa.routes.oauth_routes import router as oauth_router
 app.include_router(oauth_router, prefix="/api", tags=["oauth"])
+
+# Include Test Suite Management routes
+from auroqa.api.suite_endpoints import set_get_current_user
+set_get_current_user(get_current_user)
+app.include_router(suite_router, tags=["test-suites"])
+
+# Include Variable Management routes
+app.include_router(variable_router, tags=["variables"])
+
+# Include Execution Plan Management routes
+app.include_router(execution_plan_router, tags=["execution-plans"])
+
+# Include Scheduler Management routes
+app.include_router(scheduler_router, tags=["scheduler"])
+
+# Include Execution Management routes
+app.include_router(execution_router, tags=["execution"])
+
+# Include Retry Management routes
+app.include_router(retry_router, tags=["retry"])
+
+# Include Metrics & Analytics routes
+app.include_router(metrics_router, tags=["metrics"])
+
+# Include Quick Run routes (replaces test_executions for manual runs)
+app.include_router(quick_run_router, tags=["quick-run"])
+
+# Include Requirements Traceability routes
+from auroqa.api.requirements_endpoints import router as requirements_router
+app.include_router(requirements_router, tags=["requirements"])
+
+# NOTE: Scheduler is now initialized in the lifespan context manager above
+# The @app.on_event decorators are deprecated and ignored when lifespan is used
 
 def get_db_dependencies():
     return {
@@ -763,10 +821,12 @@ async def run_test_case(
         
         environment_vars = {}
         execution_id = None
+        quick_run_id = None
         
-        # Extract execution_id from request data
-        if request_data and "execution_id" in request_data:
+        # Extract execution_id and quick_run_id from request data
+        if request_data:
             execution_id = request_data.get("execution_id")
+            quick_run_id = request_data.get("quick_run_id")
         
         # If environment_id is provided, fetch environment variables
         if request_data and "environment_id" in request_data:
@@ -822,7 +882,13 @@ async def run_test_case(
             runner = TestRunner(user_id=str(current_user.id), test_case_id=id)
             
             # Start test execution asynchronously and get test_run_id immediately
-            result = runner.start_test_case_async(id, environment_vars, execution_id)
+            # Pass quick_run_id if provided for logging to execution_suite_plan_test_runs
+            result = runner.start_test_case_async(
+                id, 
+                environment_vars, 
+                execution_id,
+                quick_run_id=quick_run_id
+            )
             return JSONResponse(content=result)
             
     except HTTPException:
