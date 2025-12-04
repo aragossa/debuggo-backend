@@ -11,6 +11,7 @@ Provides REST API for managing test retry logic:
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from datetime import datetime
 from auroqa.models.user import User
@@ -18,6 +19,22 @@ from auroqa.Services.RetryManager import get_retry_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/retry", tags=["retry"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize services
 retry_manager = get_retry_manager()
@@ -79,7 +96,7 @@ class RetryDelayCalculationResponse(BaseModel):
 @router.get("/suite-runs/{suite_run_id}/statistics", response_model=RetryStatisticsResponse)
 async def get_retry_statistics(
     suite_run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get retry statistics for a suite run"""
     try:
@@ -101,7 +118,7 @@ async def get_retry_history(
     suite_run_id: int,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get retry history for a suite run"""
     try:
@@ -126,7 +143,7 @@ async def should_retry(
     suite_run_id: int,
     current_retry_count: int = Query(..., description="Current retry count"),
     max_retries: int = Query(..., description="Maximum retries allowed"),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Determine if a suite should be retried"""
     try:
@@ -151,7 +168,7 @@ async def should_retry(
 async def should_retry_by_threshold(
     suite_run_id: int,
     failure_percentage_threshold: float = Query(10.0, description="Failure percentage threshold"),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Determine if suite should be retried based on failure percentage"""
     try:
@@ -177,7 +194,7 @@ async def should_retry_by_threshold(
 @router.post("/calculate-delay", response_model=RetryDelayCalculationResponse)
 async def calculate_retry_delay(
     request: RetryDelayCalculationRequest,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Calculate retry delay with exponential backoff"""
     try:
@@ -206,7 +223,7 @@ async def calculate_retry_delay(
 
 @router.get("/policies/default")
 async def get_default_retry_policy(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get default retry policy"""
     return {
@@ -221,7 +238,7 @@ async def get_default_retry_policy(
 
 @router.get("/policies/aggressive")
 async def get_aggressive_retry_policy(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get aggressive retry policy (more retries, shorter delays)"""
     return {
@@ -236,7 +253,7 @@ async def get_aggressive_retry_policy(
 
 @router.get("/policies/conservative")
 async def get_conservative_retry_policy(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get conservative retry policy (fewer retries, longer delays)"""
     return {

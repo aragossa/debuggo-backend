@@ -1275,7 +1275,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
                 self._cleanup_browser()
 
-    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None):
+    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None, vlm_enabled=False):
         """
         Generate test steps using AI analysis of page HTML.
         Uses single connection per session to optimize database usage.
@@ -1283,6 +1283,8 @@ class TestRunner:
         Args:
             test_case_id: ID of the test case
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
+            ai_model_id: Optional ID of the AI model to use
+            vlm_enabled: Boolean flag to enable/disable Visual Language Model (screenshots)
         """
         pid = os.getpid()
         # Generate unique job ID for tracking all AI requests in this test generation
@@ -1368,7 +1370,7 @@ class TestRunner:
                 # Continue with test generation using the same connection
                 return self._generate_test_steps_with_session_connection(
                     test_case_id, session_conn, session_cursor, test_name, test_description, 
-                    environment_vars, model_id, generation_job_id
+                    environment_vars, model_id, generation_job_id, vlm_enabled
                 )
                 
         except Exception as e:
@@ -1562,7 +1564,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
         return 5
             
     def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
-                                                   test_name, test_description, environment_vars, model_id, generation_job_id):
+                                                   test_name, test_description, environment_vars, model_id, generation_job_id, vlm_enabled=False):
         """
         Generate test steps using a single database connection session.
         """
@@ -1816,7 +1818,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     next_prompt=next_prompt,
                                     prev_step_description=prev_step_description,
                                     screenshot_path=screenshot_path,
-                                    generation_job_id=generation_job_id
+                                    generation_job_id=generation_job_id,
+                                    vlm_enabled=vlm_enabled
                                 )
                                 
                                 # Check for stop flag after AI response

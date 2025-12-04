@@ -11,8 +11,9 @@ Provides REST API for managing execution plans with:
 
 import logging
 import threading
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
 from auroqa.models.user import User
@@ -22,6 +23,22 @@ from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connec
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/execution-plans", tags=["execution-plans"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize services
 execution_plan_service = ExecutionPlanService()
@@ -85,6 +102,8 @@ class ExecutionPlanResponse(BaseModel):
     updated_at: datetime
     last_executed_at: Optional[datetime]
     next_execution_at: Optional[datetime]
+    cron_expression: Optional[str] = None
+    recurrence_pattern: Optional[str] = None
 
 
 class ExecutionPlanListResponse(BaseModel):
@@ -397,7 +416,7 @@ async def list_execution_plans(
 @router.get("/{plan_id}", response_model=ExecutionPlanResponse)
 async def get_execution_plan(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution plan details"""
     try:
@@ -417,7 +436,7 @@ async def get_execution_plan(
 async def update_execution_plan(
     plan_id: int,
     request: ExecutionPlanUpdate,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Update execution plan"""
     try:
@@ -479,7 +498,7 @@ async def update_execution_plan(
 @router.delete("/{plan_id}")
 async def delete_execution_plan(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Delete execution plan"""
     try:
@@ -516,7 +535,7 @@ async def delete_execution_plan(
 async def add_suite_to_plan(
     plan_id: int,
     request: AddSuiteToPlantRequest,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Add test suite to execution plan"""
     try:
@@ -575,7 +594,7 @@ async def add_suite_to_plan(
 @router.get("/{plan_id}/suites", response_model=dict)
 async def get_plan_suites(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get all suites in execution plan"""
     try:
@@ -602,7 +621,7 @@ async def get_plan_suites(
 async def remove_suite_from_plan(
     plan_id: int,
     suite_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Remove test suite from execution plan"""
     try:
@@ -663,7 +682,7 @@ async def execute_plan(
     plan_id: int,
     request: ExecutePlanRequest,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Execute an execution plan"""
     try:
@@ -707,7 +726,7 @@ async def get_plan_runs(
     plan_id: int,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution runs for a plan"""
     try:
@@ -778,7 +797,7 @@ async def get_plan_runs(
 @router.get("/runs/{run_id}", response_model=ExecutionRunResponse)
 async def get_execution_run(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution run details"""
     try:
@@ -797,7 +816,7 @@ async def get_execution_run(
 @router.get("/runs/{run_id}/tests", response_model=dict)
 async def get_run_test_results(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get detailed test results for a specific execution run"""
     try:
@@ -864,7 +883,7 @@ async def get_run_test_results(
 @router.get("/{plan_id}/statistics", response_model=PlanStatisticsResponse)
 async def get_plan_statistics(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution plan statistics"""
     try:
@@ -888,7 +907,7 @@ async def get_plan_statistics(
 @router.get("/recent/runs", response_model=dict)
 async def get_recent_runs(
     limit: int = Query(50, ge=1, le=500),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get recent execution plan runs"""
     try:
@@ -921,7 +940,7 @@ class NotificationSettingsRequest(BaseModel):
 @router.get("/{plan_id}/notifications", response_model=dict)
 async def get_notification_settings(
     plan_id: int,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get notification settings for a plan"""
     try:
@@ -955,7 +974,7 @@ async def get_notification_settings(
 async def update_notification_settings(
     plan_id: int,
     request: NotificationSettingsRequest,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Update notification settings for a plan"""
     try:
@@ -1005,7 +1024,7 @@ class ScheduleRequest(BaseModel):
 async def update_plan_schedule(
     plan_id: int,
     request: ScheduleRequest,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Update schedule settings for a plan"""
     try:

@@ -544,7 +544,7 @@ Return a JSON object with:
             self.logger.debug(f"Pattern usage recording skipped: {str(e)}")
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
-                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None) -> tuple[str, str, str, str, str, str, str]:
+                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         
         # ReAct Pattern: Start conversation for this step
@@ -597,9 +597,11 @@ PREVIOUS STEP: {prev_step_description}
 """
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
-        if screenshot_path:
+        if screenshot_path and vlm_enabled:
             self.logger.info(f"Reading the screenshot {screenshot_path}")
             image = self.read_img(screenshot_path)
+        elif screenshot_path and not vlm_enabled:
+            self.logger.info(f"Screenshot available but VLM disabled, skipping image read")
 
         # ReAct Turn 2: Action - Analyze HTML and generate step
         if conversation:

@@ -11,6 +11,7 @@ Provides REST API for:
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from datetime import datetime
 from auroqa.models.user import User
@@ -18,6 +19,22 @@ from auroqa.Services.RequirementsService import get_requirements_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/requirements", tags=["requirements"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize service
 requirements_service = get_requirements_service()
@@ -108,7 +125,7 @@ class TraceabilityMatrixItem(BaseModel):
 @router.post("", response_model=dict)
 async def create_requirement(
     request: RequirementCreate,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Create a new requirement"""
     try:
@@ -144,7 +161,7 @@ async def list_requirements(
     requirement_type: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """List requirements with filters"""
     try:
@@ -172,7 +189,7 @@ async def list_requirements(
 @router.get("/{requirement_id}", response_model=RequirementResponse)
 async def get_requirement(
     requirement_id: int,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get a requirement by ID"""
     try:
@@ -192,7 +209,7 @@ async def get_requirement(
 async def update_requirement(
     requirement_id: int,
     request: RequirementUpdate,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Update a requirement"""
     try:
@@ -219,7 +236,7 @@ async def update_requirement(
 @router.delete("/{requirement_id}", response_model=dict)
 async def delete_requirement(
     requirement_id: int,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Delete a requirement"""
     try:
@@ -243,7 +260,7 @@ async def delete_requirement(
 async def map_test_to_requirement(
     requirement_id: int,
     request: TestMappingRequest,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Map a test case to a requirement"""
     try:
@@ -268,7 +285,7 @@ async def map_test_to_requirement(
 async def unmap_test_from_requirement(
     requirement_id: int,
     test_case_id: int,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Remove a test mapping from a requirement"""
     try:
@@ -291,7 +308,7 @@ async def unmap_test_from_requirement(
 @router.get("/{requirement_id}/tests", response_model=dict)
 async def get_tests_for_requirement(
     requirement_id: int,
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get all tests mapped to a requirement"""
     try:
@@ -310,7 +327,7 @@ async def get_tests_for_requirement(
 async def get_coverage_summary(
     client_id: str = Query(...),
     project_id: Optional[str] = Query(None),
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get requirements coverage summary"""
     try:
@@ -328,7 +345,7 @@ async def get_coverage_summary(
 async def get_traceability_matrix(
     client_id: str = Query(...),
     project_id: Optional[str] = Query(None),
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get traceability matrix"""
     try:
@@ -346,7 +363,7 @@ async def get_traceability_matrix(
 async def get_uncovered_requirements(
     client_id: str = Query(...),
     project_id: Optional[str] = Query(None),
-    current_user: User = Depends(lambda: None)
+    current_user: User = Depends(get_current_user_from_token)
 ):
     """Get requirements without test coverage"""
     try:

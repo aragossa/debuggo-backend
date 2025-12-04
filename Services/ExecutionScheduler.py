@@ -31,7 +31,7 @@ class ExecutionScheduler:
         self.scheduler = BackgroundScheduler()
         self.plan_service = ExecutionPlanService()
         self.scheduled_jobs = {}  # Map of plan_id -> job_id
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         
         # Configure scheduler
         self.scheduler.configure(
@@ -119,10 +119,41 @@ class ExecutionScheduler:
                     return self._schedule_once(plan_id)
                 else:
                     self.logger.warning(f"Unknown schedule type: {schedule_type}")
-                    return False
+            # Update configuration in database
+            self._update_plan_schedule_config(plan_id, schedule_type, cron_expression, recurrence_pattern)
+            
+            return True
         except Exception as e:
             self.logger.error(f"Error scheduling plan {plan_id}: {e}")
             return False
+
+    def _update_plan_schedule_config(
+        self,
+        plan_id: int,
+        schedule_type: str,
+        cron_expression: Optional[str] = None,
+        recurrence_pattern: Optional[str] = None
+    ):
+        """Update plan schedule configuration in database"""
+        try:
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE execution_suite_plans
+                        SET schedule_type = %s,
+                            cron_expression = %s,
+                            recurrence_pattern = %s
+                        WHERE id = %s
+                        """,
+                        (schedule_type, cron_expression, recurrence_pattern, plan_id)
+                    )
+                    conn.commit()
+            finally:
+                return_db_connection(conn)
+        except Exception as e:
+            self.logger.error(f"Error updating plan schedule config for plan {plan_id}: {e}")
     
     def _schedule_cron(self, plan_id: int, cron_expression: str) -> bool:
         """Schedule plan with cron expression"""

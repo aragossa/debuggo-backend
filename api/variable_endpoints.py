@@ -13,6 +13,7 @@ Also provides audit logging endpoints for variable substitutions and extractions
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from datetime import datetime
 from auroqa.models.user import User
@@ -21,6 +22,22 @@ from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connec
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/variables", tags=["variables"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize VariableManager
 variable_manager = VariableManager()
@@ -339,7 +356,7 @@ async def list_variables(
     environment_id: Optional[int] = Query(None, description="Filter by environment ID"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """
     List variables with optional filtering.
@@ -374,7 +391,7 @@ async def list_variables(
 @router.get("/{variable_id}", response_model=VariableResponse)
 async def get_variable(
     variable_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get a specific variable by ID"""
     try:
@@ -393,7 +410,7 @@ async def get_variable(
 @router.post("", response_model=VariableResponse)
 async def create_variable(
     request: VariableCreate,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Create a new variable"""
     try:
@@ -434,7 +451,7 @@ async def create_variable(
 async def update_variable(
     variable_id: int,
     request: VariableUpdate,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Update an existing variable"""
     try:
@@ -467,7 +484,7 @@ async def update_variable(
 @router.delete("/{variable_id}")
 async def delete_variable(
     variable_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Delete a variable"""
     try:
@@ -499,7 +516,7 @@ async def list_project_variables(
     project_id: str,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """List variables for a specific project"""
     try:
@@ -523,7 +540,7 @@ async def list_environment_variables(
     environment_id: int,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """List variables for a specific environment"""
     try:
@@ -553,7 +570,7 @@ async def get_substitution_logs_endpoint(
     variable_name: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get variable substitution logs"""
     try:
@@ -581,7 +598,7 @@ async def get_extraction_logs_endpoint(
     variable_name: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get variable extraction logs"""
     try:

@@ -11,15 +11,32 @@ Provides REST API for test execution metrics:
 """
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timedelta
 from auroqa.models.user import User
 from auroqa.Services.MetricsService import get_metrics_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize services
 metrics_service = get_metrics_service()
@@ -138,7 +155,7 @@ class DashboardSummaryResponse(BaseModel):
 @router.get("/plans/{plan_id}/stats", response_model=ExecutionStatsResponse)
 async def get_plan_stats(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution statistics for a plan"""
     try:
@@ -158,7 +175,7 @@ async def get_plan_stats(
 @router.get("/suites/{suite_id}/stats", response_model=ExecutionStatsResponse)
 async def get_suite_stats(
     suite_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution statistics for a suite"""
     try:
@@ -183,7 +200,7 @@ async def get_suite_stats(
 async def get_execution_trend(
     plan_id: int,
     days: int = Query(30, ge=1, le=365),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution trend over time"""
     try:
@@ -208,7 +225,7 @@ async def get_execution_trend(
 async def get_slowest_suites(
     plan_id: int,
     limit: int = Query(10, ge=1, le=100),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get slowest performing suites"""
     try:
@@ -229,7 +246,7 @@ async def get_slowest_suites(
 async def get_flaky_suites(
     plan_id: int,
     limit: int = Query(10, ge=1, le=100),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get most flaky (inconsistent) suites"""
     try:
@@ -253,7 +270,7 @@ async def get_flaky_suites(
 @router.get("/plans/{plan_id}/failure-analysis", response_model=FailureAnalysisResponse)
 async def get_failure_analysis(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get failure analysis for a plan"""
     try:
@@ -279,7 +296,7 @@ async def compare_plan_runs(
     plan_id: int,
     run_id_1: int = Query(..., description="First run ID"),
     run_id_2: int = Query(..., description="Second run ID"),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Compare two plan runs"""
     try:
@@ -303,7 +320,7 @@ async def compare_plan_runs(
 @router.get("/plans/{plan_id}/dashboard")
 async def get_dashboard_summary(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get comprehensive dashboard summary for a plan"""
     try:
@@ -326,7 +343,7 @@ async def get_dashboard_summary(
 
 @router.get("/health")
 async def metrics_health_check(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Health check for metrics service"""
     return {

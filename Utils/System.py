@@ -26,7 +26,17 @@ class System:
         # Explicitly set the .env file path and override existing variables
         # This ensures Docker environment variables don't override our .env file
         env_path = Path('/app/.env')
-        load_dotenv(dotenv_path=env_path, override=True)
+        if not env_path.exists():
+            # Try local development path (inner directory first)
+            inner_env = Path(__file__).resolve().parent.parent / '.env'
+            if inner_env.exists():
+                env_path = inner_env
+            else:
+                # Try outer directory
+                env_path = Path(__file__).resolve().parent.parent.parent / '.env'
+
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=True)
 
         # Database configuration
         self.db_host = os.getenv('DB_HOST', 'localhost')

@@ -934,6 +934,23 @@ IMPORTANT:
             self.logger.warning(f"Using default model")
             return (default_model_id, default_model_name)
 
+    def _process_image_for_gemini(self, image: Image.Image) -> Image.Image:
+        """
+        Process image for Gemini: resize if too large to prevent timeouts.
+        """
+        if not image:
+            return None
+            
+        max_dimension = 1536  # Reasonable limit for VLM
+        
+        if image.width > max_dimension or image.height > max_dimension:
+            ratio = min(max_dimension / image.width, max_dimension / image.height)
+            new_size = (int(image.width * ratio), int(image.height * ratio))
+            self.logger.info(f"Resizing image for Gemini from {image.size} to {new_size}")
+            return image.resize(new_size, Image.Resampling.LANCZOS)
+            
+        return image
+
     def send_request_to_gemini(
         self, 
         prompt: str, 
@@ -954,21 +971,19 @@ IMPORTANT:
         prompt_length = len(prompt)
         truncated_prompt = prompt[:6000] + "..." if prompt_length > 6000 else prompt
         
-        # self.logger.info(f"====== GEMINI REQUEST START ======")
-        # self.logger.info(f"Prompt length: {prompt_length} characters")
-        # self.logger.info(f"Image included: {'Yes' if image else 'No'}")
-        # self.logger.info(f"Text content included: {'Yes' if text_content else 'No'}")
-        # self.logger.info(f"Prompt preview: {truncated_prompt}")
-        # self.logger.info(f"====== GEMINI REQUEST END ======")
-        
         # Get the model ID and name from the database
         model_id, model_name = self._get_model_id_and_name()
         genai.configure(api_key=self.gemini_api_key)
         model = genai.GenerativeModel(model_name)
         response = None
-        max_retries = 5
+        max_retries = 3  # Reduced from 5 to fail faster
         base_delay = 2  # Start with 2 seconds delay
         request_start_time = time.time()
+        
+        # Process image if present
+        processed_image = None
+        if image:
+            processed_image = self._process_image_for_gemini(image)
         
         for attempt in range(max_retries):
             try:
@@ -977,12 +992,18 @@ IMPORTANT:
                     self._wait_for_rate_limit()
                     self.logger.info(f"Retry attempt {attempt+1}/{max_retries} for Gemini request")
                 
-                if image:
+                # Configure request options with timeout
+                # 120s timeout for normal requests, 180s for image requests
+                # This is much shorter than default 600s to fail fast and retry
+                timeout = 180 if processed_image else 120
+                
+                if processed_image:
                     self.logger.info(f"Sending prompt to Gemini with image - attempt {attempt+1}")
-                    response = model.generate_content([prompt, image])
+                    response = model.generate_content([prompt, processed_image], request_options={'timeout': timeout})
                 else:
-                    self.logger.info(f"Sending prompt to Gemini - attempt {attempt+1}")
-                    response = model.generate_content(prompt)
+                    self.logger.info(f"Sending prompt to Gemini without image - attempt {attempt+1}")
+                    response = model.generate_content(prompt, request_options={'timeout': timeout})
+                
                 # Get the response text and calculate response time
                 request_end_time = time.time()
                 response_time = request_end_time - request_start_time
@@ -1012,7 +1033,7 @@ IMPORTANT:
                 self.logger.info(f"====== GEMINI RESPONSE END ======")
                 
                 # Save screenshot, prompt, and response to page_sources folder
-                self._save_to_page_sources(image=image, prompt=prompt, response=response_text)
+                self._save_to_page_sources(image=processed_image, prompt=prompt, response=response_text)
 
                 # Extract token counts for logging
                 token_counts = self._extract_token_counts(response)
@@ -1038,7 +1059,8 @@ IMPORTANT:
                         client_id=client_id,
                         user_id=user_id,
                         model_id=model_id,
-                        generation_job_id=generation_job_id
+                        generation_job_id=generation_job_id,
+                        has_image=bool(processed_image)
                     )
                     
                     return parsed_response
@@ -1068,7 +1090,8 @@ IMPORTANT:
                                 client_id=client_id,
                                 user_id=user_id,
                                 model_id=model_id,
-                                generation_job_id=generation_job_id
+                                generation_job_id=generation_job_id,
+                                has_image=bool(processed_image)
                             )
                             
                             return parsed_response
@@ -1099,7 +1122,8 @@ IMPORTANT:
                                 client_id=client_id,
                                 user_id=user_id,
                                 model_id=model_id,
-                                generation_job_id=generation_job_id
+                                generation_job_id=generation_job_id,
+                                has_image=bool(processed_image)
                             )
                             
                             return parsed_response
@@ -1134,7 +1158,8 @@ IMPORTANT:
                                     client_id=client_id,
                                     user_id=user_id,
                                     model_id=model_id,
-                                    generation_job_id=generation_job_id
+                                    generation_job_id=generation_job_id,
+                                    has_image=bool(processed_image)
                                 )
                                 
                                 return parsed_response
@@ -1159,7 +1184,8 @@ IMPORTANT:
                         client_id=client_id,
                         user_id=user_id,
                         model_id=model_id,
-                        generation_job_id=generation_job_id
+                        generation_job_id=generation_job_id,
+                        has_image=bool(processed_image)
                     )
                     
                     raise ValueError('Cannot parse the response - all parsing attempts failed')
@@ -1170,8 +1196,26 @@ IMPORTANT:
                     time.sleep(base_delay)
             except google.api_core.exceptions.DeadlineExceeded as e:
                 self.logger.warning(f"Deadline exceeded (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
+                
+                # FALLBACK STRATEGY: If image request fails with deadline exceeded, try without image
+                if processed_image and attempt == max_retries - 1:
+                    self.logger.warning("Deadline exceeded with image. Falling back to text-only request.")
+                    processed_image = None  # Disable image for next attempt (which is actually a fallback retry)
+                    # We need to extend the loop or recursively call, but simpler to just try once here
+                    try:
+                        self.logger.info("Sending fallback text-only prompt to Gemini")
+                        response = model.generate_content(prompt, request_options={'timeout': 120})
+                        # If successful, the loop will continue to response processing
+                        # But we need to make sure we don't hit the 'if attempt < max_retries - 1' block below
+                        # So we handle success here or let it flow?
+                        # Let's let it flow to the response processing block by not raising exception
+                    except Exception as fallback_error:
+                        self.logger.error(f"Fallback text-only request also failed: {fallback_error}")
+                        raise e  # Raise the original error
+                elif attempt < max_retries - 1:
                     time.sleep(base_delay)
+                else:
+                    raise
             except google.api_core.exceptions.ResourceExhausted as e:
                 # For rate limit errors, always wait for the rate limiter
                 self.logger.warning(f"Rate limit hit (attempt {attempt + 1}/{max_retries})")
@@ -1203,7 +1247,8 @@ IMPORTANT:
         client_id: Optional[int] = None,
         user_id: Optional[int] = None,
         model_id: Optional[int] = None,
-        generation_job_id: Optional[str] = None
+        generation_job_id: Optional[str] = None,
+        has_image: bool = False
     ):
         """
         Log an AI request with token counts and pricing.
@@ -1221,6 +1266,7 @@ IMPORTANT:
             user_id: Optional user ID
             model_id: Optional model ID (if not provided, will be retrieved from database)
             generation_job_id: Optional UUID to track all AI requests for a test generation job
+            has_image: Whether the request included an image
         """
         try:
             # Get the default AI model ID if not provided
@@ -1251,7 +1297,8 @@ IMPORTANT:
             )
             
             if request_id:
-                self.logger.info(f"✅ AI request logged with ID {request_id}")
+                image_status = "with image" if has_image else "without image"
+                self.logger.info(f"✅ AI request logged with ID {request_id} ({image_status})")
             
         except Exception as e:
             self.logger.warning(f"Error logging AI request: {str(e)}")

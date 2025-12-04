@@ -83,7 +83,23 @@ db_pool = None
 
 # Initialize logger
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+
+# Configure logging
+handlers = [logging.StreamHandler(sys.stdout)]
+
+# Add file logging only for local environment
+if os.getenv('ENVIRONMENT', 'development') != 'production':
+    # Use 'w' mode to overwrite log file on restart
+    file_handler = logging.FileHandler('auroqa.log', mode='w')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    handlers.append(file_handler)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=handlers,
+    force=True  # Force reconfiguration
+)
 
 # Global shutdown flag
 shutdown_flag = False
@@ -373,21 +389,33 @@ set_get_current_user(get_current_user)
 app.include_router(suite_router, tags=["test-suites"])
 
 # Include Variable Management routes
+from auroqa.api.variable_endpoints import set_get_current_user as set_variable_user
+set_variable_user(get_current_user)
 app.include_router(variable_router, tags=["variables"])
 
 # Include Execution Plan Management routes
+from auroqa.api.execution_plan_endpoints import set_get_current_user as set_exec_plan_user
+set_exec_plan_user(get_current_user)
 app.include_router(execution_plan_router, tags=["execution-plans"])
 
 # Include Scheduler Management routes
+from auroqa.api.scheduler_endpoints import set_get_current_user as set_scheduler_user
+set_scheduler_user(get_current_user)
 app.include_router(scheduler_router, tags=["scheduler"])
 
 # Include Execution Management routes
+from auroqa.api.execution_endpoints import set_get_current_user as set_execution_user
+set_execution_user(get_current_user)
 app.include_router(execution_router, tags=["execution"])
 
 # Include Retry Management routes
+from auroqa.api.retry_endpoints import set_get_current_user as set_retry_user
+set_retry_user(get_current_user)
 app.include_router(retry_router, tags=["retry"])
 
 # Include Metrics & Analytics routes
+from auroqa.api.metrics_endpoints import set_get_current_user as set_metrics_user
+set_metrics_user(get_current_user)
 app.include_router(metrics_router, tags=["metrics"])
 
 # Include Quick Run routes (replaces test_executions for manual runs)
@@ -395,6 +423,8 @@ app.include_router(quick_run_router, tags=["quick-run"])
 
 # Include Requirements Traceability routes
 from auroqa.api.requirements_endpoints import router as requirements_router
+from auroqa.api.requirements_endpoints import set_get_current_user as set_requirements_user
+set_requirements_user(get_current_user)
 app.include_router(requirements_router, tags=["requirements"])
 
 # NOTE: Scheduler is now initialized in the lifespan context manager above
@@ -1131,11 +1161,33 @@ async def generate_steps(
                 if conn:
                     return_db_connection(conn)
         
-        # Get the AI model ID to use
+        # Get the AI model ID and VLM setting to use
         ai_model_id = None
+        vlm_enabled = False  # Default to False
+        
         if request_data and request_data.ai_model_id:
             # Use the model specified in the request
             ai_model_id = request_data.ai_model_id
+            # If passed in request, we might want to support vlm_enabled there too, 
+            # but for now let's fetch user preference if not explicitly passed (or just use default)
+            # Assuming request_data doesn't have vlm_enabled yet, so we fetch from DB or default
+            
+            # Ideally we should fetch the user's VLM preference even if model is passed
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT vlm_enabled FROM user_ai_models WHERE user_id = %s
+                        """,
+                        (current_user.id,)
+                    )
+                    user_pref = cursor.fetchone()
+                    if user_pref:
+                        vlm_enabled = user_pref[0]
+            finally:
+                if conn:
+                    return_db_connection(conn)
         else:
             # Check if the user has a preferred model
             conn = get_db_connection()
@@ -1143,13 +1195,14 @@ async def generate_steps(
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT ai_model_id FROM user_ai_models WHERE user_id = %s
+                        SELECT ai_model_id, vlm_enabled FROM user_ai_models WHERE user_id = %s
                         """,
                         (current_user.id,)
                     )
                     user_model = cursor.fetchone()
                     if user_model:
                         ai_model_id = user_model[0]
+                        vlm_enabled = user_model[1]
                     else:
                         # Use the default model
                         cursor.execute(
@@ -1160,11 +1213,12 @@ async def generate_steps(
                         default_model = cursor.fetchone()
                         if default_model:
                             ai_model_id = default_model[0]
+                            # vlm_enabled remains False (default)
             finally:
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id))
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
         thread.daemon = True
         thread.start()
         
@@ -1257,11 +1311,33 @@ async def confirm_generate_steps(
                 if conn:
                     return_db_connection(conn)
         
-        # Get the AI model ID to use
+        # Get the AI model ID and VLM setting to use
         ai_model_id = None
+        vlm_enabled = False  # Default to False
+        
         if request_data and request_data.ai_model_id:
             # Use the model specified in the request
             ai_model_id = request_data.ai_model_id
+            # If passed in request, we might want to support vlm_enabled there too, 
+            # but for now let's fetch user preference if not explicitly passed (or just use default)
+            # Assuming request_data doesn't have vlm_enabled yet, so we fetch from DB or default
+            
+            # Ideally we should fetch the user's VLM preference even if model is passed
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT vlm_enabled FROM user_ai_models WHERE user_id = %s
+                        """,
+                        (current_user.id,)
+                    )
+                    user_pref = cursor.fetchone()
+                    if user_pref:
+                        vlm_enabled = user_pref[0]
+            finally:
+                if conn:
+                    return_db_connection(conn)
         else:
             # Check if the user has a preferred model
             conn = get_db_connection()
@@ -1269,13 +1345,14 @@ async def confirm_generate_steps(
                 with conn.cursor() as cursor:
                     cursor.execute(
                         """
-                        SELECT ai_model_id FROM user_ai_models WHERE user_id = %s
+                        SELECT ai_model_id, vlm_enabled FROM user_ai_models WHERE user_id = %s
                         """,
                         (current_user.id,)
                     )
                     user_model = cursor.fetchone()
                     if user_model:
                         ai_model_id = user_model[0]
+                        vlm_enabled = user_model[1]
                     else:
                         # Use the default model
                         cursor.execute(
@@ -1286,11 +1363,12 @@ async def confirm_generate_steps(
                         default_model = cursor.fetchone()
                         if default_model:
                             ai_model_id = default_model[0]
+                            # vlm_enabled remains False (default)
             finally:
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id))
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
         thread.daemon = True
         thread.start()
         
@@ -4667,15 +4745,18 @@ async def list_ai_models(current_user: User = Depends(get_current_user)):
             
             # Check if the user has a preferred model
             cursor.execute("""
-                SELECT ai_model_id
+                SELECT ai_model_id, vlm_enabled
                 FROM user_ai_models
                 WHERE user_id = %s
             """, (current_user.id,))
             user_model = cursor.fetchone()
             
-            # Add is_user_selected flag to each model
+            # Add is_user_selected flag and vlm_enabled to each model
             for model in models:
-                model['is_user_selected'] = user_model and model['id'] == user_model['ai_model_id']
+                is_selected = user_model and model['id'] == user_model['ai_model_id']
+                model['is_user_selected'] = is_selected
+                if is_selected:
+                    model['vlm_enabled'] = user_model['vlm_enabled']
                 
             return models
     except Exception as e:
@@ -4931,15 +5012,17 @@ async def delete_ai_model(
 
 @app.post("/api/user-ai-model", response_model=Dict)
 async def set_user_ai_model(
-    model_data: dict = Body(..., example={"ai_model_id": 1}),
+    model_data: dict = Body(..., example={"ai_model_id": 1, "vlm_enabled": False}),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Set the user's preferred AI model.
+    Set the user's preferred AI model and VLM setting.
     """
     conn = None
     try:
         ai_model_id = model_data.get("ai_model_id")
+        vlm_enabled = model_data.get("vlm_enabled", False)  # Default to False if not provided
+        
         if not ai_model_id:
             raise HTTPException(
                 status_code=400,
@@ -4968,15 +5051,15 @@ async def set_user_ai_model(
                 # Update existing preference
                 cursor.execute("""
                     UPDATE user_ai_models 
-                    SET ai_model_id = %s, updated_at = CURRENT_TIMESTAMP
+                    SET ai_model_id = %s, vlm_enabled = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE user_id = %s
-                """, (ai_model_id, current_user.id))
+                """, (ai_model_id, vlm_enabled, current_user.id))
             else:
                 # Insert new preference
                 cursor.execute("""
-                    INSERT INTO user_ai_models (user_id, ai_model_id)
-                    VALUES (%s, %s)
-                """, (current_user.id, ai_model_id))
+                    INSERT INTO user_ai_models (user_id, ai_model_id, vlm_enabled)
+                    VALUES (%s, %s, %s)
+                """, (current_user.id, ai_model_id, vlm_enabled))
             
             conn.commit()
             return {"message": "User AI model preference updated successfully"}

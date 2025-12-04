@@ -11,6 +11,7 @@ Provides REST API for executing test plans:
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from datetime import datetime
 from auroqa.models.user import User
@@ -19,6 +20,22 @@ from auroqa.Services.ExecutionPlanService import ExecutionPlanService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/execution", tags=["execution"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize services
 execution_engine = get_execution_engine()
@@ -104,7 +121,7 @@ def _execute_plan_background(plan_id: int, run_id: int, max_parallel: int):
 async def execute_plan(
     plan_id: int,
     request: Optional[ExecutePlanRequest] = None,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Execute a plan with parallel suite execution (async - returns immediately)"""
     import threading
@@ -153,7 +170,7 @@ async def execute_plan(
 @router.get("/runs/{run_id}/status", response_model=ExecutionStatusResponse)
 async def get_execution_status(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution status"""
     try:
@@ -173,7 +190,7 @@ async def get_execution_status(
 @router.get("/runs/{run_id}/progress", response_model=ExecutionProgressResponse)
 async def get_execution_progress(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get execution progress"""
     try:
@@ -193,7 +210,7 @@ async def get_execution_progress(
 @router.post("/runs/{run_id}/cancel")
 async def cancel_execution(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Cancel an ongoing execution"""
     try:
@@ -220,7 +237,7 @@ async def cancel_execution(
 @router.get("/runs/{run_id}/results")
 async def get_execution_results(
     run_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get detailed execution results"""
     try:
@@ -259,7 +276,7 @@ async def get_suite_execution_results(
     run_id: int,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get suite-level execution results"""
     try:

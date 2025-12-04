@@ -11,6 +11,7 @@ Provides REST API for managing scheduled execution of test plans:
 import logging
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from datetime import datetime
 from auroqa.models.user import User
@@ -19,6 +20,22 @@ from auroqa.Services.ExecutionPlanService import ExecutionPlanService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
+
+# This will be set by main.py during app initialization
+_current_user_func = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+
+def set_get_current_user(func):
+    """Set the get_current_user dependency function"""
+    global _current_user_func
+    _current_user_func = func
+
+async def get_current_user_from_token(token: str = Depends(oauth2_scheme)) -> User:
+    """Wrapper that gets the actual get_current_user function and calls it"""
+    if _current_user_func is None:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+    # Call the actual get_current_user function with the token
+    return await _current_user_func(token)
 
 # Initialize services
 scheduler = get_scheduler()
@@ -69,7 +86,7 @@ class ScheduledJobsListResponse(BaseModel):
 async def schedule_plan(
     plan_id: int,
     request: SchedulePlanRequest,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Schedule a plan for execution"""
     try:
@@ -107,7 +124,7 @@ async def schedule_plan(
 @router.delete("/plans/{plan_id}/schedule")
 async def remove_schedule(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Remove schedule for a plan"""
     try:
@@ -136,7 +153,7 @@ async def remove_schedule(
 @router.get("/plans/{plan_id}/status", response_model=JobStatusResponse)
 async def get_schedule_status(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get schedule status for a plan"""
     try:
@@ -162,7 +179,7 @@ async def get_schedule_status(
 @router.post("/plans/{plan_id}/pause")
 async def pause_schedule(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Pause schedule for a plan"""
     try:
@@ -191,7 +208,7 @@ async def pause_schedule(
 @router.post("/plans/{plan_id}/resume")
 async def resume_schedule(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Resume schedule for a plan"""
     try:
@@ -223,7 +240,7 @@ async def resume_schedule(
 
 @router.get("/jobs", response_model=ScheduledJobsListResponse)
 async def list_scheduled_jobs(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """List all scheduled jobs"""
     try:
@@ -240,7 +257,7 @@ async def list_scheduled_jobs(
 
 @router.get("/status")
 async def get_scheduler_status(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Get scheduler status"""
     try:
@@ -262,7 +279,7 @@ async def get_scheduler_status(
 
 @router.post("/start")
 async def start_scheduler_endpoint(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Start the scheduler"""
     try:
@@ -284,7 +301,7 @@ async def start_scheduler_endpoint(
 
 @router.post("/stop")
 async def stop_scheduler_endpoint(
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Stop the scheduler"""
     try:
@@ -311,7 +328,7 @@ async def stop_scheduler_endpoint(
 @router.post("/plans/{plan_id}/trigger")
 async def trigger_plan_execution(
     plan_id: int,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Manually trigger a scheduled plan execution immediately"""
     try:
@@ -367,7 +384,7 @@ async def trigger_plan_execution(
 @router.post("/calculate-next-execution")
 async def calculate_next_execution(
     request: SchedulePlanRequest,
-    current_user: User = Depends(lambda: None)  # Placeholder for auth
+    current_user: User = Depends(get_current_user_from_token)  # Placeholder for auth
 ):
     """Calculate next execution time for a schedule"""
     try:
