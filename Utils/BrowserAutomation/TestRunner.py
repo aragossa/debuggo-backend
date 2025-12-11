@@ -13,7 +13,9 @@ import multiprocessing
 from datetime import timedelta
 import base64
 import os.path
+import json
 from auroqa.Utils.AIHelper.HtmlAnalyzer import HtmlAnalyzer
+from auroqa.Utils.AIHelper.AIHelper import AIHelper
 from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
@@ -376,6 +378,7 @@ class TestRunner:
             status_map = {
                 'completed': 'passed',
                 'success': 'passed',
+                'passed': 'passed',
                 'failure': 'failed',
                 'failed': 'failed',
                 'error': 'error',
@@ -1086,6 +1089,130 @@ class TestRunner:
                                     screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
                         except Exception as screenshot_error:
                             self.logger.warning(f"[PID:{pid}] Failed to capture error screenshot: {screenshot_error}")
+
+                        # ====================================================================
+                        # SELF-HEALING LOGIC
+                        # ====================================================================
+                        try:
+                            self.logger.info(f"[PID:{pid}] Attempting self-healing for step {step_id}...")
+                            
+                            # Initialize AIHelper
+                            ai_helper = AIHelper()
+                            
+                            # Get page source (HTML)
+                            html_content = ""
+                            try:
+                                html_content = self.browser.driver.page_source
+                            except:
+                                html_content = "Failed to retrieve page source"
+                            
+                            # Use existing screenshot_path if available
+                            healing_screenshot = screenshot_path 
+                            
+                            # Construct step history for context
+                            step_history = []
+                            # We don't have easy access to full previous steps in this loop structure easily without querying
+                            # but we can provide the current failed step info
+                            
+                            failed_step_info = {
+                                'action': action,
+                                'element_locator': resolved_element_path,
+                                'by_strategy': path_type,
+                                'value': resolved_value,
+                                'element_purpose': description
+                            }
+                            
+                            # Generate prompt for Gemini
+                            prompt = ai_helper.get_error_analysis_prompt(
+                                html_code=html_content,
+                                error_message=error_message,
+                                test_name=test_name,
+                                test_description=test_description,
+                                step_history=[], # Leaving empty for now to save tokens/complexity, strict focus on current step
+                                failed_step=failed_step_info,
+                                screenshot_path=healing_screenshot
+                            )
+                            
+                            # Send to Gemini
+                            # We need to process image if present
+                            image_obj = None
+                            if healing_screenshot and os.path.exists(healing_screenshot):
+                                from PIL import Image
+                                try:
+                                    image_obj = Image.open(healing_screenshot)
+                                except:
+                                    pass
+
+                            self.logger.info(f"[PID:{pid}] Sending self-healing request to Gemini...")
+                            response = ai_helper.send_request_to_gemini(
+                                prompt=prompt,
+                                image=image_obj,
+                                request_type='self_healing',
+                                request_context=f"Test Case {test_case_id}, Step {step_order}"
+                            )
+                            
+                            # Parse response
+                            # remove markdown code blocks if present
+                            if response.startswith("```json"):
+                                response = response[7:]
+                            if response.endswith("```"):
+                                response = response[:-3]
+                            
+                            healing_data = json.loads(response.strip())
+                            
+                            if 'element_locator' in healing_data:
+                                new_xpath = healing_data['element_locator']
+                                new_css = healing_data.get('css_selector', '')
+                                
+                                self.logger.info(f"[PID:{pid}] Gemini suggested fix: XPath={new_xpath}, CSS={new_css}")
+                                
+                                # Retry the step with new locator
+                                self.logger.info(f"[PID:{pid}] Retrying step with new locator...")
+                                
+                                # Use execute_step again
+                                self.execute_step(action, new_xpath, value, 'xpath', env, css_selector=new_css)
+                                
+                                # If we got here, the retry succeeded!
+                                self.logger.info(f"[PID:{pid}] Self-healing retry PASSED!")
+                                
+                                # Update database with new locator
+                                update_success = self._update_step_locator_with_session(
+                                    session_cursor, session_conn, step_id, new_xpath, new_css
+                                )
+                                
+                                if update_success:
+                                    self.logger.info(f"[PID:{pid}] Updated step {step_id} in database with new locators")
+                                    
+                                    # Update step result as passed (with warning/note?)
+                                    # For now, mark as passed but append note to output
+                                    healing_note = f"\n[Self-Healing] Step failed initially but was fixed by AI. Locator updated."
+                                    
+                                    # Calculate total time including retry
+                                    execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                                    
+                                    self._update_step_execution_result(
+                                        step_result_id, "passed", 
+                                        screenshot_path=screenshot_path,
+                                        screenshot_base64=screenshot_base64,
+                                        execution_time_ms=execution_time_ms,
+                                        error_message=healing_note # Using error message field or similar to store note
+                                    )
+                                    
+                                    # Log metric
+                                    self.logger.info(f"✨ Self-Healing validated for step {step_order}")
+                                    
+                                    # Continue to next step loop iteration, confusing the "fail" logic below
+                                    # We need to manually advance step_order and continue loop
+                                    step_order += 1
+                                    continue 
+                                    
+                        except Exception as healing_error:
+                            self.logger.error(f"[PID:{pid}] Self-healing attempt failed: {healing_error}")
+                            # Fall through to normal failure handling
+                            
+                        # ====================================================================
+                        # END SELF-HEALING LOGIC
+                        # ====================================================================
                         
                         # Calculate execution time
                         execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
@@ -1150,13 +1277,13 @@ class TestRunner:
                 # Calculate duration and log success
                 duration = (datetime.now() - start_time).total_seconds()
                 stdout_content = stdout_capture.getvalue()
-                self._update_test_run(test_run_id, "completed", duration=duration, stdout=stdout_content)
+                self._update_test_run(test_run_id, "passed", duration=duration, stdout=stdout_content)
                 self.logger.info(f"[PID:{pid}] Test case completed successfully in {duration} seconds")
                 
                 # Log to quick run if applicable
                 self._log_to_quick_run(
                     test_case_id=test_case_id,
-                    status="completed",
+                    status="passed",
                     started_at=start_time,
                     completed_at=datetime.now(),
                     duration_seconds=duration
@@ -1171,7 +1298,7 @@ class TestRunner:
                     self.logger.error(f"[PID:{pid}] Failed to clean up Redis flags: {e}")
                 
                 return {
-                    "status": "completed", 
+                    "status": "passed", 
                     "duration": duration,
                     "test_run_id": test_run_id,
                     "step_results": self._get_step_execution_results(test_run_id)
@@ -2830,8 +2957,17 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 self.logger.info(f"[PID:{pid}] Clearing browser cookies and cache before test execution")
                 self.browser.driver.delete_all_cookies()
                 # Clear local storage and session storage via JavaScript
-                self.browser.driver.execute_script("window.localStorage.clear();")
-                self.browser.driver.execute_script("window.sessionStorage.clear();")
+                # Clear local storage and session storage via JavaScript safely
+                # storage access might be disabled on data: URLs
+                self.browser.driver.execute_script("""
+                    try {
+                        window.localStorage.clear();
+                        window.sessionStorage.clear();
+                    } catch (e) {
+                        // Ignore errors on restricted origins like data:
+                        console.warn('Could not clear storage: ' + e.message);
+                    }
+                """)
                 self.logger.info(f"[PID:{pid}] Browser cache cleared successfully")
             except Exception as cleanup_error:
                 self.logger.warning(f"[PID:{pid}] Failed to clear browser cache: {cleanup_error}")
@@ -2972,6 +3108,121 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     except Exception as screenshot_error:
                         self.logger.warning(f"[PID:{pid}] Failed to capture error screenshot for step {step_order}: {screenshot_error}")
                     
+                    # ====================================================================
+                    # SELF-HEALING LOGIC
+                    # ====================================================================
+                    try:
+                        self.logger.info(f"[PID:{pid}] Attempting self-healing for step {step_id}...")
+                        
+                        # Initialize AIHelper
+                        ai_helper = AIHelper()
+                        
+                        # Get page source (HTML)
+                        html_content = ""
+                        try:
+                            html_content = self.browser.driver.page_source
+                        except:
+                            html_content = "Failed to retrieve page source"
+                        
+                        # Use existing screenshot_path if available
+                        healing_screenshot = screenshot_path 
+                        
+                        # Construct failed step info
+                        failed_step_info = {
+                            'action': action,
+                            'element_locator': resolved_element_path,
+                            'by_strategy': path_type,
+                            'value': resolved_value,
+                            'element_purpose': description
+                        }
+                        
+                        # Generate prompt for Gemini
+                        prompt = ai_helper.get_error_analysis_prompt(
+                            html_code=html_content,
+                            error_message=str(step_error),
+                            test_name=test_case_name,
+                            test_description=test_case_description,
+                            step_history=[], # Leaving empty for now
+                            failed_step=failed_step_info,
+                            screenshot_path=healing_screenshot
+                        )
+                        
+                        # Send to Gemini
+                        image_obj = None
+                        if healing_screenshot and os.path.exists(healing_screenshot):
+                            from PIL import Image
+                            try:
+                                image_obj = Image.open(healing_screenshot)
+                            except:
+                                pass
+
+                        self.logger.info(f"[PID:{pid}] Sending self-healing request to Gemini...")
+                        response = ai_helper.send_request_to_gemini(
+                            prompt=prompt,
+                            image=image_obj,
+                            request_type='self_healing',
+                            request_context=f"Test Case {test_case_id}, Step {step_order}"
+                        )
+                        
+                        # Parse response
+                        healing_data = {}
+                        if isinstance(response, dict):
+                            healing_data = response
+                        else:
+                            # Handle string response (legacy/fallback)
+                            if response.startswith("```json"):
+                                response = response[7:]
+                            if response.endswith("```"):
+                                response = response[:-3]
+                            try:
+                                healing_data = json.loads(response.strip())
+                            except:
+                                self.logger.warning(f"[PID:{pid}] Failed to parse response as JSON string: {response[:100]}...")
+                        
+                        if 'element_locator' in healing_data:
+                            new_xpath = healing_data['element_locator']
+                            new_css = healing_data.get('css_selector', '')
+                            
+                            self.logger.info(f"[PID:{pid}] Gemini suggested fix: XPath={new_xpath}, CSS={new_css}")
+                            
+                            # Retry the step with new locator
+                            self.logger.info(f"[PID:{pid}] Retrying step with new locator...")
+                            
+                            # Use execute_step again
+                            self.execute_step(action, new_xpath, value, 'xpath', env, css_selector=new_css)
+                            
+                            # If we got here, the retry succeeded!
+                            self.logger.info(f"[PID:{pid}] Self-healing retry PASSED!")
+                            
+                            # Update database with new locator
+                            with self.get_db_connection() as conn:
+                                with conn.cursor() as cursor:
+                                    update_success = self._update_step_locator_with_session(
+                                        cursor, conn, step_id, new_xpath, new_css
+                                    )
+                            
+                            if update_success:
+                                self.logger.info(f"[PID:{pid}] Updated step {step_id} in database with new locators")
+                                
+                                # Update step result as passed with note
+                                healing_note = f"\n[Self-Healing] Step failed initially but was fixed by AI. Locator updated."
+                                execution_time_ms = int((datetime.now() - step_start_time).total_seconds() * 1000)
+                                
+                                self._update_step_execution_result(
+                                    step_result_id, "passed", 
+                                    screenshot_path=screenshot_path,
+                                    screenshot_base64=screenshot_base64,
+                                    execution_time_ms=execution_time_ms,
+                                    error_message=healing_note
+                                )
+                                
+                                self.logger.info(f"✨ Self-Healing validated for step {step_order}")
+                                continue 
+                                
+                    except Exception as healing_error:
+                        self.logger.error(f"[PID:{pid}] Self-healing attempt failed: {healing_error}")
+                        # Fall through to normal failure handling
+
                     # Update step result to failed with screenshot data
                     self._update_step_execution_result(
                         step_result_id, "failed", str(step_error), screenshot_path, screenshot_base64, execution_time_ms
@@ -3008,7 +3259,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 final_stderr = f"{failed_steps} out of {total_steps} steps failed"
                 self.logger.warning(f"[PID:{pid}] Test case {test_case_id} completed with {failed_steps} failed steps")
             else:
-                final_status = "completed"
+                final_status = "passed"
                 final_stdout = f"Test case '{test_case_name}' executed successfully"
                 final_stderr = None
                 self.logger.info(f"[PID:{pid}] All steps completed successfully for test case {test_case_id}")
@@ -3691,3 +3942,23 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             conn.rollback()
             self.logger.error(f"Failed to update generation end time using session: {e}")
             raise
+
+    def _update_step_locator_with_session(self, cursor, conn, step_id, new_xpath, new_css):
+        """
+        Update the element locator and xpath for a step using existing session connection.
+        """
+        try:
+            cursor.execute(
+                """
+                UPDATE test_steps 
+                SET element_path = %s, css_selector = %s 
+                WHERE id = %s
+                """,
+                (new_xpath, new_css, step_id)
+            )
+            conn.commit()
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to update step locator for step {step_id}: {e}")
+            return False
+
