@@ -365,6 +365,11 @@ class ConfidenceScorer:
             True if saved successfully
         """
         try:
+            # Skip saving if step_id is 0 (unsaved step)
+            if score.step_id <= 0:
+                self.logger.warning(f"Skipping confidence score save for invalid step_id: {score.step_id}")
+                return False
+
             with get_db_connection_context() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""

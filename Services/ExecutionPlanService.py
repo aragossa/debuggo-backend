@@ -275,11 +275,12 @@ class ExecutionPlanService:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, test_suite_id, execution_order, environment_id,
-                           timeout_seconds, max_retries, status
-                    FROM execution_suite_plan_suites
-                    WHERE execution_suite_plan_id = %s
-                    ORDER BY execution_order ASC
+                    SELECT esps.id, esps.test_suite_id, esps.execution_order, esps.environment_id,
+                           esps.timeout_seconds, esps.max_retries, esps.status, ts.name as suite_name
+                    FROM execution_suite_plan_suites esps
+                    LEFT JOIN test_suites ts ON esps.test_suite_id = ts.id
+                    WHERE esps.execution_suite_plan_id = %s
+                    ORDER BY esps.execution_order ASC
                     """,
                     (plan_id,)
                 )
@@ -288,12 +289,13 @@ class ExecutionPlanService:
                 for row in cursor.fetchall():
                     suites.append({
                         'id': row[0],
-                        'suite_id': row[1],
+                        'test_suite_id': row[1],  # Kept as test_suite_id for consistency
                         'execution_order': row[2],
                         'environment_id': row[3],
                         'timeout_seconds': row[4],
                         'max_retries': row[5],
-                        'status': row[6]
+                        'status': row[6],
+                        'suite_name': row[7]
                     })
                 
                 return suites
