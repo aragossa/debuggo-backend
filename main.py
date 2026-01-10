@@ -180,7 +180,7 @@ class UpdateTestGroupRequest(BaseModel):
 
 class MoveTestCaseRequest(BaseModel):
     test_case_id: int
-    target_group_id: int
+    target_group_id: Optional[int] = None
 
 class CreateTestCaseRequest(BaseModel):
     name: str
@@ -3728,40 +3728,41 @@ async def move_test_case(
                     detail="You don't have permission to move this test case"
                 )
             
-            # Check if the target group exists and is a valid group
-            cur.execute(
-                """
-                SELECT id, type, client_id 
-                FROM test_cases 
-                WHERE id = %s
-                """,
-                (request_data.target_group_id,)
-            )
-            target_group = cur.fetchone()
-            
-            if not target_group:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Target group not found"
+            # Check if the target group exists and is a valid group (ONLY if not moving to root)
+            if request_data.target_group_id is not None:
+                cur.execute(
+                    """
+                    SELECT id, type, client_id 
+                    FROM test_cases 
+                    WHERE id = %s
+                    """,
+                    (request_data.target_group_id,)
                 )
-            
-            if target_group[1] != 'group' and target_group[1] != 'root':
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Target must be a group or root"
-                )
-            
-            # Convert target group client_id to string for comparison
-            target_group_client_id = str(target_group[2]) if target_group[2] else None
-            
-            logger.info(f"Debug - Target group client_id: {target_group_client_id}")
-            
-            # Skip permission check if client_id is None (for development/testing)
-            if target_group_client_id and user_client_id and target_group_client_id != user_client_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="You don't have permission to move to this group"
-                )
+                target_group = cur.fetchone()
+                
+                if not target_group:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Target group not found"
+                    )
+                
+                if target_group[1] != 'group' and target_group[1] != 'root':
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Target must be a group or root"
+                    )
+                
+                # Convert target group client_id to string for comparison
+                target_group_client_id = str(target_group[2]) if target_group[2] else None
+                
+                logger.info(f"Debug - Target group client_id: {target_group_client_id}")
+                
+                # Skip permission check if client_id is None (for development/testing)
+                if target_group_client_id and user_client_id and target_group_client_id != user_client_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You don't have permission to move to this group"
+                    )
             
             # Update the test case's parent_id
             try:
