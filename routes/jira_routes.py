@@ -92,10 +92,15 @@ async def import_issues(req: JiraImportRequest, user: User = Depends(get_current
                     name = f"[{issue.get('key')}] {issue.get('summary')}"
                     description = issue.get('description')
                     
-                    # Handle Jira Cloud ADF (Atlassian Document Format) which is a dict
+                    # Handle Jira Cloud ADF (Atlassian Document Format)
                     if isinstance(description, (dict, list)):
-                        import json
-                        description = json.dumps(description)
+                        try:
+                            description = extract_text_from_adf(description)
+                        except Exception as e:
+                            # Fallback to string representation if parsing fails
+                            print(f"Error parsing ADF: {e}")
+                            import json
+                            description = json.dumps(description)
                     elif description is None:
                         description = ""
                     else:
@@ -118,3 +123,41 @@ async def import_issues(req: JiraImportRequest, user: User = Depends(get_current
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+def extract_text_from_adf(node):
+    """
+    Recursively extract text from Atlassian Document Format (ADF) node.
+    """
+    if not isinstance(node, dict):
+        return ""
+    
+    node_type = node.get("type")
+    
+    # Handle text nodes directly
+    if node_type == "text":
+        return node.get("text", "")
+    
+    # Handle line breaks
+    if node_type == "hardBreak":
+        return "\n"
+        
+    # Process content children
+    content = node.get("content", [])
+    if not isinstance(content, list):
+        return ""
+        
+    parts = []
+    for child in content:
+        parts.append(extract_text_from_adf(child))
+        
+    # Formatting based on node type
+    joined = "".join(parts)
+    
+    if node_type == "paragraph":
+        return joined + "\n\n"
+    elif node_type == "listItem":
+        return "• " + joined + "\n"
+    elif node_type in ["bulletList", "orderedList"]:
+        return joined + "\n"
+        
+    return joined
