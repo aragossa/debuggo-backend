@@ -76,12 +76,29 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
                     "expected_result": step[7],
                     "path_type": step[8]
                 })
+
+        # Fetch associated test suites
+        test_suites = []
+        cursor.execute('''
+            SELECT s.id, s.name
+            FROM test_suites s
+            JOIN suite_test_cases stc ON s.id = stc.suite_id
+            WHERE stc.test_case_id = %s
+        ''', (test_case_id,))
+        
+        suite_rows = cursor.fetchall()
+        for suite in suite_rows:
+            test_suites.append({
+                "id": suite[0],
+                "name": suite[1]
+            })
         
         return {
             "status": "success",
             "data": {
                 "test_case": test_case_dict,
-                "steps": steps
+                "steps": steps,
+                "test_suites": test_suites
             }
         }
     
