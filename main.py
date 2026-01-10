@@ -7719,3 +7719,56 @@ async def get_state_machine_data(
     except Exception as e:
         logger.error(f"Error fetching State Machine data for test case {test_case_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/test_cases/{test_case_id}/runs")
+async def get_test_case_runs(
+    test_case_id: int,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get recent test runs for a specific test case.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # Verify permission
+            cursor.execute(
+                "SELECT id FROM test_cases WHERE id = %s AND client_id = %s",
+                (test_case_id, str(current_user.client_id))
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Test case not found")
+
+            # Fetch runs
+            cursor.execute(
+                """
+                SELECT id, result, run_date, duration
+                FROM test_runs
+                WHERE test_case_id = %s
+                ORDER BY run_date DESC
+                LIMIT %s
+                """,
+                (test_case_id, limit)
+            )
+            
+            runs = []
+            for row in cursor.fetchall():
+                runs.append({
+                    "id": row[0],
+                    "result": row[1],
+                    "run_date": row[2],
+                    "duration": row[3],
+                    "environment_id": None
+                })
+            
+            return runs
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching test runs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            return_db_connection(conn)

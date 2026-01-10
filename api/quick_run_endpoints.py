@@ -32,7 +32,7 @@ quick_run_service = QuickRunService()
 class QuickRunTestCaseRequest(BaseModel):
     """Request model for quick running a single test case"""
     client_id: str = Field(..., description="Client UUID")
-    project_id: str = Field(..., description="Project UUID")
+    project_id: Optional[str] = Field(None, description="Project UUID")
     test_case_id: int = Field(..., description="Test case ID to run")
     suite_id: Optional[int] = Field(None, description="Suite ID if applicable")
     created_by: Optional[Union[str, int]] = Field(None, description="User ID who initiated the run")
@@ -53,7 +53,7 @@ class QuickRunTestCaseRequest(BaseModel):
 class QuickRunMultipleRequest(BaseModel):
     """Request model for quick running multiple test cases"""
     client_id: str = Field(..., description="Client UUID")
-    project_id: str = Field(..., description="Project UUID")
+    project_id: Optional[str] = Field(None, description="Project UUID")
     test_cases: List[dict] = Field(..., description="List of test cases with test_case_id and optional suite_id")
     name: Optional[str] = Field(None, description="Optional name for the run")
     created_by: Optional[Union[str, int]] = Field(None, description="User ID who initiated the run")

@@ -326,9 +326,10 @@ class ParallelExecutionEngine:
                         results.append(result)
                     except Exception as e:
                         suite = future_to_suite[future]
-                        self.logger.error(f"Error executing suite {suite['suite_id']}: {e}")
+                        suite_id = suite.get('test_suite_id')
+                        self.logger.error(f"Error executing suite {suite_id}: {e}")
                         results.append({
-                            'suite_id': suite['suite_id'],
+                            'suite_id': suite_id,
                             'status': 'failed',
                             'error': str(e),
                             'total_tests': 0,
@@ -356,7 +357,7 @@ class ParallelExecutionEngine:
         Returns:
             Execution result
         """
-        suite_id = suite.get('suite_id')
+        suite_id = suite.get('test_suite_id')
         start_time = datetime.now()
         
         try:
