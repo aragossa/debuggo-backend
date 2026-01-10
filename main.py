@@ -220,31 +220,7 @@ class UpdateUserRequestStatusRequest(BaseModel):
     admin_notes: Optional[str] = None
     priority: Optional[str] = None
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
-
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    with get_db_connection_context() as conn:
-        # Debug logging
-        if conn.closed:
-            raise HTTPException(status_code=500, detail="Database connection error")
-        
-        user = get_user_by_email(conn, email)
-        if user is None:
-            raise credentials_exception
-        return user
+from auroqa.dependencies import get_current_user, oauth2_scheme
 
 # app = FastAPI()
 kafka_consumer = None
@@ -426,6 +402,10 @@ from auroqa.api.requirements_endpoints import router as requirements_router
 from auroqa.api.requirements_endpoints import set_get_current_user as set_requirements_user
 set_requirements_user(get_current_user)
 app.include_router(requirements_router, tags=["requirements"])
+
+# Include Jira routes
+from auroqa.routes.jira_routes import router as jira_router
+app.include_router(jira_router, prefix="/api", tags=["jira"])
 
 # NOTE: Scheduler is now initialized in the lifespan context manager above
 # The @app.on_event decorators are deprecated and ignored when lifespan is used
