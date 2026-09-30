@@ -4,14 +4,14 @@ import google
 import json
 
 def is_relevant_content():
-    GOOGLE_API_KEY = 'AIzaSyDnnYkKQyBGVM1kE2FitVNGav7aZVeMRDU'
+    GOOGLE_API_KEY = '...'
 
     genai.configure(api_key=GOOGLE_API_KEY)
     # Load your image
     image = Image.open('model/data/login_page.png')
 
     text_prompt = ("""
-                    Act as QA engineer. Visit website https://qa-lucy.thrivedx.io/admin/login and compare it with attached image
+                    Act as QA engineer. Visit website .... and compare it with attached image
                     find as many deviations as possible in UI
                     Use the assumptions that the name may be different and slight deviations in color
                     If you find any issues give me it's locators in the response
