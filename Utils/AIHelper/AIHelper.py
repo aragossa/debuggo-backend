@@ -921,8 +921,14 @@ IMPORTANT:
             self.logger.warning(f"Using default model ID: gemini-2.5-pro-preview-06-05")
             return "gemini-2.5-pro-preview-06-05"
 
-    def _get_model_id_and_name(self) -> tuple:
-        """Get both the integer model ID and the model name from the database."""
+    def _get_model_id_and_name(self, model_name: Optional[str] = None) -> tuple:
+        """
+        Get both the integer model ID and the model name from the database.
+
+        Args:
+            model_name: model chosen for this request (ai_models.model_id). When it is
+                not given, or is not an active model, the default model is used.
+        """
         try:
             # Default values in case database query fails
             default_model_id = 1
@@ -942,6 +948,19 @@ IMPORTANT:
             
             try:
                 with conn.cursor() as cur:
+                    # Prefer the model chosen for this request
+                    if model_name:
+                        cur.execute("""
+                            SELECT id, model_id FROM ai_models
+                            WHERE is_active = TRUE AND model_id = %s
+                            LIMIT 1
+                        """, (model_name,))
+                        result = cur.fetchone()
+                        if result and result[0] and result[1]:
+                            self.logger.info(f"Using selected model ID {result[0]} with name {result[1]}")
+                            return (result[0], result[1])
+                        self.logger.warning(f"Selected model '{model_name}' is not an active model, falling back to the default")
+
                     # Query the database for the active default model (get both id and model_id)
                     cur.execute("""
                         SELECT id, model_id FROM ai_models 
@@ -994,7 +1013,8 @@ IMPORTANT:
         request_context: Optional[str] = None,
         client_id: Optional[int] = None,
         user_id: Optional[int] = None,
-        generation_job_id: Optional[str] = None
+        generation_job_id: Optional[str] = None,
+        model_name: Optional[str] = None
     ) -> Union[bool, Any]:
         if not self.gemini_api_key:
             raise ValueError("Gemini API key is required to send requests to Gemini.")
@@ -1006,7 +1026,9 @@ IMPORTANT:
         truncated_prompt = prompt[:6000] + "..." if prompt_length > 6000 else prompt
         
         # Get the model ID and name from the database
-        model_id, model_name = self._get_model_id_and_name()
+        # model_name is passed per request, not stored on the instance: the analyzer is a
+        # singleton shared by concurrent generations
+        model_id, model_name = self._get_model_id_and_name(model_name)
         genai.configure(api_key=self.gemini_api_key)
         model = genai.GenerativeModel(model_name)
         response = None

@@ -4410,7 +4410,7 @@ async def test_case_generation_status(
                 SELECT id, test_case_id, description, action, element_path, value, path_type, expected_result, created_at, updated_at 
                 FROM test_steps 
                 WHERE test_case_id = %s 
-                ORDER BY step_order
+                ORDER BY step_order, id
                 """,
                 (id,)
             )

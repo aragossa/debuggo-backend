@@ -415,7 +415,7 @@ class TestRunner:
                     SELECT id, action, element_path, description, expected_result, value, path_type
                     FROM test_steps
                     WHERE test_case_id = %s
-                    ORDER BY step_order
+                    ORDER BY step_order, id
                 """, (test_case_id,))
                 return cursor.fetchall()
 
@@ -1954,7 +1954,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     prev_step_description=prev_step_description,
                                     screenshot_path=screenshot_path,
                                     generation_job_id=generation_job_id,
-                                    vlm_enabled=vlm_enabled
+                                    vlm_enabled=vlm_enabled,
+                                    model_name=model_id
                                 )
                                 
                                 # Check for stop flag after AI response
@@ -2236,7 +2237,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             error_message=str(e),
                                             previous_attempts=previous_attempts,
                                             screenshot_path=failure_screenshot,
-                                            generation_job_id=generation_job_id
+                                            generation_job_id=generation_job_id,
+                                            model_name=model_id
                                         )
                                         
                                         # Unpack the response
@@ -2286,6 +2288,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                         # If successful, update next_prompt and continue
                                         self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
                                         next_prompt = next_step
+                                        # The corrected step was saved under this number: advance, or the
+                                        # next step gets the same step_order and run order becomes undefined
+                                        step_order += 1
                                         break
                                         
                                     except Exception as recovery_error:
@@ -2534,7 +2539,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             error_message=str(e),
                                             previous_attempts=previous_attempts,
                                             screenshot_path=failure_screenshot,
-                                            generation_job_id=generation_job_id
+                                            generation_job_id=generation_job_id,
+                                            model_name=model_id
                                         )
                                         
                                         # Unpack the response
@@ -2584,6 +2590,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                         # If successful, update next_prompt and continue
                                         self.logger.info(f"[PID:{pid}] Error recovery successful on attempt {recovery_attempt}")
                                         next_prompt = next_step
+                                        # The corrected step was saved under this number: advance, or the
+                                        # next step gets the same step_order and run order becomes undefined
+                                        step_order += 1
                                         break
                                         
                                     except Exception as recovery_error:
@@ -3531,7 +3540,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         SELECT id, step_order, description, action, element_path, value, path_type
                         FROM test_steps
                         WHERE test_case_id = %s
-                        ORDER BY step_order
+                        ORDER BY step_order, id
                     """, (test_case_id,))
                     
                     steps = cursor.fetchall()

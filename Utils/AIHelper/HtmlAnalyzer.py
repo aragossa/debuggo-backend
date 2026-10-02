@@ -549,7 +549,7 @@ Return a JSON object with:
             self.logger.debug(f"Pattern usage recording skipped: {str(e)}")
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
-                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False) -> tuple[str, str, str, str, str, str, str]:
+                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False, model_name: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         
         # ReAct Pattern: Start conversation for this step
@@ -627,7 +627,8 @@ PREVIOUS STEP: {prev_step_description}
                     image,
                     request_type='html_analysis',
                     request_context=f'test_case_{test_case_id}_step_{step_order}',
-                    generation_job_id=generation_job_id
+                    generation_job_id=generation_job_id,
+                    model_name=model_name
                 )
             else:
                 self.logger.info("Sending request to Gemini without image")
@@ -635,7 +636,8 @@ PREVIOUS STEP: {prev_step_description}
                     prompt,
                     request_type='html_analysis',
                     request_context=f'test_case_{test_case_id}_step_{step_order}',
-                    generation_job_id=generation_job_id
+                    generation_job_id=generation_job_id,
+                    model_name=model_name
                 )
             self.logger.info("=== HTML ANALYZER RESPONSE START ===")
 
@@ -724,7 +726,7 @@ PREVIOUS STEP: {prev_step_description}
 
     def analyze_error(self, test_case_id: int, html_code: str, test_name: str, test_description: str, 
                      step_history: list, failed_step: dict, error_message: str, 
-                     previous_attempts: list = None, screenshot_path: str = None, generation_job_id: str = None) -> tuple[str, str, str, str, str, str, str]:
+                     previous_attempts: list = None, screenshot_path: str = None, generation_job_id: str = None, model_name: str = None) -> tuple[str, str, str, str, str, str, str]:
         """
         Analyze a test step failure and suggest a fix.
         
@@ -809,7 +811,8 @@ PREVIOUS STEP: {prev_step_description}
                     image,
                     request_type='ui_error',
                     request_context=f'test_case_{test_case_id}_error_recovery',
-                    generation_job_id=generation_job_id
+                    generation_job_id=generation_job_id,
+                    model_name=model_name
                 )
             else:
                 self.logger.info("Sending error analysis request to Gemini without image")
@@ -817,7 +820,8 @@ PREVIOUS STEP: {prev_step_description}
                     prompt,
                     request_type='ui_error',
                     request_context=f'test_case_{test_case_id}_error_recovery',
-                    generation_job_id=generation_job_id
+                    generation_job_id=generation_job_id,
+                    model_name=model_name
                 )
             
             self.logger.info("=== ERROR ANALYSIS RESPONSE START ===")

@@ -60,7 +60,7 @@ def get_test_data_from_db_helper(conn, test_case_id: int, client_id: str):
                 SELECT id, step_order, action, element_path, value, description, css_selector, expected_result, path_type
                 FROM test_steps
                 WHERE test_case_id = %s
-                ORDER BY step_order ASC
+                ORDER BY step_order ASC, id ASC
             ''', (test_case_id,))
             
             step_rows = cursor.fetchall()
@@ -130,7 +130,7 @@ def get_test_steps_by_case_id(conn, test_case_id: int):
             SELECT id, step_order, action, element_path, value, description, css_selector, expected_result, path_type
             FROM test_steps
             WHERE test_case_id = %s
-            ORDER BY step_order ASC
+            ORDER BY step_order ASC, id ASC
         ''', (test_case_id,))
         
         steps = []
