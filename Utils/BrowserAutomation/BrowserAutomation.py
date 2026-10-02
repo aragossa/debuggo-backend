@@ -31,6 +31,9 @@ class BrowserAutomation:
     def _setup_logger(self):
         logger = logging.getLogger('BrowserAutomation')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
 
         # Remove existing handlers to prevent duplicate logging
         logger.handlers = []
@@ -699,7 +702,7 @@ class BrowserAutomation:
             
             # Wait for any AJAX requests to complete
             WebDriverWait(self.driver, timeout).until(
-                lambda d: d.execute_script('return jQuery.active == 0') or True
+                lambda d: d.execute_script("return typeof jQuery === 'undefined' || jQuery.active == 0") or True
             )
             
             self.logger.info(f"[PID:{self.pid}] Page changes detected and page is stable")

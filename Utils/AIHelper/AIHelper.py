@@ -38,6 +38,9 @@ class AIHelper:
     def _setup_logger(self):
         logger = logging.getLogger('AIHelper')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
 
         # Remove existing handlers to prevent duplicate logging
         logger.handlers = []
@@ -1164,7 +1167,6 @@ IMPORTANT:
                     
                     # Try to find JSON object within text using regex as a last resort
                     self.logger.info("Attempt 4: Searching for JSON-like patterns in response")
-                    import re
                     json_pattern = r'\{[^\{\}]*\{[^\{\}]*\}[^\{\}]*\}'
                     potential_jsons = re.findall(json_pattern, response_text)
                     
@@ -1253,13 +1255,20 @@ IMPORTANT:
                 if attempt < max_retries - 1:
                     # Use exponential backoff in addition to rate limiting
                     delay = base_delay * (10 ** attempt)  # Exponential backoff
-                    # The API reports when the quota window resets ("Please retry in 55.7s");
+                    # The API reports when the quota window resets (retry_delay { seconds: N });
                     # retrying sooner than that is guaranteed to fail again
-                    retry_match = re.search(r'retry in ([0-9.]+)s', str(e))
+                    retry_match = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)', str(e))
                     if retry_match:
-                        delay = max(delay, min(float(retry_match.group(1)) + 1, 90))
+                        retry_after = int(retry_match.group(1)) + 1
+                        if retry_after > 90:
+                            # A per-day quota: waiting inside the request is pointless
+                            raise ValueError(
+                                f"AI model quota exhausted, the provider allows a retry in about "
+                                f"{retry_after // 60} min. Choose another model or try again later."
+                            ) from e
+                        delay = max(delay, retry_after)
                     self.logger.warning(f"Additional backoff: {delay} seconds")
-                    self.logger.error(e)
+                    self.logger.error(str(e).split('[links')[0].strip())
                     time.sleep(delay)
             except Exception as e:
                 self.logger.error(f"Unexpected error: {str(e)}")

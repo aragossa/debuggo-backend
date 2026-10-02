@@ -32,6 +32,9 @@ class GenerationCostAnalytics:
         """Setup logger for generation cost analytics."""
         logger = logging.getLogger('GenerationCostAnalytics')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
         
         if not logger.handlers:
             handler = logging.StreamHandler()

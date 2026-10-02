@@ -84,6 +84,9 @@ class HtmlAnalyzer(AIHelper):
     def _setup_logger(self):
         logger = logging.getLogger('HtmlAnalyzer')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
 
         # Remove any existing handlers to prevent duplicate logging
         if logger.hasHandlers():

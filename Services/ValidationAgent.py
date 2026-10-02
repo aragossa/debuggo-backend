@@ -50,6 +50,9 @@ class ValidationAgent:
         """Setup logger for ValidationAgent."""
         logger = logging.getLogger('ValidationAgent')
         logger.setLevel(logging.DEBUG)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
         
         if not logger.handlers:
             handler = logging.StreamHandler()

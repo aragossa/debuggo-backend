@@ -34,6 +34,9 @@ class AIRequestLogger:
         """Setup logger for AI request logging."""
         logger = logging.getLogger('AIRequestLogger')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
         
         if not logger.handlers:
             handler = logging.StreamHandler()

@@ -42,7 +42,7 @@ class EnhancedTestRunner(TestRunner):
         super().__init__(user_id=user_id, test_case_id=test_case_id)
         self.phase3_runners: Dict[int, Phase3TestRunner] = {}
         self.logger = logging.getLogger(__name__)
-        self.logger.info("✓ EnhancedTestRunner initialized with Phase 3 integration")
+        self.logger.debug("✓ EnhancedTestRunner initialized with Phase 3 integration")
 
     # ========================================================================
     # Execution Initialization

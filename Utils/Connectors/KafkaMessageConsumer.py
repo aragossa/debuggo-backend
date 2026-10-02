@@ -27,6 +27,9 @@ class KafkaMessageConsumer:
     def _setup_logger(self):
         logger = logging.getLogger('KafkaMessageConsumer')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
 
         handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(logging.INFO)

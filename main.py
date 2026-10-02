@@ -3925,7 +3925,7 @@ async def get_test_step_screenshot(
                 (step_id, str(current_user.client_id))
             )
             result = cursor.fetchone()
-            logger.info(f"Screenshot query result for step {step_id}: {'Found' if result else 'Not found'}")
+            logger.debug(f"Screenshot query result for step {step_id}: {'Found' if result else 'Not found'}")
             
             # Debug: Check if step exists at all
             if not result:
@@ -3970,7 +3970,7 @@ async def get_test_step_screenshot(
                 pass
             
             if not result:
-                logger.warning(f"No screenshot found for step {step_id} with client_id {current_user.client_id}")
+                logger.debug(f"No screenshot found for step {step_id} with client_id {current_user.client_id}")
                 # Return JSON response indicating no screenshot available
                 # Add cache headers to prevent repeated requests for missing screenshots
                 return JSONResponse(
@@ -4383,7 +4383,7 @@ async def test_case_generation_status(
                 r = redis.Redis(host=system.redis_host, port=system.redis_port, db=0, decode_responses=True)
                 api_gen_key = r.get(f"api_test_generating:{id}")
                 is_generating_api = api_gen_key is not None
-                logger.info(f"API generation check for test case {id}: {is_generating_api} (key: {api_gen_key})")
+                logger.debug(f"API generation check for test case {id}: {is_generating_api} (key: {api_gen_key})")
             except Exception as redis_error:
                 logger.error(f"Redis error checking API generation: {redis_error}")
             

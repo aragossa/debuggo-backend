@@ -87,7 +87,7 @@ class TestRunner:
                 cls._instances[instance_key] = instance
                 return instance
             else:
-                cls._instances[instance_key].logger.info(f"[PID:{pid}] Returning existing TestRunner instance for user:{user_id}, test:{test_case_id}")
+                cls._instances[instance_key].logger.debug(f"[PID:{pid}] Returning existing TestRunner instance for user:{user_id}, test:{test_case_id}")
                 return cls._instances[instance_key]
 
     def __init__(self, user_id=None, test_case_id=None):
@@ -129,7 +129,7 @@ class TestRunner:
             self.browser = None
             self.logger.info(f"[PID:{self.pid}] Browser will be initialized when needed")
         else:
-            self.logger.info(f"[PID:{self.pid}] TestRunner already initialized for user:{user_id}, test:{test_case_id}")
+            self.logger.debug(f"[PID:{self.pid}] TestRunner already initialized for user:{user_id}, test:{test_case_id}")
 
     def __del__(self):
         """Cleanup method to ensure browser is closed when TestRunner is destroyed"""
@@ -258,6 +258,9 @@ class TestRunner:
     def _setup_logger(self):
         logger = logging.getLogger('TestRunner')
         logger.setLevel(logging.INFO)
+        # The app configures root logging (main.py); an own handler here would print every line twice
+        if logging.getLogger().handlers:
+            return logger
 
         # Remove any existing handlers to prevent duplicate logging
         if logger.hasHandlers():
