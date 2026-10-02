@@ -1135,6 +1135,68 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Error asserting text: {str(e)}")
             raise
 
+    def assert_attribute(self, element_path: str, expected: str, by_strategy: str = None):
+        """
+        Assert that an element's attribute has the expected value.
+
+        Args:
+            element_path (str): The path to the element to check
+            expected (str): "attribute=value", e.g. "aria-valuenow=0", "value=John", "href=/login".
+                Boolean attributes (disabled, checked, selected, readonly) are "true" when set;
+                use "disabled=false" to assert that one is not set.
+            by_strategy (str): The strategy to locate elements (xpath or css)
+
+        Raises:
+            AssertionError: If the attribute value does not match
+        """
+        if not by_strategy:
+            by_strategy = 'xpath'
+
+        if not expected or '=' not in expected:
+            raise ValueError(f"[PID:{self.pid}] assert_attribute expects value in the form 'attribute=value', got: '{expected}'")
+
+        attribute_name, expected_value = expected.split('=', 1)
+        attribute_name = attribute_name.strip()
+        expected_value = expected_value.strip()
+        if not attribute_name:
+            raise ValueError(f"[PID:{self.pid}] assert_attribute needs an attribute name before '=', got: '{expected}'")
+
+        self.logger.info(f"[PID:{self.pid}] Asserting that element '{element_path}' has attribute {attribute_name}='{expected_value}' using {by_strategy}")
+
+        try:
+            element = self.find_element(element_path, by_strategy)
+
+            if not element:
+                raise AssertionError(f"[PID:{self.pid}] Element not found: {element_path}")
+
+            actual_value = element.get_attribute(attribute_name)
+            self.logger.info(f"[PID:{self.pid}] Element actual {attribute_name}: {actual_value!r}")
+
+            # A missing attribute comes back as None: that is "false" for boolean attributes
+            if actual_value is None:
+                matches = expected_value.lower() in ('', 'false')
+            else:
+                matches = expected_value == str(actual_value).strip()
+
+            if not matches:
+                raise AssertionError(
+                    f"[PID:{self.pid}] Attribute '{attribute_name}' does not match. "
+                    f"Expected: '{expected_value}', "
+                    f"Actual: {actual_value!r}"
+                )
+
+            self.logger.info(f"[PID:{self.pid}] Attribute assertion passed: {attribute_name}='{expected_value}'")
+            return True
+
+        except TimeoutException:
+            screenshot_path = self.take_screenshot()
+            self.logger.error(f"[PID:{self.pid}] Timeout waiting for element: {element_path}")
+            self.logger.error(f"[PID:{self.pid}] Screenshot saved: {screenshot_path}")
+            raise AssertionError(f"[PID:{self.pid}] Timeout waiting for element: {element_path}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Error asserting attribute: {str(e)}")
+            raise
+
     def assert_text_contains(self, element_path: str, expected_text: str, by_strategy: str = None):
         """
         Assert that an element's text contains the expected text.

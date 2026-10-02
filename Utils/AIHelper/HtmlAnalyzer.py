@@ -332,6 +332,7 @@ SUPPORTED ACTIONS:
 - "assert" - Assert element exists
 - "assert_text" - Assert element has EXACT text match (use this for final verification)
 - "assert_text_contains" - Assert element text contains substring
+- "assert_attribute" - Assert an element attribute. Put "attribute=expected" into "value" (e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false"). Use it when the state is NOT visible text: progress/slider values, input field values, checked/disabled/selected state, link href
 - "navigate" - Navigate to URL
 - "stop_test" - Stop test execution (use when test is completed successfully)
 
@@ -453,6 +454,7 @@ SUPPORTED ACTIONS:
 - "assert" - Assert element exists
 - "assert_text" - Assert element has EXACT text match (use this for final verification)
 - "assert_text_contains" - Assert element text contains substring
+- "assert_attribute" - Assert an element attribute. Put "attribute=expected" into "value" (e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false"). Use it when the state is NOT visible text: progress/slider values, input field values, checked/disabled/selected state, link href
 - "navigate" - Navigate to URL
 - "stop_test" - Stop test execution (use when test is completed successfully)
 
@@ -584,12 +586,13 @@ Return a JSON object with:
             for var_name, var_info in variable_registry.items():
                 prompt += f"- {var_name}: Used {var_info['usage_count']} times, Purpose: {var_info['purpose']}\n"
         
-        # Append FULL HTML code (critical for XPath generation)
-        # Include full HTML, not truncated - Gemini needs complete DOM structure to generate accurate selectors
+        # Append HTML code (critical for XPath generation)
+        # The DOM structure is kept complete, not truncated; only markup that is useless for
+        # selectors (inline styles, scripts, SVG internals) is stripped to save tokens
         prompt += f"""
 
 CURRENT PAGE HTML (FULL):
-{html_code}
+{self.clean_html_for_prompt(html_code)}
 
 CURRENT STEP: {step_order}
 NEXT ACTION: {next_prompt}

@@ -12,6 +12,7 @@ from PIL import Image
 import threading
 import requests
 import glob
+import re
 
 from auroqa.Utils.System import System
 from auroqa.Services.AIRequestLogger import AIRequestLogger
@@ -157,6 +158,33 @@ class AIHelper:
             f"Here is the schema file to analyze: {text_content}"
         )
         return text_prompt
+
+    @staticmethod
+    def clean_html_for_prompt(html_code: str) -> str:
+        """
+        Strip markup that carries no information for locator generation, to cut prompt tokens.
+        Removes scripts, style blocks, comments, <link>/<meta>, SVG internals and data: URIs.
+        Inline style attributes are dropped, except that hidden elements stay marked as hidden.
+        Tags, ids, classes, names and text are left intact.
+        """
+        if not html_code:
+            return html_code
+
+        def _reduce_style(match):
+            value = match.group(2).lower().replace(' ', '')
+            hidden = [rule for rule in ('display:none', 'visibility:hidden') if rule in value]
+            return f' style="{";".join(hidden)}"' if hidden else ''
+
+        cleaned = re.sub(r'<script\b.*?</script>', '', html_code, flags=re.S | re.I)
+        cleaned = re.sub(r'<style\b.*?</style>', '', cleaned, flags=re.S | re.I)
+        cleaned = re.sub(r'<!--.*?-->', '', cleaned, flags=re.S)
+        cleaned = re.sub(r'<(?:link|meta)\b[^>]*>', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'(<svg\b[^>]*>).*?(</svg>)', r'\1\2', cleaned, flags=re.S | re.I)
+        cleaned = re.sub(r'\sstyle\s*=\s*(["\'])(.*?)\1', _reduce_style, cleaned, flags=re.S | re.I)
+        cleaned = re.sub(r'data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+', 'data:...', cleaned)
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+        cleaned = re.sub(r'\n\s*\n+', '\n', cleaned)
+        return cleaned
 
     def get_analyze_html_prompt(self, html_code: str, test_name: str, test_description: str, step_order: int, next_prompt: str, prev_step_description: str, attached_screenshot: str = None, variable_registry: dict = None) -> str:
         # Get test case ID from test name (assuming it's stored in the format "Test Case #123")
@@ -405,7 +433,9 @@ When performing assertions, consider the following validation patterns:
 🔴 CRITICAL - ACTION VALIDATION:
 You MUST ONLY use these valid actions. NO OTHER ACTIONS ARE ALLOWED:
 - UI Actions: click, type, select, hover, wait, scroll, clear, navigate, press_key, use_component
-- Assertion Actions: assert, assert_text_contains
+- Assertion Actions: assert, assert_text_contains, assert_attribute
+  (assert_attribute: put "attribute=expected" into "value", e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false";
+   use it when the state is not visible text: input values, checked/disabled state, progress values, href)
 - Wait Actions: wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable
 - API Actions: api_request, api_auth, api_get, api_post, api_put, api_delete, api_patch, response_validation, validation
 
@@ -421,7 +451,7 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "element_locator": "XPath selector to locate the element (PRIMARY locator)",
     "css_selector": "CSS selector to locate the same element (FALLBACK locator)",
     "by_strategy": "xpath",
-    "action": "click, type, select, hover, wait, assert, assert_text_contains, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
+    "action": "click, type, select, hover, wait, assert, assert_text_contains, assert_attribute, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST use placeholders like %login%, %random_email%, %unique_name:Prefix% (ALWAYS with % on BOTH sides)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
@@ -622,7 +652,7 @@ IMPORTANT REQUIREMENTS:
         prompt += f"""
 {screenshot_text}
 HTML Code:
-{html_code}
+{self.clean_html_for_prompt(html_code)}
 """
         
         return prompt
@@ -699,7 +729,7 @@ The most common issues are:
 4. Timing issues - The page might not have loaded completely
 
 CURRENT PAGE HTML:
-{html_code}
+{self.clean_html_for_prompt(html_code)}
 
 {'SCREENSHOT OF FAILURE STATE: A screenshot of the page at the time of failure is attached.' if screenshot_path else ''}
 
@@ -725,6 +755,7 @@ IMPORTANT:
 2. If the element truly doesn't exist, suggest an alternative approach
 3. Consider if a parent menu needs to be expanded first
 4. For hidden elements, consider using hover actions or JavaScript execution
+4a. If a text assertion fails because the element text is empty or not visible, but the state is present in an attribute (aria-valuenow, value, checked, disabled, href), use action "assert_attribute" with "value" set to "attribute=expected" (e.g. "aria-valuenow=0")
 5. If timing is the issue, suggest adding a wait step
 6. ⚠️ FOR TRANSIENT NOTIFICATIONS/TOASTS (appear briefly then disappear):
    - AVOID waiting for notification elements as they disappear quickly
@@ -1222,6 +1253,11 @@ IMPORTANT:
                 if attempt < max_retries - 1:
                     # Use exponential backoff in addition to rate limiting
                     delay = base_delay * (10 ** attempt)  # Exponential backoff
+                    # The API reports when the quota window resets ("Please retry in 55.7s");
+                    # retrying sooner than that is guaranteed to fail again
+                    retry_match = re.search(r'retry in ([0-9.]+)s', str(e))
+                    if retry_match:
+                        delay = max(delay, min(float(retry_match.group(1)) + 1, 90))
                     self.logger.warning(f"Additional backoff: {delay} seconds")
                     self.logger.error(e)
                     time.sleep(delay)

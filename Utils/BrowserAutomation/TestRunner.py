@@ -40,7 +40,7 @@ class TestRunner:
     
     # Valid actions from database constraint
     VALID_ACTIONS = {
-        'click', 'type', 'select', 'hover', 'wait', 'assert',
+        'click', 'type', 'select', 'hover', 'wait', 'assert', 'assert_text', 'assert_attribute',
         'assert_text_contains', 'scroll', 'clear', 'navigate',
         'press_key', 'use_component', 'wait_for_element_to_be_visible',
         'wait_for_element_visible', 'wait_for_modal', 'wait_for_clickable',
@@ -447,6 +447,7 @@ class TestRunner:
                 self._validate_action_type(action_to_validate)
             except ValueError as e:
                 self.logger.error(f"Cannot save step due to validation error: {e}")
+                self._last_save_skip_reason = f"action '{action_to_validate}' is not allowed"
                 return -1
             
             with self.get_db_connection() as connection:
@@ -521,6 +522,7 @@ class TestRunner:
                                         f"Skipping duplicate verification step: {mapped_action} on {element_locator} "
                                         f"(previous: {recent_action})"
                                     )
+                                    self._last_save_skip_reason = "duplicate of a recent verification step"
                                     return -1  # Return -1 to indicate skipped duplicate
                     
                     insert_query = """
@@ -746,6 +748,9 @@ class TestRunner:
                 self.browser.assert_text(element_path, value, by_strategy)
             elif action == "assert_text_contains":
                 self.browser.assert_text_contains(element_path, value, by_strategy)
+            elif action == "assert_attribute":
+                # value is "attribute=expected", e.g. "aria-valuenow=0"
+                self.browser.assert_attribute(element_path, value, by_strategy)
             elif action == "hover":
                 self.browser.hover(element_path, by_strategy)
             elif action == "select":
@@ -1505,7 +1510,7 @@ class TestRunner:
     
     def _ensure_gemini_flash_lite_model(self):
         """
-        Ensure gemini-2.5-flash-lite model exists in database with pricing.
+        Ensure gemini-3.5-flash-lite model exists in database with pricing.
         Uses UPSERT to create or update the model.
         Returns the model ID or None if operation fails.
         """
@@ -1516,12 +1521,12 @@ class TestRunner:
                 # First try to get existing model (faster than UPSERT if it exists)
                 cursor.execute("""
                     SELECT id FROM ai_models WHERE model_id = %s
-                """, ('gemini-2.5-flash-lite',))
+                """, ('gemini-3.5-flash-lite',))
                 existing = cursor.fetchone()
                 
                 if existing:
                     model_id = existing[0]
-                    self.logger.debug(f"gemini-2.5-flash-lite model already exists (ID: {model_id})")
+                    self.logger.debug(f"gemini-3.5-flash-lite model already exists (ID: {model_id})")
                     return model_id
                 
                 # Model doesn't exist, create it with UPSERT
@@ -1546,8 +1551,8 @@ class TestRunner:
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING id
                 """, (
-                    'Gemini 2.5 Flash Lite',
-                    'gemini-2.5-flash-lite',
+                    'Gemini 3.5 Flash Lite',
+                    'gemini-3.5-flash-lite',
                     'Fast and efficient model for step estimation and quick analysis',
                     True,  # is_active
                     False,  # is_default
@@ -1559,10 +1564,10 @@ class TestRunner:
                 ))
                 model_id = cursor.fetchone()[0]
                 conn.commit()
-                self.logger.info(f"Created gemini-2.5-flash-lite model in database (ID: {model_id})")
+                self.logger.info(f"Created gemini-3.5-flash-lite model in database (ID: {model_id})")
                 return model_id
         except Exception as e:
-            self.logger.error(f"Failed to ensure gemini-2.5-flash-lite model in database: {e}")
+            self.logger.error(f"Failed to ensure gemini-3.5-flash-lite model in database: {e}")
             if conn:
                 conn.rollback()
             return None
@@ -1573,7 +1578,7 @@ class TestRunner:
     def _estimate_steps_with_ai(self, test_description, html_analyzer, generation_job_id=None):
         """
         Use AI to estimate the number of test steps needed for the test case.
-        Uses gemini-2.5-flash-lite from database with pricing and logs the request.
+        Uses gemini-3.5-flash-lite from database with pricing and logs the request.
         
         Args:
             test_description: The test case description
@@ -1613,7 +1618,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     # Directly call Gemini with the flash model
                     import google.generativeai as genai
                     genai.configure(api_key=ai_helper.gemini_api_key)
-                    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                    model = genai.GenerativeModel('gemini-3.5-flash-lite')
                     gemini_response = model.generate_content(prompt)
                     response = gemini_response.text if gemini_response else None
                     
@@ -1632,7 +1637,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     # Default to Gemini Flash
                     import google.generativeai as genai
                     genai.configure(api_key=ai_helper.gemini_api_key)
-                    model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                    model = genai.GenerativeModel('gemini-3.5-flash-lite')
                     gemini_response = model.generate_content(prompt)
                     response = gemini_response.text if gemini_response else None
                     
@@ -2390,9 +2395,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     except Exception as e:
                                         self.logger.error(f"[PID:{pid}] Failed to update reasoning with successful step: {e}")
                                 
-                                # Skip if this was a duplicate step
+                                # Skip if the step was not saved (duplicate or rejected action)
                                 if step_id == -1:
-                                    self.logger.info(f"[PID:{pid}] Duplicate step detected, skipping database save")
+                                    skip_reason = getattr(self, '_last_save_skip_reason', 'unknown reason')
+                                    self.logger.warning(f"[PID:{pid}] Step NOT saved to database: {skip_reason}")
                                     next_prompt = next_step
                                     continue
                                 
