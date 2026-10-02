@@ -426,13 +426,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     with get_db_connection_context() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, email, full_name, profile_picture, role, client_id FROM users WHERE email = %s",
+            "SELECT id, email, full_name, profile_picture, role, client_id, password_hash FROM users WHERE email = %s",
             (form_data.username,)
         )
         user = cur.fetchone()
         cur.close()
 
-        if not user or not verify_password(form_data.password, user[1]):  
+        if not user or not user[6] or not verify_password(form_data.password, user[6]):  
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
@@ -908,9 +908,6 @@ async def run_test_case(
             status_code=500,
             detail=f"Failed to run test case: {str(e)}"
         )
-    finally:
-        if conn:
-            return_db_connection(conn)
 
 @app.get("/api/running-tests")
 async def get_running_tests(current_user: User = Depends(get_current_user)):
