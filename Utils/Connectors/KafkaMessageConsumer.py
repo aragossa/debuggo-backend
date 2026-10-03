@@ -158,14 +158,18 @@ class KafkaMessageConsumer:
             # A project with a library of API calls gets the whole test from one model request;
             # without one (no schema uploaded) the step-by-step generation works from the description
             from auroqa.Services.ApiScenarioGenerator import ApiScenarioGenerator, has_library
+            from auroqa.Utils.GenerationStatus import set_generation_error
+            failure_reason = "The API test steps could not be generated. See the backend log for details."
             if has_library(project_id, client_id):
-                result = ApiScenarioGenerator().generate(
+                generator = ApiScenarioGenerator()
+                result = generator.generate(
                     test_case_id=test_case_id,
                     client_id=client_id,
                     project_id=project_id,
                     environment_id=environment_id,
                     model_name=request.get('model_name')
                 )
+                failure_reason = generator.last_error or failure_reason
             else:
                 # Import here to avoid circular dependencies
                 from auroqa.Services.ApiSchemaService import ApiSchemaService
@@ -213,9 +217,15 @@ class KafkaMessageConsumer:
                     self.logger.info(f"Successfully generated API test steps for test case {test_case_id}")
                 else:
                     self.logger.error(f"Failed to generate API test steps for test case {test_case_id}")
+                    set_generation_error(test_case_id, failure_reason)
                 
         except Exception as e:
             self.logger.error(f"Error processing API test steps generation: {e}", exc_info=True)
+            try:
+                from auroqa.Utils.GenerationStatus import set_generation_error
+                set_generation_error(request.get('test_case_id'), str(e) or type(e).__name__)
+            except Exception:
+                pass
             # Clear Redis flag on error too
             import redis
             from auroqa.Utils.System import System

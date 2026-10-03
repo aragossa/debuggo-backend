@@ -61,6 +61,7 @@ from jose import JWTError, jwt
 import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
 from auroqa.Utils.Environments import load_environment_vars, with_scheme
+from auroqa.Utils.GenerationStatus import clear_generation_error, get_generation_error
 from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
 from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
@@ -415,6 +416,12 @@ from auroqa.api.api_operation_endpoints import router as api_operation_router
 from auroqa.api.api_operation_endpoints import set_get_current_user as set_api_operation_user
 set_api_operation_user(get_current_user)
 app.include_router(api_operation_router)
+
+# Why the last generation of a test case stopped
+from auroqa.api.generation_status_endpoints import router as generation_status_router
+from auroqa.api.generation_status_endpoints import set_get_current_user as set_generation_status_user
+set_generation_status_user(get_current_user)
+app.include_router(generation_status_router)
 
 # Include Jira routes
 from auroqa.routes.jira_routes import router as jira_router
@@ -1168,6 +1175,7 @@ async def generate_steps(
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
         use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        clear_generation_error(id)
         thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
@@ -1297,6 +1305,7 @@ async def confirm_generate_steps(
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
         use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        clear_generation_error(id)
         thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
@@ -1423,6 +1432,7 @@ If no specific endpoint is mentioned, use standard REST patterns.
             'model_name': model_name
         }
         
+        clear_generation_error(test_case_id)
         producer.send('user_requests', value=message)
         producer.flush()
         producer.close()
@@ -4436,7 +4446,9 @@ async def test_case_generation_status(
                 "is_generating": is_generating,
                 "test_steps": steps,
                 "current_step": current_step,
-                "next_step": next_step
+                "next_step": next_step,
+                # Why the last generation stopped, if it failed; None after a successful or a new one
+                "error": None if is_generating else get_generation_error(id)
             }
     except Exception as e:
         logger.error(f"Error checking test case generation status: {e}")

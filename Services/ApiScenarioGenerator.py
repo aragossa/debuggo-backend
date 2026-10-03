@@ -242,6 +242,7 @@ class ApiScenarioGenerator:
     def __init__(self):
         self.logger = logging.getLogger('ApiScenarioGenerator')
         self._ai_helper = None
+        self.last_error: Optional[str] = None  # why generate() returned False, for the UI
 
     @property
     def ai_helper(self):
@@ -356,6 +357,7 @@ class ApiScenarioGenerator:
                 row = cursor.fetchone()
                 if not row:
                     self.logger.error(f"Test case {test_case_id} not found")
+                    self.last_error = "Test case not found."
                     return False
                 name, description = row[0], row[1] or ''
                 if not environment_id:
@@ -366,6 +368,7 @@ class ApiScenarioGenerator:
         environment_vars = load_environment_vars(environment_id)
         if not environment_vars:
             self.logger.error(f"Test case {test_case_id}: no environment to run the generated steps on")
+            self.last_error = "No environment to run the generated steps on: select an environment and generate again."
             return False
         environment_vars = {**environment_vars, 'base_url': api_base_url(environment_vars)}
 
@@ -418,6 +421,10 @@ class ApiScenarioGenerator:
             # Keep the last plan: the user sees which step fails and can fix it
             self._save(test_case_id, steps)
             self.logger.warning(f"Test case {test_case_id}: saved {len(steps)} steps, but the test does not pass yet")
+            reason = plan_error or f"step {failure['index'] + 1} fails: {failure['error']}"
+            self.last_error = (f"The test was generated, but it does not pass yet ({reason}). "
+                               f"The {len(steps)} steps are saved: fix the failing step or generate again.")
         else:
             self.logger.error(f"Test case {test_case_id}: no usable plan from the model")
+            self.last_error = "The model returned no usable test plan. Make the description more specific or try another model."
         return False

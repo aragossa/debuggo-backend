@@ -19,6 +19,7 @@ from auroqa.Utils.AIHelper.AIHelper import AIHelper
 from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
+from auroqa.Utils.GenerationStatus import set_generation_error
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
@@ -1678,6 +1679,7 @@ class TestRunner:
                 except Exception as e:
                     session_conn.rollback()
                     self.logger.error(f"[PID:{pid}] Failed to initialize test generation: {e}")
+                    set_generation_error(test_case_id, f"The generation could not start: {e}")
                     return
                 
                 # Continue with test generation using the same connection
@@ -3023,6 +3025,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
+            # The UI shows this on the test case: the user must know why the generation stopped
+            set_generation_error(test_case_id, str(e) or type(e).__name__)
             # Update end time even on error using fallback method
             self._update_generation_end_time(test_case_id)
             
