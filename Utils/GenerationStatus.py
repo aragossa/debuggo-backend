@@ -8,6 +8,7 @@ cleared when the next one starts or when the user dismisses it, and expires by i
 """
 
 import logging
+import re
 from typing import Optional
 
 import redis
@@ -48,4 +49,39 @@ def get_generation_error(test_case_id: int) -> Optional[str]:
         return _client().get(_key(test_case_id))
     except Exception as e:
         logger.error(f"Could not read the generation error of test case {test_case_id}: {e}")
+        return None
+
+
+# ---- the daily quota of a model ---------------------------------------------------------------
+# Once the provider says the quota of a model is used up, every further request fails the same way
+# until it resets. The tests still in the queue are not sent to the model: they get this reason.
+
+def _quota_key(model_name: Optional[str]) -> str:
+    return f"ai_quota_exhausted:{model_name or 'default'}"
+
+
+def note_quota_exhausted(model_name: Optional[str], message: str) -> bool:
+    """Remember that the quota of the model is used up, when the error says so. True if it does."""
+    match = re.search(r'quota exhausted.*?retry in about (\d+) min', message or '', re.IGNORECASE)
+    if not match:
+        return False
+    minutes = max(1, min(int(match.group(1)), 24 * 60))
+    try:
+        _client().setex(_quota_key(model_name), minutes * 60, message[:_MAX_LENGTH])
+    except Exception as e:
+        logger.error(f"Could not store the quota state of {model_name}: {e}")
+    return True
+
+
+def quota_exhausted(model_name: Optional[str]) -> Optional[str]:
+    """Why the model cannot be asked now, with the minutes left; None when it can."""
+    try:
+        client = _client()
+        message = client.get(_quota_key(model_name))
+        if not message:
+            return None
+        minutes = max(1, (client.ttl(_quota_key(model_name)) + 59) // 60)
+        return re.sub(r'retry in about \d+ min', f'retry in about {minutes} min', message)
+    except Exception as e:
+        logger.error(f"Could not read the quota state of {model_name}: {e}")
         return None

@@ -192,6 +192,27 @@ def create_scenario_tests(schema_id: int, client_id: str, scenarios: List[Dict])
             'created': created, 'skipped': skipped}
 
 
+def scenario_tests_without_steps(schema_id: int, client_id: str) -> Dict[str, Any]:
+    """The tests of "<schema>/Scenarios" that have no steps yet: created, but their generation did not finish."""
+    schema = _schema(schema_id, client_id)
+    if not schema:
+        raise ValueError("API schema not found")
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT tc.id, tc.name FROM test_cases tc
+                JOIN test_cases scenarios ON scenarios.id = tc.parent_id
+                JOIN test_cases root ON root.id = scenarios.parent_id
+                WHERE tc.type = 'test' AND scenarios.type = 'group' AND scenarios.name = %s
+                  AND root.type = 'group' AND root.name = %s AND root.parent_id IS NULL
+                  AND root.project_id = %s AND root.client_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM test_steps s WHERE s.test_case_id = tc.id)
+                ORDER BY tc.id
+            """, (SCENARIOS_GROUP, schema['name'], schema['project_id'], client_id))
+            tests = [{'id': row[0], 'name': row[1]} for row in cursor.fetchall()]
+    return {'schema_id': schema_id, 'project_id': schema['project_id'], 'tests': tests}
+
+
 def queue_generation(test_case_id: int, client_id: str, project_id: str,
                      environment_id: Optional[int], model_name: Optional[str]) -> None:
     """Queue the step generation of an API test, the same message the Generate button sends."""

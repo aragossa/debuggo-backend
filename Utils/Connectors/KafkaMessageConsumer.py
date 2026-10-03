@@ -160,7 +160,14 @@ class KafkaMessageConsumer:
             from auroqa.Services.ApiScenarioGenerator import ApiScenarioGenerator, has_library
             from auroqa.Utils.GenerationStatus import set_generation_error
             failure_reason = "The API test steps could not be generated. See the backend log for details."
-            if has_library(project_id, client_id):
+            # The quota of the model was used up by a test earlier in the queue: asking again fails the same way
+            from auroqa.Utils.GenerationStatus import quota_exhausted
+            no_quota = quota_exhausted(request.get('model_name'))
+            if no_quota:
+                self.logger.info(f"Test case {test_case_id}: not generated, {no_quota}")
+                result = False
+                failure_reason = no_quota
+            elif has_library(project_id, client_id):
                 generator = ApiScenarioGenerator()
                 result = generator.generate(
                     test_case_id=test_case_id,
@@ -222,8 +229,10 @@ class KafkaMessageConsumer:
         except Exception as e:
             self.logger.error(f"Error processing API test steps generation: {e}", exc_info=True)
             try:
-                from auroqa.Utils.GenerationStatus import set_generation_error
+                from auroqa.Utils.GenerationStatus import set_generation_error, note_quota_exhausted
                 set_generation_error(request.get('test_case_id'), str(e) or type(e).__name__)
+                # The tests behind this one in the queue are not sent to the model (see above)
+                note_quota_exhausted(request.get('model_name'), str(e))
             except Exception:
                 pass
             # Clear Redis flag on error too

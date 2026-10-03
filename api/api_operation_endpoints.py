@@ -5,6 +5,8 @@ GET  /api/projects/{project_id}/api-operations      - the API calls of a project
 POST /api/api-schemas/{schema_id}/operations/sync   - rebuild the calls of one schema
 
 POST /api/api-schemas/{schema_id}/baseline-tests    - create the baseline API tests of one schema, without AI
+GET  /api/api-schemas/{schema_id}/scenario-tests/pending  - scenario tests that have no steps yet
+POST /api/api-schemas/{schema_id}/scenario-tests/generate - generate the steps of those tests
 GET  /api/api-schemas/{schema_id}/coverage          - which calls of a schema the tests send, and how well
 POST /api/api-schemas/{schema_id}/scenario-ideas    - ask the model for more complex test scenarios of a schema
 POST /api/api-schemas/{schema_id}/scenario-tests    - create the chosen scenarios as API tests and generate their steps
@@ -24,7 +26,9 @@ from auroqa.models.user import User
 from auroqa.Services.ApiOperationLibrary import list_operations, sync_operations
 from auroqa.Services.ApiBaselineTests import generate_baseline_tests
 from auroqa.Services.ApiCoverage import schema_coverage
-from auroqa.Services.ApiScenarioIdeas import create_scenario_tests, queue_generation, suggest_scenarios
+from auroqa.Services.ApiScenarioIdeas import (create_scenario_tests, queue_generation, scenario_tests_without_steps,
+                                              suggest_scenarios)
+from auroqa.Utils.GenerationStatus import quota_exhausted
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 
 logger = logging.getLogger(__name__)
@@ -230,3 +234,45 @@ async def get_schema_coverage(
     except Exception as e:
         logger.error(f"Error building API coverage: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to build API coverage: {str(e)}")
+
+
+@router.get("/api-schemas/{schema_id}/scenario-tests/pending")
+async def get_pending_scenario_tests(
+    schema_id: int,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """Scenario tests of the schema that were created but have no steps (their generation did not finish)."""
+    client_id = str(current_user.client_id)
+    if not _schema_ids(client_id, schema_id=schema_id):
+        raise HTTPException(status_code=404, detail="API schema not found or access denied")
+    return scenario_tests_without_steps(schema_id, client_id)
+
+
+class GeneratePendingRequest(BaseModel):
+    environment_id: Optional[int] = None
+    ai_model_id: Optional[int] = None
+
+
+@router.post("/api-schemas/{schema_id}/scenario-tests/generate")
+async def generate_pending_scenario_tests(
+    schema_id: int,
+    request: GeneratePendingRequest = None,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """Queue the step generation of every scenario test of the schema that has no steps."""
+    request = request or GeneratePendingRequest()
+    client_id = str(current_user.client_id)
+    if not _schema_ids(client_id, schema_id=schema_id):
+        raise HTTPException(status_code=404, detail="API schema not found or access denied")
+    model_name = _model_name(request.ai_model_id, current_user.id)
+    no_quota = quota_exhausted(model_name)
+    if no_quota:
+        raise HTTPException(status_code=429, detail=no_quota)
+    try:
+        pending = scenario_tests_without_steps(schema_id, client_id)
+        for test in pending['tests']:
+            queue_generation(test['id'], client_id, pending['project_id'], request.environment_id, model_name)
+    except Exception as e:
+        logger.error(f"Error queuing scenario tests: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to queue the scenario tests: {str(e)}")
+    return {"success": True, "queued": pending['tests']}
