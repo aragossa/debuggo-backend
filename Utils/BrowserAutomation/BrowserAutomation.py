@@ -9,6 +9,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoA
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.remote.file_detector import LocalFileDetector
+import json
 import logging
 import sys
 import os
@@ -65,6 +66,8 @@ class BrowserAutomation:
             # Keep a native alert open until a step handles it. The default ("dismiss and notify")
             # closes it on the next command, so accept_alert/assert_alert_text would find nothing
             chrome_options.set_capability('unhandledPromptBehavior', 'ignore')
+            # The requests of the page go to Chrome's performance log, read by drain_network_log()
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
             # Get system configuration for Selenium Grid URL
             system = System()
@@ -135,6 +138,35 @@ class BrowserAutomation:
         except Exception as e:
             self.logger.warning(f"[PID:{self.pid}] Could not clear the HTTP cache: {str(e)}")
             return False
+
+    def drain_network_log(self):
+        """
+        The XHR/fetch requests the page has sent since the last call: [(method, url, status)].
+        status is None for a request whose response has not arrived yet when the log is read
+        and never arrives later. Reading the log empties it, so this is called after every step.
+        """
+        if not hasattr(self, '_net_pending'):
+            self._net_pending = {}  # request id -> (method, url): sent, response not seen yet
+        finished = []
+        for entry in self.driver.get_log('performance'):
+            try:
+                message = json.loads(entry['message'])['message']
+            except (KeyError, ValueError, TypeError):
+                continue
+            params = message.get('params') or {}
+            if message.get('method') == 'Network.requestWillBeSent':
+                request = params.get('request') or {}
+                if params.get('type') in ('XHR', 'Fetch') and request.get('method') != 'OPTIONS':
+                    self._net_pending[params.get('requestId')] = (request.get('method', 'GET'), request.get('url', ''))
+            elif message.get('method') == 'Network.responseReceived':
+                sent = self._net_pending.pop(params.get('requestId'), None)
+                if sent:
+                    finished.append((sent[0], sent[1], (params.get('response') or {}).get('status')))
+            elif message.get('method') == 'Network.loadingFailed':
+                sent = self._net_pending.pop(params.get('requestId'), None)
+                if sent:
+                    finished.append((sent[0], sent[1], None))
+        return finished
 
     def wait_for_page_load(self, timeout=None):
         """

@@ -7,6 +7,7 @@ POST /api/api-schemas/{schema_id}/operations/sync   - rebuild the calls of one s
 POST /api/api-schemas/{schema_id}/baseline-tests    - create the baseline API tests of one schema, without AI
 GET  /api/api-schemas/{schema_id}/scenario-tests/pending  - scenario tests that have no steps yet
 POST /api/api-schemas/{schema_id}/scenario-tests/generate - generate the steps of those tests
+GET  /api/projects/{project_id}/page-coverage      - the pages the UI tests of a project were on
 GET  /api/api-schemas/{schema_id}/coverage          - which calls of a schema the tests send, and how well
 POST /api/api-schemas/{schema_id}/scenario-ideas    - ask the model for more complex test scenarios of a schema
 POST /api/api-schemas/{schema_id}/scenario-tests    - create the chosen scenarios as API tests and generate their steps
@@ -25,7 +26,7 @@ from pydantic import BaseModel
 from auroqa.models.user import User
 from auroqa.Services.ApiOperationLibrary import list_operations, sync_operations
 from auroqa.Services.ApiBaselineTests import generate_baseline_tests
-from auroqa.Services.ApiCoverage import schema_coverage
+from auroqa.Services.ApiCoverage import page_coverage, schema_coverage
 from auroqa.Services.ApiScenarioIdeas import (create_scenario_tests, queue_generation, scenario_tests_without_steps,
                                               suggest_scenarios)
 from auroqa.Utils.GenerationStatus import quota_exhausted
@@ -276,3 +277,16 @@ async def generate_pending_scenario_tests(
         logger.error(f"Error queuing scenario tests: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to queue the scenario tests: {str(e)}")
     return {"success": True, "queued": pending['tests']}
+
+
+@router.get("/projects/{project_id}/page-coverage")
+async def get_page_coverage(
+    project_id: str,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """The pages the UI tests of the project were on in their last runs, with the tests per page."""
+    try:
+        return await run_in_threadpool(page_coverage, project_id, str(current_user.client_id))
+    except Exception as e:
+        logger.error(f"Error building page coverage: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to build page coverage: {str(e)}")

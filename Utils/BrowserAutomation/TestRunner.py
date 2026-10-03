@@ -21,6 +21,7 @@ from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
 from auroqa.Utils.GenerationStatus import set_generation_error
 from auroqa.Utils.LogMasking import mask_secrets
+from auroqa.Services.RunTrace import RunTrace
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
@@ -260,9 +261,35 @@ class TestRunner:
                 raise
         return self.browser
 
+    # ---- run trace: the requests and pages of a run, for coverage (Services/RunTrace.py) ----
+
+    def _start_trace(self, test_run_id: int, test_case_id: int):
+        self._trace = [RunTrace(), test_run_id, test_case_id, 0]  # the last element: the last step collected
+
+    def _collect_trace(self, step_order: int):
+        """After a step: what the browser requested during it and the page it is on."""
+        trace = getattr(self, '_trace', None)
+        if trace and self.browser:
+            trace[0].collect(self.browser, step_order)
+            trace[3] = step_order
+
+    def _finish_trace(self):
+        """Before the browser closes, on every way out of a run: the last step, then save."""
+        trace = getattr(self, '_trace', None)
+        self._trace = None
+        if not trace:
+            return
+        try:
+            if self.browser:
+                trace[0].collect(self.browser, trace[3] + 1)
+            trace[0].save(trace[1], trace[2])
+        except Exception as e:
+            self.logger.error(f"Run trace not saved: {e}")
+
     def _cleanup_browser(self):
         """Cleanup method to close the browser"""
         pid = os.getpid()
+        self._finish_trace()
         if hasattr(self, 'browser') and self.browser:
             self.logger.info(f"[PID:{pid}] Cleaning up browser for user:{self.user_id}, test:{self.test_case_id}")
             try:
@@ -1075,8 +1102,11 @@ class TestRunner:
                 
                 self.logger.info(f"[PID:{pid}] Starting test step execution")
                 step_order = 1
+                self._start_trace(test_run_id, test_case_id)
                 
                 for step in steps:
+                    if step_order > 1:
+                        self._collect_trace(step_order - 1)
                     # Check if we should stop execution
                     if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
                         self.logger.info(f"[PID:{pid}] Stopping test case execution as requested for test case {test_case_id}")
@@ -3395,7 +3425,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             step_order = 0
             failed_steps = 0
             total_steps = len(steps)
+            self._start_trace(test_run_id, test_case_id)
             for step in steps:
+                if step_order:
+                    self._collect_trace(step_order)
                 # Check for stop execution flag
                 if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
                     self.logger.info(f"[PID:{pid}] Stop execution flag found, stopping test case {test_case_id}")

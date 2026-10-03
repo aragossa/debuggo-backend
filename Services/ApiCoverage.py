@@ -10,6 +10,14 @@ State of a call:
   basic     - sent, but only one kind of check: success statuses only, or errors only
   full      - both a success status and an error status (401, 404, 422, ...) are checked
   failing   - a step that sends it failed in its last run
+
+Three views of the same calls ("states" of a call, "summary" of the schema):
+  api - by the API steps of the tests, as above
+  ui  - by what the browser sent during the last run of each UI test (test_run_api_calls): the calls
+        of the backend the UI tests really reach; the statuses are those the API answered with
+  all - both together
+
+page_coverage() is the same idea for pages: the pages of the application the UI tests were on.
 """
 
 import json
@@ -111,6 +119,21 @@ def _api_steps(project_id: str, client_id: str) -> List[Dict[str, Any]]:
     return steps
 
 
+def _ui_calls(project_id: str, client_id: str) -> List[Dict[str, Any]]:
+    """The requests the browser sent in the last traced run of each test of the project."""
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT c.method, c.url, c.status, c.hits, tc.id, tc.name
+                FROM test_run_api_calls c
+                JOIN test_cases tc ON tc.id = c.test_case_id
+                WHERE tc.project_id = %s AND tc.client_id = %s
+                  AND c.test_run_id = (SELECT MAX(test_run_id) FROM test_run_api_calls WHERE test_case_id = tc.id)
+            """, (project_id, client_id))
+            return [{'method': row[0], 'url': row[1], 'status': row[2], 'hits': row[3],
+                     'test_id': row[4], 'test_name': row[5]} for row in cursor.fetchall()]
+
+
 def _state(statuses: List[int], failing: bool) -> str:
     if not statuses:
         return 'uncovered'
@@ -153,21 +176,80 @@ def schema_coverage(schema_id: int, client_id: str) -> Dict[str, Any]:
         if failed or (step['last_status'] and test['last_status'] != 'failed'):
             test['last_status'] = step['last_status']
 
+    # What the browser of the UI tests sent
+    ui_by_operation: Dict[int, Dict[str, Any]] = {op['id']: {'statuses': [], 'tests': {}} for op in operations}
+    for call in _ui_calls(project_id, client_id):
+        op = matcher.match(call['method'], call['url'])
+        if not op:
+            continue  # a request to something else: analytics, another backend
+        entry = ui_by_operation[op['id']]
+        if call['status']:
+            entry['statuses'].append(call['status'])
+        test = entry['tests'].setdefault(call['test_id'], {
+            'id': call['test_id'], 'name': call['test_name'], 'test_type': 'ui', 'statuses': [], 'hits': 0})
+        test['hits'] += call['hits']
+        if call['status'] and call['status'] not in test['statuses']:
+            test['statuses'].append(call['status'])
+
     resources: Dict[str, List[Dict]] = {}
-    summary = {'total': len(operations), 'uncovered': 0, 'basic': 0, 'full': 0, 'failing': 0}
+    empty = {'total': len(operations), 'uncovered': 0, 'basic': 0, 'full': 0, 'failing': 0}
+    summary = {'api': dict(empty), 'ui': dict(empty), 'all': dict(empty)}
     for op in operations:
-        entry = by_operation[op['id']]
-        state = _state(entry['statuses'], entry['failing'])
-        summary[state] += 1
+        entry, ui = by_operation[op['id']], ui_by_operation[op['id']]
+        # A call the browser sent is covered even when the status was not caught
+        ui_statuses = ui['statuses'] or ([200] if ui['tests'] else [])
+        states = {'api': _state(entry['statuses'], entry['failing']),
+                  'ui': _state(ui_statuses, False),
+                  'all': _state(entry['statuses'] + ui_statuses, entry['failing'])}
+        for view, state in states.items():
+            summary[view][state] += 1
         resources.setdefault(op['resource'] or 'Other', []).append({
             'id': op['id'], 'method': op['method'], 'path': op['path'], 'name': op['name'],
-            'summary': op['summary'], 'requires_auth': op['requires_auth'], 'state': state,
+            'summary': op['summary'], 'requires_auth': op['requires_auth'], 'states': states,
             'statuses': sorted(set(entry['statuses'])), 'tests': list(entry['tests'].values()),
+            'ui_statuses': sorted(set(ui['statuses'])), 'ui_tests': list(ui['tests'].values()),
         })
-    summary['covered'] = summary['total'] - summary['uncovered']
+    for view in summary.values():
+        view['covered'] = view['total'] - view['uncovered']
     return {'schema_id': schema_id, 'schema_name': schema_name, 'project_id': project_id,
             'summary': summary, 'unmatched_steps': unmatched,
             'resources': [{'name': name, 'operations': calls} for name, calls in sorted(resources.items())]}
+
+
+def page_coverage(project_id: str, client_id: str) -> Dict[str, Any]:
+    """
+    The pages of the application the UI tests of a project were on, in the last traced run of each
+    test: per page, the tests that visited it. Only visited pages are known: there is no list of
+    all pages to compare with.
+    """
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT p.page, tc.id, tc.name, MIN(p.url), MAX(p.created_at)
+                FROM test_run_pages p
+                JOIN test_cases tc ON tc.id = p.test_case_id
+                WHERE tc.project_id = %s AND tc.client_id = %s
+                  AND p.test_run_id = (SELECT MAX(test_run_id) FROM test_run_pages WHERE test_case_id = tc.id)
+                GROUP BY p.page, tc.id, tc.name
+                ORDER BY p.page, tc.id
+            """, (project_id, client_id))
+            rows = cursor.fetchall()
+            cursor.execute("""
+                SELECT COUNT(*) FROM test_cases tc
+                WHERE tc.project_id = %s AND tc.client_id = %s AND tc.type = 'test'
+                  AND COALESCE(tc.test_type, 'ui') = 'ui'
+            """, (project_id, client_id))
+            ui_tests = cursor.fetchone()[0]
+    pages: Dict[str, Dict[str, Any]] = {}
+    traced = set()
+    for page, test_id, test_name, url, visited_at in rows:
+        entry = pages.setdefault(page, {'page': page, 'example_url': url, 'tests': [], 'last_visit': None})
+        entry['tests'].append({'id': test_id, 'name': test_name})
+        stamp = visited_at.isoformat() if visited_at else None
+        entry['last_visit'] = max(filter(None, [entry['last_visit'], stamp]), default=None)
+        traced.add(test_id)
+    return {'project_id': project_id, 'ui_tests': ui_tests, 'traced_tests': len(traced),
+            'pages': sorted(pages.values(), key=lambda item: (len(item['tests']), item['page']))}
 
 
 def uncovered_operations(schema_id: int, client_id: str) -> List[str]:
@@ -178,4 +260,4 @@ def uncovered_operations(schema_id: int, client_id: str) -> List[str]:
         logger.error(f"Coverage of schema {schema_id} could not be built: {e}")
         return []
     return [call['name'] for resource in coverage['resources'] for call in resource['operations']
-            if call['state'] == 'uncovered']
+            if call['states']['api'] == 'uncovered']
