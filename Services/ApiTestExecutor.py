@@ -22,6 +22,7 @@ class ApiTestExecutor:
         self.test_case_id = test_case_id
         self.environment_vars = environment_vars or {}
         self.session_variables = {}  # Store variables extracted during test execution
+        self._env_helper = None
         self.test_run_id = None
         self.logger = self._setup_logger()
         self.system = System()
@@ -269,7 +270,8 @@ class ApiTestExecutor:
                 return {
                     'success': False,
                     'step_order': step['step_order'],
-                    'error': f"Expected status {expected_status}, got {response.status_code}",
+                    'error': f"Expected status {expected_status}, got {response.status_code}"
+                             f" ({self._status_mismatch_hint(expected_status, response.status_code)})",
                     'response_status': response.status_code,
                     'response_body': response.text[:500]
                 }
@@ -308,6 +310,27 @@ class ApiTestExecutor:
                 'method': method if 'method' in locals() else None
             }
     
+    @staticmethod
+    def _status_mismatch_hint(expected: int, actual: int) -> str:
+        """What an unexpected status most likely means: who has to change, the test or the API description."""
+        try:
+            expected, actual = int(expected), int(actual)
+        except (TypeError, ValueError):
+            return "unexpected status"
+        if 200 <= actual < 300 and 200 <= expected < 300:
+            return "the call succeeded with another success status: the expected status of the step or the API schema is out of date"
+        if actual in (401, 403):
+            return "not authorized: check the login step and the environment's login, password and role"
+        if actual in (400, 422):
+            return "the API rejected the request data: fix the body or parameters of the step, see the response"
+        if actual == 404:
+            return "not found: check the endpoint and the ids passed from earlier steps"
+        if actual == 409:
+            return "conflict: the item probably exists already, for example left by an earlier failed run"
+        if actual >= 500:
+            return "server error in the API under test, see the response"
+        return "see the response"
+
     def _execute_wait(self, step: Dict[str, Any], step_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a wait step."""
         import time
@@ -375,9 +398,11 @@ class ApiTestExecutor:
         
         # First, use EnvHelper to process all %placeholder% variables
         # This handles %random_name%, %random_email%, %unique_name:Type%, etc.
-        from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
-        env_helper = EnvHelper(self.environment_vars)
-        result = env_helper.process_variables(result)
+        # One helper per test run: a generated value (%random_email%, %unique_name%) is the same in every step
+        if self._env_helper is None:
+            from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
+            self._env_helper = EnvHelper(self.environment_vars)
+        result = self._env_helper.process_variables(result)
         
         # Phase 1.5: Use VariableManager for scoped variable substitution
         if self.variable_manager:

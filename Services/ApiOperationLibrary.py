@@ -66,6 +66,18 @@ def _merged(node: Dict, schema: Dict) -> Dict:
     return node
 
 
+def _has_example(node: Any, schema: Dict, depth: int = 0) -> bool:
+    """Whether the schema itself gives a value for the node (example, default, enum), at any depth."""
+    node = _merged(node, schema)
+    if not node or depth >= _MAX_DEPTH:
+        return False
+    if 'example' in node or 'default' in node or node.get('enum'):
+        return True
+    if node.get('type') == 'array':
+        return _has_example(node.get('items') or {}, schema, depth + 1)
+    return any(_has_example(prop, schema, depth + 1) for prop in (node.get('properties') or {}).values())
+
+
 def _example(node: Any, schema: Dict, depth: int = 0) -> Any:
     """A sample value for a schema node: its own example first, then one made up from the type."""
     node = _merged(node, schema)
@@ -95,6 +107,14 @@ def _example(node: Any, schema: Dict, depth: int = 0) -> Any:
     by_format = {'email': '%random_email%', 'uuid': '%random_uuid%', 'date': '2000-01-01',
                  'date-time': '2000-01-01T00:00:00Z', 'uri': 'https://example.com', 'url': 'https://example.com'}
     return by_format.get(node.get('format'), 'string')
+
+
+def _made_up_fields(node: Any, schema: Dict) -> List[str]:
+    """Optional top-level fields of an object schema whose sample value is made up, not taken from the schema."""
+    node = _merged(node, schema)
+    required = node.get('required') or []
+    return [name for name, prop in (node.get('properties') or {}).items()
+            if name not in required and not _has_example(prop, schema)]
 
 
 def _field_types(node: Any, schema: Dict) -> Dict[str, str]:
@@ -159,7 +179,7 @@ def build_operations(schema: Dict) -> List[Dict[str, Any]]:
                 continue
 
             path_params, query_params, header_params, form = [], [], [], {}
-            body, content_type = None, None
+            body, content_type, made_up = None, None, []
             for param in shared_params + (op.get('parameters') or []):
                 param = _resolve(param, schema)
                 if not isinstance(param, dict) or not param.get('name'):
@@ -167,6 +187,7 @@ def build_operations(schema: Dict) -> List[Dict[str, Any]]:
                 where = param.get('in')
                 if where == 'body':  # Swagger 2
                     body, content_type = _example(param.get('schema') or {}, schema), 'application/json'
+                    made_up = _made_up_fields(param.get('schema') or {}, schema)
                     continue
                 example = param['example'] if 'example' in param else _example(param.get('schema') or param, schema)
                 entry = {'name': param['name'], 'required': bool(param.get('required')), 'example': example,
@@ -184,6 +205,7 @@ def build_operations(schema: Dict) -> List[Dict[str, Any]]:
                 body_schema = _json_schema_of(op['requestBody'], schema)
                 if body_schema is not None:
                     body, content_type = _example(body_schema, schema), 'application/json'
+                    made_up = _made_up_fields(body_schema, schema)
             if body is None and form:
                 body, content_type = form, 'application/x-www-form-urlencoded'
 
@@ -205,7 +227,9 @@ def build_operations(schema: Dict) -> List[Dict[str, Any]]:
                 'requires_auth': bool(security) if security is not None else global_auth,
                 'expected_status': expected_status,
                 'request': {'path_params': path_params, 'query_params': query_params,
-                            'header_params': header_params, 'body': body, 'content_type': content_type},
+                            'header_params': header_params, 'body': body, 'content_type': content_type,
+                            # optional body fields with a made-up sample value
+                            'made_up_fields': made_up},
                 'response': _describe_response(_json_schema_of(success_response, schema), schema),
             })
 
