@@ -68,11 +68,17 @@ def _login_step(login: Dict) -> Dict[str, Any]:
     return {'description': "Log in with the environment's login and password", 'request': request}
 
 
-def _unique_body(body: Any) -> Any:
-    """The example body with values that must differ between runs replaced by placeholders."""
+def _unique_body(body: Any, label: str = '') -> Any:
+    """
+    The example body with values that must differ between runs replaced by placeholders.
+
+    %unique_name% is one value for the whole run; a label (%unique_name:upd%) gives another one,
+    so an update does not send the values the create step already used.
+    """
     if not isinstance(body, dict):
         return body
     result = dict(body)
+    placeholder = f"%unique_name:{label}%" if label else "%unique_name%"
     for key, value in body.items():
         if not isinstance(value, str) or '%' in value:
             continue
@@ -80,7 +86,7 @@ def _unique_body(body: Any) -> Any:
             result[key] = '%random_email%'
         elif key.lower() in _UNIQUE_FIELDS:
             joiner = '-' if key.lower() == 'slug' else ' '
-            result[key] = f"{value}{joiner}%unique_name%"
+            result[key] = f"{value}{joiner}{placeholder}"
     return result
 
 
@@ -177,7 +183,7 @@ def build_baseline_tests(operations: List[Dict]) -> List[Dict[str, Any]]:
         if update:
             verbs.append('update')
             update_request = step_request(update)
-            update_request['body'] = _unique_body(update_request.get('body'))
+            update_request['body'] = _unique_body(update_request.get('body'), 'upd')
             if isinstance(update_request.get('body'), dict):
                 for key in list(update_request['body'].keys()):
                     if key in related_vars:  # the ids taken before the create step

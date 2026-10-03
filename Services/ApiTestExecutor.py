@@ -276,6 +276,17 @@ class ApiTestExecutor:
                     'response_body': response.text[:500]
                 }
             
+            # Compare the response with the values the step expects: {"$.name": "expected"}
+            mismatches = self._response_mismatches(response, step_data.get('expect'))
+            if mismatches:
+                return {
+                    'success': False,
+                    'step_order': step['step_order'],
+                    'error': "Response does not match: " + "; ".join(mismatches),
+                    'response_status': response.status_code,
+                    'response_body': response.text[:500]
+                }
+            
             # Extract variables from response
             if extract_variables:
                 self._extract_response_variables(response, extract_variables)
@@ -500,6 +511,23 @@ class ApiTestExecutor:
         except Exception as e:
             self.logger.warning(f"Could not extract variables from response: {str(e)}")
     
+    def _response_mismatches(self, response: requests.Response, expect: Any) -> List[str]:
+        """Differences between the response and the step's "expect" ({"$.path": value}); empty when it matches."""
+        if not isinstance(expect, dict) or not expect:
+            return []
+        try:
+            data = response.json()
+        except ValueError:
+            return ["the response is not JSON"]
+        mismatches = []
+        for path, expected in expect.items():
+            if isinstance(expected, str):
+                expected = self._substitute_variables(expected)
+            actual = self._get_nested_value(data, path)
+            if actual != expected and str(actual) != str(expected):
+                mismatches.append(f"{path} is {json.dumps(actual)}, expected {json.dumps(expected)}")
+        return mismatches
+
     def _get_nested_value(self, data: Any, path: str) -> Any:
         """Get nested value from dict using dot notation or JSONPath."""
         # Remove JSONPath prefix if present

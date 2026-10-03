@@ -155,18 +155,30 @@ class KafkaMessageConsumer:
             if environment_id:
                 self.logger.info(f"Using environment ID: {environment_id}")
             
-            # Import here to avoid circular dependencies
-            from auroqa.Services.ApiSchemaService import ApiSchemaService
-            
-            # Generate steps using NEW iterative method
-            service = ApiSchemaService()
-            result = service.generate_test_steps_iteratively(
-                test_case_id=test_case_id,
-                schema_content=schema_content,
-                client_id=client_id,
-                project_id=project_id,
-                environment_id=environment_id
-            )
+            # A project with a library of API calls gets the whole test from one model request;
+            # without one (no schema uploaded) the step-by-step generation works from the description
+            from auroqa.Services.ApiScenarioGenerator import ApiScenarioGenerator, has_library
+            if has_library(project_id, client_id):
+                result = ApiScenarioGenerator().generate(
+                    test_case_id=test_case_id,
+                    client_id=client_id,
+                    project_id=project_id,
+                    environment_id=environment_id,
+                    model_name=request.get('model_name')
+                )
+            else:
+                # Import here to avoid circular dependencies
+                from auroqa.Services.ApiSchemaService import ApiSchemaService
+                
+                # Generate steps using NEW iterative method
+                service = ApiSchemaService()
+                result = service.generate_test_steps_iteratively(
+                    test_case_id=test_case_id,
+                    schema_content=schema_content,
+                    client_id=client_id,
+                    project_id=project_id,
+                    environment_id=environment_id
+                )
             
             # Handle different result statuses
             if result == "paused":

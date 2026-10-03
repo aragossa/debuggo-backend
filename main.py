@@ -1395,13 +1395,30 @@ If no specific endpoint is mentioned, use standard REST patterns.
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
         
+        # The model for the generation: the one picked in the request, else the user's preferred one,
+        # else the default (same order as for UI tests)
+        model_name = None
+        requested_model = request_data.get('ai_model_id') if request_data else None
+        requested_model = int(requested_model) if str(requested_model or '').isdigit() else None
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT m.model_id FROM ai_models m
+                    WHERE m.is_active = TRUE AND m.id = COALESCE(
+                        %s, (SELECT ai_model_id FROM user_ai_models WHERE user_id = %s LIMIT 1))
+                """, (requested_model, current_user.id))
+                model_row = cursor.fetchone()
+                if model_row:
+                    model_name = model_row[0]
+        
         message = {
             'request_type': 'generate_api_test_steps',
             'test_case_id': test_case_id,
             'schema_content': schema_content,
             'client_id': str(current_user.client_id),
             'project_id': str(project_id),
-            'environment_id': environment_id
+            'environment_id': environment_id,
+            'model_name': model_name
         }
         
         producer.send('user_requests', value=message)
