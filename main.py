@@ -3324,7 +3324,7 @@ async def get_test_groups(current_user: User = Depends(get_current_user)):
             # Get all test groups for the user's client
             cur.execute(
                 """
-                SELECT id, name, description, parent_id, "order", created_at, updated_at
+                SELECT id, name, description, parent_id, "order", created_at, updated_at, project_id
                 FROM test_cases
                 WHERE client_id = %s AND type = 'group'
                 ORDER BY "order"
@@ -3344,6 +3344,7 @@ async def get_test_groups(current_user: User = Depends(get_current_user)):
                     "order": group[4],
                     "created_at": group[5].isoformat() if group[5] else None,
                     "updated_at": group[6].isoformat() if group[6] else None,
+                    "project_id": str(group[7]) if group[7] else None,
                     "children": []
                 }
                 formatted_groups.append(formatted_group)
