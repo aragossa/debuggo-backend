@@ -5,8 +5,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoAlertPresentException
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.remote.file_detector import LocalFileDetector
 import logging
 import sys
 import os
@@ -23,6 +25,7 @@ class BrowserAutomation:
     def __init__(self, headless=False, timeout=10):
         self.timeout = timeout
         self.driver = None
+        self._seen_handles = set()  # tabs the test has already been in, see switch_tab
         self.logger = self._setup_logger()
         self.pid = os.getpid()  # Initialize pid before setup_driver
         self.setup_driver(headless)
@@ -59,6 +62,9 @@ class BrowserAutomation:
             chrome_options.add_argument('--window-size=1920,1080')
             chrome_options.add_argument('--enable-logging')  # Enable Chrome logging
             chrome_options.add_argument('--v=1')  # Verbose logging
+            # Keep a native alert open until a step handles it. The default ("dismiss and notify")
+            # closes it on the next command, so accept_alert/assert_alert_text would find nothing
+            chrome_options.set_capability('unhandledPromptBehavior', 'ignore')
 
             # Get system configuration for Selenium Grid URL
             system = System()
@@ -76,6 +82,10 @@ class BrowserAutomation:
             )
             
             self.driver.implicitly_wait(5)
+            # The browser runs in another container: with this detector send_keys on a file input
+            # uploads the local file to the Selenium node first (see upload_file)
+            self.driver.file_detector = LocalFileDetector()
+            self._seen_handles = set(self.driver.window_handles)
             self.logger.info(f"[PID:{self.pid}] Successfully connected to Selenium Grid")
 
         except Exception as e:
@@ -687,6 +697,11 @@ class BrowserAutomation:
         """
         timeout = timeout or self.timeout
         try:
+            # The page cannot be read while a native alert is open
+            if self.get_alert_text() is not None:
+                self.logger.info(f"[PID:{self.pid}] Native alert is open, not waiting for page changes")
+                return False
+
             # Get initial page source
             initial_source = self.driver.page_source
             
@@ -726,6 +741,11 @@ class BrowserAutomation:
             str: The path to the saved screenshot file
         """
         try:
+            # Selenium cannot take a screenshot while a native alert is open
+            if self.get_alert_text() is not None:
+                self.logger.info(f"[PID:{self.pid}] Native alert is open, screenshot skipped")
+                return None
+
             # Create a unique filename using timestamp
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             screenshot_name = f"{name or 'screenshot'}_{timestamp}.png"
@@ -1266,6 +1286,385 @@ class BrowserAutomation:
         
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Error in text contains assertion for element {element_path}: {str(e)}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Tabs and windows
+    # ------------------------------------------------------------------
+
+    def switch_tab(self, target: str = None):
+        """
+        Switch to another browser tab or window.
+
+        Args:
+            target (str): which tab to switch to:
+                "new"  - the most recently opened tab other than the current one (default);
+                         waits for it to open
+                "main" - the first tab, the one the test started in
+                "2"    - tab number, counted from 1 in opening order
+                any other text - the tab whose title or URL contains it
+        """
+        target = (target or 'new').strip()
+        key = target.lower()
+        self.logger.info(f"[PID:{self.pid}] Switching tab: '{target}'")
+
+        try:
+            if key in ('new', 'last', 'latest'):
+                handle = self._wait_for_new_tab()
+            elif key in ('main', 'first', 'original'):
+                handle = self.driver.window_handles[0]
+            elif key.isdigit():
+                number = int(key)
+                try:
+                    WebDriverWait(self.driver, self.timeout).until(lambda d: len(d.window_handles) >= number)
+                except TimeoutException:
+                    pass
+                handles = self.driver.window_handles
+                if number < 1 or number > len(handles):
+                    raise AssertionError(f"[PID:{self.pid}] switch_tab: tab {number} does not exist, {len(handles)} tab(s) are open")
+                handle = handles[number - 1]
+            else:
+                handle = self._find_tab_by_text(target)
+
+            self.driver.switch_to.window(handle)
+            self._seen_handles.update(self.driver.window_handles)
+            self.wait_for_page_load()
+            self.logger.info(f"[PID:{self.pid}] Switched to tab '{self.driver.title}' ({self.driver.current_url})")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to switch tab '{target}': {str(e)}")
+            raise
+
+    def _wait_for_new_tab(self):
+        """
+        Handle of the tab that opened since the last switch; waits for it to open.
+        If the browser is already on the newest tab, that tab is returned at once, so a
+        repeated "new" is harmless.
+        """
+        current = self._current_handle()
+
+        def pick(driver):
+            handles = driver.window_handles
+            unseen = [h for h in handles if h not in self._seen_handles and h != current]
+            if unseen:
+                return unseen[-1]
+            if len(handles) > 1 and current == handles[-1]:
+                return current
+            return False
+
+        try:
+            return WebDriverWait(self.driver, self.timeout).until(pick)
+        except TimeoutException:
+            others = [h for h in self.driver.window_handles if h != current]
+            if not others:
+                raise AssertionError(f"[PID:{self.pid}] switch_tab 'new': no other tab opened within {self.timeout} seconds")
+            return others[-1]
+
+    def new_tab_opened(self):
+        """True if a tab has opened that the test has not switched to yet. Does not wait."""
+        try:
+            current = self._current_handle()
+            return any(h not in self._seen_handles and h != current for h in self.driver.window_handles)
+        except WebDriverException:
+            return False
+
+    def _current_handle(self):
+        """Handle of the current tab, or None if that tab was closed."""
+        try:
+            return self.driver.current_window_handle
+        except WebDriverException:
+            return None
+
+    def _find_tab_by_text(self, text: str):
+        """Find the tab whose title or URL contains the text; waits for it to open."""
+        original = self._current_handle()
+        wanted = text.lower()
+        deadline = time.time() + self.timeout
+        while True:
+            for handle in self.driver.window_handles:
+                self.driver.switch_to.window(handle)
+                if wanted in (self.driver.title or '').lower() or wanted in (self.driver.current_url or '').lower():
+                    return handle
+            if time.time() > deadline:
+                break
+            time.sleep(0.5)
+        if original in self.driver.window_handles:
+            self.driver.switch_to.window(original)
+        raise AssertionError(
+            f"[PID:{self.pid}] switch_tab: no tab with '{text}' in title or URL. "
+            f"Use 'new', 'main', a tab number, or a part of the title or URL"
+        )
+
+    # ------------------------------------------------------------------
+    # Native alerts (alert, confirm, prompt)
+    # ------------------------------------------------------------------
+
+    def get_alert_text(self):
+        """
+        Text of the open native alert/confirm/prompt, or None if there is none.
+        While an alert is open, Selenium can neither read the page nor take a screenshot.
+        """
+        try:
+            return self.driver.switch_to.alert.text
+        except NoAlertPresentException:
+            return None
+        except WebDriverException:
+            return None
+
+    def _wait_for_alert(self, action: str):
+        try:
+            return WebDriverWait(self.driver, self.timeout).until(EC.alert_is_present())
+        except TimeoutException:
+            raise AssertionError(f"[PID:{self.pid}] {action}: no native alert appeared within {self.timeout} seconds")
+
+    def accept_alert(self, text: str = None):
+        """
+        Accept (OK) the native alert, confirm or prompt; waits for it to appear.
+
+        Args:
+            text (str): for a prompt, the text to type before pressing OK
+        """
+        try:
+            alert = self._wait_for_alert('accept_alert')
+            alert_text = alert.text
+            if text:
+                alert.send_keys(text)
+            alert.accept()
+            self.logger.info(f"[PID:{self.pid}] Accepted alert '{alert_text}'" + (f" with text '{text}'" if text else ""))
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to accept alert: {str(e)}")
+            raise
+
+    def dismiss_alert(self):
+        """Dismiss (Cancel) the native alert, confirm or prompt; waits for it to appear."""
+        try:
+            alert = self._wait_for_alert('dismiss_alert')
+            alert_text = alert.text
+            alert.dismiss()
+            self.logger.info(f"[PID:{self.pid}] Dismissed alert '{alert_text}'")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to dismiss alert: {str(e)}")
+            raise
+
+    def assert_alert_text(self, expected_text: str):
+        """
+        Assert the text of the open native alert; waits for it to appear and leaves it open.
+
+        Raises:
+            AssertionError: If no alert appears or its text differs
+        """
+        if not expected_text:
+            raise ValueError(f"[PID:{self.pid}] assert_alert_text expects the alert text in value")
+
+        actual_text = (self._wait_for_alert('assert_alert_text').text or '').strip()
+        if actual_text != expected_text.strip():
+            raise AssertionError(
+                f"[PID:{self.pid}] Alert text does not match. "
+                f"Expected: '{expected_text.strip()}', Actual: '{actual_text}'"
+            )
+        self.logger.info(f"[PID:{self.pid}] Alert text assertion passed: '{actual_text}'")
+        return True
+
+    def describe_browser_state(self):
+        """
+        What the page HTML cannot show: an open native alert and the open tabs.
+
+        Returns:
+            dict: {'alert_text': str or None, 'tab_count': int, 'current_tab': int or None (from 1),
+                   'title': str or None, 'url': str or None}
+        """
+        state = {'alert_text': self.get_alert_text(), 'tab_count': 1, 'current_tab': None, 'title': None, 'url': None}
+        try:
+            handles = self.driver.window_handles
+            state['tab_count'] = len(handles)
+            current = self._current_handle()
+            if current in handles:
+                state['current_tab'] = handles.index(current) + 1
+            # Title and URL cannot be read while an alert is open
+            if state['alert_text'] is None and state['current_tab']:
+                state['title'] = self.driver.title
+                state['url'] = self.driver.current_url
+        except WebDriverException as e:
+            self.logger.warning(f"[PID:{self.pid}] Could not read browser state: {str(e)}")
+        return state
+
+    # ------------------------------------------------------------------
+    # Drag and drop
+    # ------------------------------------------------------------------
+
+    _DRAG_FINGERPRINT_JS = """
+        function fp(el) {
+            var r = el.getBoundingClientRect();
+            var p = el.parentNode;
+            var idx = p ? Array.prototype.indexOf.call(p.children, el) : -1;
+            return [Math.round(r.left), Math.round(r.top), idx, el.className, el.innerHTML].join('|');
+        }
+        return fp(arguments[0]) + '||' + fp(arguments[1]);
+    """
+
+    # Events are spaced out like a real drag: libraries such as react-dnd react to dragover
+    # on the next animation frame, so a burst of events in one tick moves nothing.
+    # After dragstart the events go to whatever is under the drop point, as with a mouse:
+    # in a sortable list the target moves away once the list re-orders.
+    _HTML5_DRAG_JS = """
+        var source = arguments[0], target = arguments[1], done = arguments[arguments.length - 1];
+        var dataTransfer = new DataTransfer();
+        var t = target.getBoundingClientRect();
+        var x = t.left + t.width / 2, y = t.top + t.height / 2;
+        function underPoint() {
+            var el = document.elementFromPoint(x, y);
+            return el && document.body.contains(el) ? el : target;
+        }
+        function fire(type, el, cx, cy) {
+            el.dispatchEvent(new DragEvent(type, {
+                bubbles: true, cancelable: true, composed: true, dataTransfer: dataTransfer,
+                clientX: cx, clientY: cy
+            }));
+        }
+        var s = source.getBoundingClientRect();
+        var steps = [
+            function () { fire('dragstart', source, s.left + s.width / 2, s.top + s.height / 2); },
+            function () { fire('dragenter', underPoint(), x, y); },
+            function () { fire('dragover', underPoint(), x, y); },
+            function () { fire('dragover', underPoint(), x, y); },
+            function () { fire('drop', underPoint(), x, y); },
+            function () { fire('dragend', source, x, y); }
+        ];
+        (function next(i) {
+            if (i >= steps.length) { done(true); return; }
+            steps[i]();
+            setTimeout(function () { next(i + 1); }, 100);
+        })(0);
+    """
+
+    def drag_and_drop(self, source_path: str, target: str, by_strategy: str = None):
+        """
+        Drag one element onto another.
+
+        Does a real mouse drag (ActionChains) first. If nothing changed on the page and the
+        source is a native HTML5 draggable, emulates HTML5 drag-and-drop events with JavaScript.
+        Fails if neither way changed the dragged element or the target.
+
+        Args:
+            source_path (str): locator of the element to drag
+            target (str): XPath of the element to drop onto. Prefix "html5:" to try the HTML5
+                emulation first and the mouse drag second, e.g. "html5://div[@id='column-b']"
+            by_strategy (str): strategy for source_path (xpath or css)
+        """
+        if not by_strategy:
+            by_strategy = 'xpath'
+        if not target or not target.strip():
+            raise ValueError(f"[PID:{self.pid}] drag_and_drop expects the XPath of the drop target in value")
+
+        target = target.strip()
+        html5_first = target.lower().startswith('html5:')
+        if html5_first:
+            target = target[len('html5:'):].strip()
+
+        self.logger.info(f"[PID:{self.pid}] Dragging '{source_path}' onto '{target}'" + (" (HTML5 emulation first)" if html5_first else ""))
+
+        try:
+            source_el = self.find_element(source_path, by_strategy)
+            target_el = self.find_element(target, 'xpath')
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", source_el)
+            time.sleep(0.3)
+
+            before = self._drag_fingerprint(source_el, target_el)
+            is_html5 = self.driver.execute_script("return !!arguments[0].closest('[draggable=\"true\"]');", source_el)
+
+            methods = [('mouse', self._drag_with_mouse)]
+            if html5_first:
+                methods.insert(0, ('HTML5 emulation', self._drag_with_html5_events))
+            elif is_html5:
+                methods.append(('HTML5 emulation', self._drag_with_html5_events))
+
+            for name, drag in methods:
+                drag(source_el, target_el)
+                time.sleep(0.5)
+                # None: the page re-rendered the elements, which is a change too
+                after = self._drag_fingerprint(source_el, target_el)
+                if before is None or after != before:
+                    self.logger.info(f"[PID:{self.pid}] Dragged with {name}: {source_path} -> {target}")
+                    return
+                self.logger.info(f"[PID:{self.pid}] Drag with {name} changed nothing")
+
+            raise AssertionError(
+                f"[PID:{self.pid}] drag_and_drop had no effect: neither '{source_path}' nor '{target}' changed "
+                f"(tried: {', '.join(name for name, _ in methods)}). Check that value is the XPath of the real drop target"
+            )
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to drag {source_path} onto {target}: {str(e)}")
+            raise
+
+    def _drag_with_mouse(self, source_el, target_el):
+        # Hold, nudge, move, wiggle over the target, release. A plain drag_and_drop() is too
+        # fast: the target must see the pointer move over it (dragover) before the drop,
+        # or sortable lists and native HTML5 drop zones ignore the release
+        ActionChains(self.driver) \
+            .move_to_element(source_el).click_and_hold().pause(0.3) \
+            .move_by_offset(10, 10).pause(0.2) \
+            .move_to_element(target_el).pause(0.3) \
+            .move_by_offset(3, 3).pause(0.2) \
+            .move_by_offset(-3, -3).pause(0.3) \
+            .release().perform()
+
+    def _drag_with_html5_events(self, source_el, target_el):
+        self.driver.execute_async_script(self._HTML5_DRAG_JS, source_el, target_el)
+
+    def _drag_fingerprint(self, source_el, target_el):
+        """Position, order and content of both elements; None if the page re-rendered them."""
+        try:
+            return self.driver.execute_script(self._DRAG_FINGERPRINT_JS, source_el, target_el)
+        except WebDriverException:
+            return None
+
+    # ------------------------------------------------------------------
+    # File upload
+    # ------------------------------------------------------------------
+
+    SAMPLE_FILES_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'sample_files'
+    )
+
+    @classmethod
+    def list_sample_files(cls):
+        """Names of the sample files that upload_file can use."""
+        try:
+            return sorted(f for f in os.listdir(cls.SAMPLE_FILES_DIR) if not f.startswith('.') and f.lower() != 'readme.md')
+        except OSError:
+            return []
+
+    def upload_file(self, selector: str, file_name: str, by: str = 'xpath'):
+        """
+        Put a sample file into an <input type="file">.
+
+        Args:
+            selector (str): locator of the file input
+            file_name (str): name of a file in sample_files/, e.g. "sample.txt"
+            by (str): selector type - 'xpath' or 'css'
+        """
+        available = self.list_sample_files()
+        name = os.path.basename((file_name or '').strip())
+        if not name or name not in available:
+            raise ValueError(
+                f"[PID:{self.pid}] upload_file expects a sample file name in value, got: '{file_name}'. "
+                f"Available: {', '.join(available)}"
+            )
+
+        try:
+            by_strategy = By.XPATH if (by or 'xpath').lower() == 'xpath' else By.CSS_SELECTOR
+            # A file input is often hidden behind a styled button: presence is enough
+            element = WebDriverWait(self.driver, self.timeout).until(
+                EC.presence_of_element_located((by_strategy, selector))
+            )
+            if element.tag_name.lower() != 'input' or (element.get_attribute('type') or '').lower() != 'file':
+                raise AssertionError(
+                    f"[PID:{self.pid}] upload_file needs an <input type=\"file\"> element, "
+                    f"got <{element.tag_name}> for {selector}"
+                )
+            element.send_keys(os.path.join(self.SAMPLE_FILES_DIR, name))
+            self.logger.info(f"[PID:{self.pid}] Uploaded sample file '{name}' into element: {selector}")
+        except Exception as e:
+            self.logger.error(f"[PID:{self.pid}] Failed to upload file into element {selector}: {str(e)}")
             raise
 
     def capture_transient_notifications(self, timeout=5):

@@ -41,12 +41,42 @@ class TestRunner:
     # Valid actions from database constraint
     VALID_ACTIONS = {
         'click', 'type', 'select', 'hover', 'wait', 'assert', 'assert_text', 'assert_attribute',
+        'switch_tab', 'accept_alert', 'dismiss_alert', 'assert_alert_text',
+        'drag_and_drop', 'upload_file',
         'assert_text_contains', 'scroll', 'clear', 'navigate',
         'press_key', 'use_component', 'wait_for_element_to_be_visible',
         'wait_for_element_visible', 'wait_for_modal', 'wait_for_clickable',
         'api_request', 'api_auth', 'api_get', 'api_post', 'api_put',
         'api_delete', 'api_patch', 'response_validation', 'validation'
     }
+
+    # Actions that work on the browser itself, not on a page element: no locator needed
+    NO_LOCATOR_ACTIONS = {'switch_tab', 'accept_alert', 'dismiss_alert', 'assert_alert_text'}
+
+    class _SelfHealingSkipped(Exception):
+        """Raised inside the self-healing block to leave it without an AI request."""
+
+    def _self_healing_skip_reason(self, action: str, error_message: str):
+        """
+        Why a failed step should not be sent to the AI for a new locator, or None.
+
+        Self-healing is off unless SELF_HEALING=1: it spends a request on the default model
+        per failed step and rewrites the step's locator in the database when the retry passes.
+        Even when on, a new locator cannot fix a step that has no element or that failed
+        on its result rather than on finding the element.
+        """
+        if os.getenv('SELF_HEALING', '0').lower() not in ('1', 'true', 'yes', 'on'):
+            return "SELF_HEALING is not enabled"
+        if action in self.NO_LOCATOR_ACTIONS:
+            return f"'{action}' has no element locator to fix"
+        if action == 'drag_and_drop':
+            return "drag_and_drop failed on its effect, not on a locator"
+        message = (error_message or '').lower()
+        for marker in ('does not match', 'not found in element text', 'had no effect',
+                       'unexpected alert', 'no native alert', 'alert text'):
+            if marker in message:
+                return f"the error is not a locator problem ({marker})"
+        return None
 
     def __new__(cls, user_id=None, test_case_id=None):
         pid = os.getpid()
@@ -754,6 +784,22 @@ class TestRunner:
             elif action == "assert_attribute":
                 # value is "attribute=expected", e.g. "aria-valuenow=0"
                 self.browser.assert_attribute(element_path, value, by_strategy)
+            elif action == "switch_tab":
+                # value is "new", "main", a tab number or a part of the title/URL
+                self.browser.switch_tab(value)
+            elif action == "accept_alert":
+                # value is the text to type into a prompt, optional
+                self.browser.accept_alert(value)
+            elif action == "dismiss_alert":
+                self.browser.dismiss_alert()
+            elif action == "assert_alert_text":
+                self.browser.assert_alert_text(value)
+            elif action == "drag_and_drop":
+                # element_path is the dragged element, value is the XPath of the drop target
+                self.browser.drag_and_drop(element_path, value, by_strategy)
+            elif action == "upload_file":
+                # value is the name of a file in sample_files/, e.g. "sample.txt"
+                self.browser.upload_file(element_path, value, by_strategy)
             elif action == "hover":
                 self.browser.hover(element_path, by_strategy)
             elif action == "select":
@@ -1102,6 +1148,10 @@ class TestRunner:
                         # SELF-HEALING LOGIC
                         # ====================================================================
                         try:
+                            skip_reason = self._self_healing_skip_reason(action, error_message)
+                            if skip_reason:
+                                self.logger.info(f"[PID:{pid}] Self-healing skipped for step {step_id}: {skip_reason}")
+                                raise self._SelfHealingSkipped()
                             self.logger.info(f"[PID:{pid}] Attempting self-healing for step {step_id}...")
                             
                             # Initialize AIHelper
@@ -1214,6 +1264,8 @@ class TestRunner:
                                     step_order += 1
                                     continue 
                                     
+                        except self._SelfHealingSkipped:
+                            pass
                         except Exception as healing_error:
                             self.logger.error(f"[PID:{pid}] Self-healing attempt failed: {healing_error}")
                             # Fall through to normal failure handling
@@ -1857,6 +1909,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 max_retries = 3
                 retry_delay = 5
                 previous_steps = set()  # To avoid duplicate steps
+                switched_to_new_tab = False
                 
                 # State Machine: Transition to PLAN state
                 if state_machine:
@@ -1925,6 +1978,33 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                             except Exception as e:
                                 self.logger.debug(f"[PID:{pid}] [AttentionMode] Screenshot failed: {e}")
                         
+                        # A step may have opened a new tab: follow it and record the switch, so Run does the same
+                        try:
+                            if self.browser.get_alert_text() is None and self.browser.new_tab_opened():
+                                self.execute_step("switch_tab", "N/A", "new", "xpath", env)
+                                switch_step_id = self._save_step(
+                                    test_case_id=test_case_id,
+                                    step_order=step_order,
+                                    element_purpose="Switch to the new tab opened by the previous step",
+                                    action="switch_tab",
+                                    element_locator="N/A",
+                                    value="new",
+                                    by_strategy="xpath"
+                                )
+                                self.logger.info(f"[PID:{pid}] New tab detected, saved switch_tab step {switch_step_id} as step {step_order}")
+                                step_order += 1
+                                switched_to_new_tab = True
+                                page_source = self.browser.get_page_source()
+                                screenshot_path = self.browser.take_screenshot(f"step_{step_order}_new_tab") or screenshot_path
+                        except Exception as tab_error:
+                            self.logger.error(f"[PID:{pid}] Failed to follow the new tab: {tab_error}")
+
+                        # What the HTML cannot show: an open native alert, the open tabs
+                        browser_state = self._describe_browser_state_for_ai(switched_to_new_tab)
+                        switched_to_new_tab = False
+                        if browser_state:
+                            self.logger.info(f"[PID:{pid}] Browser state for AI: {browser_state}")
+
                         retry_count = 0
                         while retry_count < max_retries:
                             # Check for stop flag before attempting AI analysis
@@ -1955,7 +2035,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     screenshot_path=screenshot_path,
                                     generation_job_id=generation_job_id,
                                     vlm_enabled=vlm_enabled,
-                                    model_name=model_id
+                                    model_name=model_id,
+                                    browser_state=browser_state
                                 )
                                 
                                 # Check for stop flag after AI response
@@ -2097,6 +2178,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         next_prompt = next_step
                         prev_step_description = element_purpose
                         
+                        # Alert and tab actions have no element; without a locator the step would be skipped below
+                        if action in self.NO_LOCATOR_ACTIONS and not element_locator:
+                            element_locator = "N/A"
+                        
                         # Store original values with variable placeholders
                         original_value = value
                         original_element_locator = element_locator
@@ -2114,6 +2199,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         
                         # Create a unique key for this step
                         step_key = f"{action}:{element_locator}:{element_purpose}"
+                        if action in self.NO_LOCATOR_ACTIONS:
+                            # No locator to tell two of them apart: the same alert can be handled twice in a test
+                            step_key = f"{step_key}:{value}:{step_order}"
                         
                         # Skip if we've seen this exact step before
                         if step_key in previous_steps:
@@ -2212,7 +2300,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             self._ensure_browser_initialized()
                                         
                                         # Get current page source for error analysis
-                                        page_source = self.browser.get_page_source()
+                                        # (it cannot be read behind a native alert: keep the previous one)
+                                        if self.browser.get_alert_text() is None:
+                                            page_source = self.browser.get_page_source()
                                         
                                         # Debug the page structure if the error is related to element not found
                                         if "Element not found" in str(e) or "TimeoutException" in str(e):
@@ -2238,7 +2328,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             previous_attempts=previous_attempts,
                                             screenshot_path=failure_screenshot,
                                             generation_job_id=generation_job_id,
-                                            model_name=model_id
+                                            model_name=model_id,
+                                            browser_state=self._describe_browser_state_for_ai()
                                         )
                                         
                                         # Unpack the response
@@ -2412,6 +2503,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 
                                 # Take screenshot after successful step
                                 try:
+                                    if self.browser.get_alert_text() is not None:
+                                        # The page cannot be read behind a native alert: keep the previous HTML and screenshot
+                                        raise RuntimeError("native alert is open, page not re-read")
                                     page_source = self.browser.get_page_source()
                                     screenshot_path = self.browser.take_screenshot()
                                     self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
@@ -2514,7 +2608,9 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             self._ensure_browser_initialized()
                                         
                                         # Get current page source for error analysis
-                                        page_source = self.browser.get_page_source()
+                                        # (it cannot be read behind a native alert: keep the previous one)
+                                        if self.browser.get_alert_text() is None:
+                                            page_source = self.browser.get_page_source()
                                         
                                         # Debug the page structure if the error is related to element not found
                                         if "Element not found" in str(e) or "TimeoutException" in str(e):
@@ -2540,7 +2636,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             previous_attempts=previous_attempts,
                                             screenshot_path=failure_screenshot,
                                             generation_job_id=generation_job_id,
-                                            model_name=model_id
+                                            model_name=model_id,
+                                            browser_state=self._describe_browser_state_for_ai()
                                         )
                                         
                                         # Unpack the response
@@ -2780,6 +2877,42 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 self.logger.error(f"[PID:{pid}] Failed to clear Redis flags on error: {redis_error}")
             
             raise
+
+    def _describe_browser_state_for_ai(self, switched_to_new_tab: bool = False) -> str:
+        """
+        Text for the generation prompts about what the page HTML cannot show:
+        an open native alert and the open tabs. Empty when there is nothing to tell.
+        """
+        try:
+            state = self.browser.describe_browser_state()
+        except Exception as e:
+            self.logger.warning(f"Could not describe browser state: {e}")
+            return ""
+
+        lines = []
+        if state['alert_text'] is not None:
+            lines.append(
+                f"- A native JavaScript alert/confirm/prompt is OPEN with the text: \"{state['alert_text']}\". "
+                "It is not part of the HTML and it blocks the page: the HTML below was read before it opened. "
+                "The next step MUST handle it: \"assert_alert_text\" to check its text, "
+                "\"accept_alert\" to press OK (for a prompt put the text to type into \"value\"), "
+                "\"dismiss_alert\" to press Cancel. If the test description asks to verify the alert text, "
+                "do \"assert_alert_text\" first (the alert stays open), then accept or dismiss it in the next step."
+            )
+        if state['tab_count'] > 1 or switched_to_new_tab:
+            where = f"tab {state['current_tab']} of {state['tab_count']}" if state['current_tab'] else "a tab that was closed"
+            if state['title'] or state['url']:
+                where += f" (title \"{state['title']}\", URL {state['url']})"
+            line = f"- {state['tab_count']} browser tabs are open. The browser is on {where}; the HTML below is from that tab."
+            if switched_to_new_tab:
+                line += (" The previous step opened this tab and the browser has ALREADY switched to it"
+                         " (a switch_tab step is saved): do NOT add another switch_tab for it.")
+            if state['current_tab'] == 1:
+                line += " To move to another tab use \"switch_tab\" with its number (e.g. \"2\") as value."
+            else:
+                line += " To go back to the first tab use \"switch_tab\" with value \"main\"."
+            lines.append(line)
+        return "\n".join(lines)
 
     def _update_generation_end_time(self, test_case_id: int):
         """Update the steps_generation_end_time for the test case"""
@@ -3130,6 +3263,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     # SELF-HEALING LOGIC
                     # ====================================================================
                     try:
+                        skip_reason = self._self_healing_skip_reason(action, str(step_error))
+                        if skip_reason:
+                            self.logger.info(f"[PID:{pid}] Self-healing skipped for step {step_id}: {skip_reason}")
+                            raise self._SelfHealingSkipped()
                         self.logger.info(f"[PID:{pid}] Attempting self-healing for step {step_id}...")
                         
                         # Initialize AIHelper
@@ -3237,6 +3374,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 self.logger.info(f"✨ Self-Healing validated for step {step_order}")
                                 continue 
                                 
+                    except self._SelfHealingSkipped:
+                        pass
                     except Exception as healing_error:
                         self.logger.error(f"[PID:{pid}] Self-healing attempt failed: {healing_error}")
                         # Fall through to normal failure handling

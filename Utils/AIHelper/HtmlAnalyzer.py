@@ -337,7 +337,15 @@ SUPPORTED ACTIONS:
 - "assert_text_contains" - Assert element text contains substring
 - "assert_attribute" - Assert an element attribute. Put "attribute=expected" into "value" (e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false"). Use it when the state is NOT visible text: progress/slider values, input field values, checked/disabled/selected state, link href
 - "navigate" - Navigate to URL
+- "switch_tab" - Switch to another browser tab or window. element_locator is "N/A". Put into "value": "new" (the tab that just opened), "main" (the first tab), a tab number ("2"), or a part of the tab title or URL. A tab opened by a step is switched to automatically, see BROWSER STATE; use this action to go back ("main") or to move between tabs
+- "accept_alert" - Press OK in a native JavaScript alert/confirm/prompt. element_locator is "N/A". For a prompt put the text to type into "value" (e.g. "John"), otherwise null. Waits up to 10 seconds for the alert to appear
+- "dismiss_alert" - Press Cancel in a native JavaScript confirm/prompt. element_locator is "N/A", value is null
+- "assert_alert_text" - Assert the exact text of the native alert and leave it open. element_locator is "N/A", put the expected text into "value" (e.g. "Do you confirm action?"). Waits up to 10 seconds for the alert to appear
+- "drag_and_drop" - Drag one element onto another. element_locator is the element to drag, "value" is the XPath of the element to drop it on (e.g. "//div[@id='droppable']"), nothing else. Works for sortable lists and native HTML5 draggables too. Fails if nothing moved. Follow it with an assertion of the result
+- "upload_file" - Choose a file in an <input type="file">. element_locator is the file input itself (not its button or label), "value" is the name of a sample file: "sample.txt", "sample.png", "sample.pdf" or "sample.csv". NEVER click a file input: that opens an OS dialog nobody can close
 - "stop_test" - Stop test execution (use when test is completed successfully)
+
+NATIVE ALERTS: alert(), confirm() and prompt() windows are NOT in the HTML and block the page. When BROWSER STATE says one is open, or the previous step triggers one, handle it (assert_alert_text, accept_alert, dismiss_alert) before any other action. For an alert that appears after a delay do not add a wait: these actions wait for it themselves.
 
 CRITICAL - WHEN TO USE STOP_TEST:
 ✅ Use "stop_test" when:
@@ -348,7 +356,7 @@ CRITICAL - WHEN TO USE STOP_TEST:
 
 Return a JSON object with:
 - action: One of the supported actions above
-- element_locator: XPath selector (or "N/A" for navigate/stop_test)
+- element_locator: XPath selector (or "N/A" for navigate/stop_test/switch_tab/accept_alert/dismiss_alert/assert_alert_text)
 - css_selector: CSS selector (optional fallback)
 - by_strategy: "xpath" or "css"
 - element_purpose: What this step does
@@ -459,7 +467,15 @@ SUPPORTED ACTIONS:
 - "assert_text_contains" - Assert element text contains substring
 - "assert_attribute" - Assert an element attribute. Put "attribute=expected" into "value" (e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false"). Use it when the state is NOT visible text: progress/slider values, input field values, checked/disabled/selected state, link href
 - "navigate" - Navigate to URL
+- "switch_tab" - Switch to another browser tab or window. element_locator is "N/A". Put into "value": "new" (the tab that just opened), "main" (the first tab), a tab number ("2"), or a part of the tab title or URL. A tab opened by a step is switched to automatically, see BROWSER STATE; use this action to go back ("main") or to move between tabs
+- "accept_alert" - Press OK in a native JavaScript alert/confirm/prompt. element_locator is "N/A". For a prompt put the text to type into "value" (e.g. "John"), otherwise null. Waits up to 10 seconds for the alert to appear
+- "dismiss_alert" - Press Cancel in a native JavaScript confirm/prompt. element_locator is "N/A", value is null
+- "assert_alert_text" - Assert the exact text of the native alert and leave it open. element_locator is "N/A", put the expected text into "value" (e.g. "Do you confirm action?"). Waits up to 10 seconds for the alert to appear
+- "drag_and_drop" - Drag one element onto another. element_locator is the element to drag, "value" is the XPath of the element to drop it on (e.g. "//div[@id='droppable']"), nothing else. Works for sortable lists and native HTML5 draggables too. Fails if nothing moved. Follow it with an assertion of the result
+- "upload_file" - Choose a file in an <input type="file">. element_locator is the file input itself (not its button or label), "value" is the name of a sample file: "sample.txt", "sample.png", "sample.pdf" or "sample.csv". NEVER click a file input: that opens an OS dialog nobody can close
 - "stop_test" - Stop test execution (use when test is completed successfully)
+
+NATIVE ALERTS: alert(), confirm() and prompt() windows are NOT in the HTML and block the page. When BROWSER STATE says one is open, or the previous step triggers one, handle it (assert_alert_text, accept_alert, dismiss_alert) before any other action. For an alert that appears after a delay do not add a wait: these actions wait for it themselves.
 
 CRITICAL - WHEN TO USE STOP_TEST:
 ✅ Use "stop_test" when:
@@ -470,7 +486,7 @@ CRITICAL - WHEN TO USE STOP_TEST:
 
 Return a JSON object with:
 - action: One of the supported actions above
-- element_locator: XPath selector (or "N/A" for navigate/stop_test)
+- element_locator: XPath selector (or "N/A" for navigate/stop_test/switch_tab/accept_alert/dismiss_alert/assert_alert_text)
 - css_selector: CSS selector (optional fallback)
 - by_strategy: "xpath" or "css"
 - element_purpose: What this step does
@@ -549,7 +565,8 @@ Return a JSON object with:
             self.logger.debug(f"Pattern usage recording skipped: {str(e)}")
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
-                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False, model_name: str = None) -> tuple[str, str, str, str, str, str, str]:
+                      next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False, model_name: str = None,
+                      browser_state: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         
         # ReAct Pattern: Start conversation for this step
@@ -601,6 +618,9 @@ CURRENT STEP: {step_order}
 NEXT ACTION: {next_prompt}
 PREVIOUS STEP: {prev_step_description}
 """
+        # Open native alert and tabs: the HTML does not show them
+        if browser_state:
+            prompt += f"\nBROWSER STATE (not visible in the HTML above):\n{browser_state}\n"
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
         if screenshot_path and vlm_enabled:
@@ -726,7 +746,8 @@ PREVIOUS STEP: {prev_step_description}
 
     def analyze_error(self, test_case_id: int, html_code: str, test_name: str, test_description: str, 
                      step_history: list, failed_step: dict, error_message: str, 
-                     previous_attempts: list = None, screenshot_path: str = None, generation_job_id: str = None, model_name: str = None) -> tuple[str, str, str, str, str, str, str]:
+                     previous_attempts: list = None, screenshot_path: str = None, generation_job_id: str = None, model_name: str = None,
+                     browser_state: str = None) -> tuple[str, str, str, str, str, str, str]:
         """
         Analyze a test step failure and suggest a fix.
         
@@ -785,7 +806,8 @@ PREVIOUS STEP: {prev_step_description}
             step_history=step_history,
             failed_step=failed_step,
             previous_attempts=previous_attempts,
-            screenshot_path=screenshot_path
+            screenshot_path=screenshot_path,
+            browser_state=browser_state
         )
         
         image = False

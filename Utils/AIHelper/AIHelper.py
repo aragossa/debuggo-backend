@@ -440,6 +440,16 @@ You MUST ONLY use these valid actions. NO OTHER ACTIONS ARE ALLOWED:
   (assert_attribute: put "attribute=expected" into "value", e.g. "aria-valuenow=0", "value=John", "checked=true", "disabled=false";
    use it when the state is not visible text: input values, checked/disabled state, progress values, href)
 - Wait Actions: wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable
+- Browser Actions (no element: element_locator is "N/A"):
+  switch_tab ("value": "new" for the tab that just opened, "main" for the first tab, a tab number, or a part of the title/URL),
+  accept_alert (OK in a native alert/confirm/prompt; for a prompt put the text to type into "value"),
+  dismiss_alert (Cancel in a native confirm/prompt),
+  assert_alert_text (exact text of the native alert in "value"; the alert stays open)
+  Native alerts are NOT in the HTML and block the page: handle one before any other action. These actions wait up to 10 seconds for it.
+- Drag and drop: drag_and_drop (element_locator is the element to drag, "value" is the XPath of the drop target,
+  e.g. "//div[@id='droppable']"; works for sortable lists and native HTML5 draggables; fails if nothing moved)
+- File upload: upload_file (element_locator is the <input type="file"> itself, "value" is a sample file name:
+  "sample.txt", "sample.png", "sample.pdf" or "sample.csv"; NEVER click a file input)
 - API Actions: api_request, api_auth, api_get, api_post, api_put, api_delete, api_patch, response_validation, validation
 
 ❌ DO NOT use these invalid actions:
@@ -454,7 +464,7 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "element_locator": "XPath selector to locate the element (PRIMARY locator)",
     "css_selector": "CSS selector to locate the same element (FALLBACK locator)",
     "by_strategy": "xpath",
-    "action": "click, type, select, hover, wait, assert, assert_text_contains, assert_attribute, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
+    "action": "click, type, select, hover, wait, assert, assert_text_contains, assert_attribute, switch_tab, accept_alert, dismiss_alert, assert_alert_text, drag_and_drop, upload_file, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST use placeholders like %login%, %random_email%, %unique_name:Prefix% (ALWAYS with % on BOTH sides)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"
@@ -662,7 +672,7 @@ HTML Code:
 
     def get_error_analysis_prompt(self, html_code: str, error_message: str, test_name: str, test_description: str, 
                                  step_history: list, failed_step: dict, previous_attempts: list = None, 
-                                 screenshot_path: str = None) -> str:
+                                 screenshot_path: str = None, browser_state: str = None) -> str:
         """
         Generate a prompt for Gemini to analyze a test step failure and suggest a fix.
         
@@ -736,6 +746,8 @@ CURRENT PAGE HTML:
 
 {'SCREENSHOT OF FAILURE STATE: A screenshot of the page at the time of failure is attached.' if screenshot_path else ''}
 
+{('BROWSER STATE (not visible in the HTML above):' + chr(10) + browser_state) if browser_state else ''}
+
 Your response MUST be a valid JSON object with ALL of the following required fields:
 {{
     "analysis": "Brief analysis of why the step failed",
@@ -759,6 +771,10 @@ IMPORTANT:
 3. Consider if a parent menu needs to be expanded first
 4. For hidden elements, consider using hover actions or JavaScript execution
 4a. If a text assertion fails because the element text is empty or not visible, but the state is present in an attribute (aria-valuenow, value, checked, disabled, href), use action "assert_attribute" with "value" set to "attribute=expected" (e.g. "aria-valuenow=0")
+4b. If the error says "unexpected alert open" or BROWSER STATE reports an open native alert, the page is blocked: use "accept_alert", "dismiss_alert" or "assert_alert_text" (element_locator "N/A"), not a click
+4c. If the element is not found because it is in another browser tab, use "switch_tab" (element_locator "N/A") with "value" "new", "main", a tab number or a part of the tab title/URL
+4d. If "drag_and_drop" fails with "had no effect", the drop target is wrong: put the XPath of the real drop zone (or of the list item to drop onto) into "value". Mouse drag and HTML5 emulation are both tried automatically; the optional "html5:" value prefix only changes their order
+4e. If a click on a file input or an "upload" button fails or does nothing, use "upload_file" on the <input type="file"> itself with "value" set to a sample file name ("sample.txt", "sample.png", "sample.pdf", "sample.csv")
 5. If timing is the issue, suggest adding a wait step
 6. ⚠️ FOR TRANSIENT NOTIFICATIONS/TOASTS (appear briefly then disappear):
    - AVOID waiting for notification elements as they disappear quickly
