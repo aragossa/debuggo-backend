@@ -692,6 +692,7 @@ class TestRunner:
         """Drop the variables of the previous run and keep the environment for api_request steps."""
         self.current_environment_vars = environment_vars or {}
         self.session_variables = {}
+        self._api_context = None  # set by a generation that may use the project's API library
 
     def _substitute_in_request(self, data, env_helper):
         """Substitute %variables% in every string of a parsed api_request, the same way as in UI step values."""
@@ -712,6 +713,47 @@ class TestRunner:
                 session_variables=self.session_variables
             )
         return data
+
+    def _api_prompt(self):
+        """The API block for the generation prompt, with the variables API steps have set so far."""
+        context = getattr(self, '_api_context', None)
+        if not context:
+            return None
+        names = [name for name in self.session_variables if name not in ('token', 'auth_token', 'accessToken', 'authToken')]
+        known = f"\nVariables set by earlier API steps: {', '.join('%' + name + '%' for name in names)}" if names else ''
+        return context['prompt'] + known
+
+    def _planned_api_call(self, value):
+        """(planned step, library call) when the value of an api_request step names a call of the library."""
+        context = getattr(self, '_api_context', None)
+        try:
+            planned = json.loads(value) if isinstance(value, str) else value
+        except (json.JSONDecodeError, TypeError):
+            return None, None
+        if not context or not isinstance(planned, dict) or 'call' not in planned or planned.get('endpoint'):
+            return None, None
+        call = str(planned['call'])
+        for op in context['library']:
+            if call in (op['name'], f"{op['method']} {op['path']}"):
+                return planned, op
+        raise ValueError(f"api_request names the call \"{call}\", which is not in the project's API library")
+
+    def _api_login_request(self, value):
+        """The login request to run before a library call that needs a token, when none was obtained yet."""
+        planned, op = self._planned_api_call(value)
+        context = getattr(self, '_api_context', None)
+        if not op or not op.get('requires_auth') or not context['login'] or 'access_token' in self.session_variables:
+            return None
+        from auroqa.Services.ApiBaselineTests import _login_step
+        return json.dumps(_login_step(context['login'])['request'])
+
+    def _resolve_api_call(self, value):
+        """A step value that names a library call ({"call": ...}) as the full request, copied from the library."""
+        planned, op = self._planned_api_call(value)
+        if not op:
+            return value
+        from auroqa.Services.ApiScenarioGenerator import assemble_request
+        return json.dumps(assemble_request(planned, op, getattr(self, '_api_context')['login']))
 
     def _execute_api_request(self, value, env_helper=None):
         """
@@ -1545,7 +1587,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
                 self._cleanup_browser()
 
-    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None, vlm_enabled=False):
+    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None, vlm_enabled=False, use_api=False):
         """
         Generate test steps using AI analysis of page HTML.
         Uses single connection per session to optimize database usage.
@@ -1555,6 +1597,7 @@ class TestRunner:
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
             ai_model_id: Optional ID of the AI model to use
             vlm_enabled: Boolean flag to enable/disable Visual Language Model (screenshots)
+            use_api: let the model prepare data through the project's API library (api_request steps)
         """
         pid = os.getpid()
         # Generate unique job ID for tracking all AI requests in this test generation
@@ -1640,7 +1683,7 @@ class TestRunner:
                 # Continue with test generation using the same connection
                 return self._generate_test_steps_with_session_connection(
                     test_case_id, session_conn, session_cursor, test_name, test_description, 
-                    environment_vars, model_id, generation_job_id, vlm_enabled
+                    environment_vars, model_id, generation_job_id, vlm_enabled, use_api
                 )
                 
         except Exception as e:
@@ -1834,7 +1877,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
         return 5
             
     def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
-                                                   test_name, test_description, environment_vars, model_id, generation_job_id, vlm_enabled=False):
+                                                   test_name, test_description, environment_vars, model_id, generation_job_id, vlm_enabled=False, use_api=False):
         """
         Generate test steps using a single database connection session.
         """
@@ -1914,6 +1957,19 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 # Create environment helper
                 env = EnvHelper(environment_vars or {})
                 self._start_variable_session(environment_vars)
+
+                # API calls the test may use to prepare its data (the "use API" flag of the generation)
+                if use_api:
+                    try:
+                        from auroqa.Services.ApiScenarioGenerator import ui_api_context
+                        session_cursor.execute("SELECT project_id, client_id FROM test_cases WHERE id = %s", (test_case_id,))
+                        owner = session_cursor.fetchone()
+                        if owner and owner[0] and owner[1]:
+                            self._api_context = ui_api_context(str(owner[0]), str(owner[1]), f"{test_name} {test_description}")
+                        if self._api_context:
+                            self.logger.info(f"[PID:{pid}] API library offered to the model: {len(self._api_context['prompt'])} chars")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Could not load the API library, generating without it: {e}")
                 
                 # Set up HTML analyzer if not already initialized
                 if not self.html_analyzer:
@@ -2121,7 +2177,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     generation_job_id=generation_job_id,
                                     vlm_enabled=vlm_enabled,
                                     model_name=model_id,
-                                    browser_state=browser_state
+                                    browser_state=browser_state,
+                                    api_context=self._api_prompt()
                                 )
                                 
                                 # Check for stop flag after AI response
@@ -2150,6 +2207,25 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     # The model may send the request of an api_request step as an object; steps store text
                                     if isinstance(value, (dict, list)):
                                         value = json.dumps(value)
+
+                                    if action == 'api_request':
+                                        # A call that needs a token: log in first and keep the login as its own step
+                                        login_request = self._api_login_request(value)
+                                        if login_request:
+                                            self.execute_step('api_request', 'N/A', login_request, 'xpath', env)
+                                            login_step_id = self._save_step(
+                                                test_case_id=test_case_id,
+                                                step_order=step_order,
+                                                element_purpose="Log in to the API with the environment's login and password",
+                                                action='api_request',
+                                                element_locator='N/A',
+                                                value=login_request,
+                                                by_strategy='xpath'
+                                            )
+                                            self.logger.info(f"[PID:{pid}] Saved API login step {login_step_id} as step {step_order}")
+                                            step_order += 1
+                                        # {"call": name, ...} becomes the request copied from the library
+                                        value = self._resolve_api_call(value)
 
                                     self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                     
@@ -2435,6 +2511,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             # New format (7-tuple) with CSS fallback
                                             next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
+                                        if isinstance(value, (dict, list)):
+                                            value = json.dumps(value)
+                                        if action == 'api_request':
+                                            value = self._resolve_api_call(value)
                                         self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution
@@ -2745,6 +2825,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             # New format (7-tuple) with CSS fallback
                                             next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
+                                        if isinstance(value, (dict, list)):
+                                            value = json.dumps(value)
+                                        if action == 'api_request':
+                                            value = self._resolve_api_call(value)
                                         self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution

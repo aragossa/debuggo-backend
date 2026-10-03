@@ -343,7 +343,7 @@ SUPPORTED ACTIONS:
 - "assert_alert_text" - Assert the exact text of the native alert and leave it open. element_locator is "N/A", put the expected text into "value" (e.g. "Do you confirm action?"). Waits up to 10 seconds for the alert to appear
 - "drag_and_drop" - Drag one element onto another. element_locator is the element to drag, "value" is the XPath of the element to drop it on (e.g. "//div[@id='droppable']"), nothing else. Works for sortable lists and native HTML5 draggables too. Fails if nothing moved. Follow it with an assertion of the result
 - "upload_file" - Choose a file in an <input type="file">. element_locator is the file input itself (not its button or label), "value" is the name of a sample file: "sample.txt", "sample.png", "sample.pdf" or "sample.csv". NEVER click a file input: that opens an OS dialog nobody can close
-- "api_request" - Send an HTTP request from the test itself, not through the browser (prepare or check data through the API). element_locator is "N/A". "value" is a JSON string: {"method": "POST", "endpoint": "full URL", "headers": {}, "body": {}, "expected_status": 201, "extract_variables": {"item_id": "$.id"}}. A variable extracted from the response is used in later steps as %item_id%. Use it ONLY when the test description asks for an API request and gives its URL; never invent endpoints
+- "api_request" - Send an HTTP request from the test itself, not through the browser (prepare or check data through the API). element_locator is "N/A". "value" is a JSON string: {"method": "POST", "endpoint": "full URL", "headers": {}, "body": {}, "expected_status": 201, "extract_variables": {"item_id": "$.id"}}. A variable extracted from the response is used in later steps as %item_id%. Use it ONLY when the test description asks for an API request and gives its URL, or with a call from the API CALLS list at the end of this prompt (in the format given there); never invent endpoints
 - "stop_test" - Stop test execution (use when test is completed successfully)
 
 NATIVE ALERTS: alert(), confirm() and prompt() windows are NOT in the HTML and block the page. When BROWSER STATE says one is open, or the previous step triggers one, handle it (assert_alert_text, accept_alert, dismiss_alert) before any other action. For an alert that appears after a delay do not add a wait: these actions wait for it themselves.
@@ -474,7 +474,7 @@ SUPPORTED ACTIONS:
 - "assert_alert_text" - Assert the exact text of the native alert and leave it open. element_locator is "N/A", put the expected text into "value" (e.g. "Do you confirm action?"). Waits up to 10 seconds for the alert to appear
 - "drag_and_drop" - Drag one element onto another. element_locator is the element to drag, "value" is the XPath of the element to drop it on (e.g. "//div[@id='droppable']"), nothing else. Works for sortable lists and native HTML5 draggables too. Fails if nothing moved. Follow it with an assertion of the result
 - "upload_file" - Choose a file in an <input type="file">. element_locator is the file input itself (not its button or label), "value" is the name of a sample file: "sample.txt", "sample.png", "sample.pdf" or "sample.csv". NEVER click a file input: that opens an OS dialog nobody can close
-- "api_request" - Send an HTTP request from the test itself, not through the browser (prepare or check data through the API). element_locator is "N/A". "value" is a JSON string: {{"method": "POST", "endpoint": "full URL", "headers": {{}}, "body": {{}}, "expected_status": 201, "extract_variables": {{"item_id": "$.id"}}}}. A variable extracted from the response is used in later steps as %item_id%. Use it ONLY when the test description asks for an API request and gives its URL; never invent endpoints
+- "api_request" - Send an HTTP request from the test itself, not through the browser (prepare or check data through the API). element_locator is "N/A". "value" is a JSON string: {{"method": "POST", "endpoint": "full URL", "headers": {{}}, "body": {{}}, "expected_status": 201, "extract_variables": {{"item_id": "$.id"}}}}. A variable extracted from the response is used in later steps as %item_id%. Use it ONLY when the test description asks for an API request and gives its URL, or with a call from the API CALLS list at the end of this prompt (in the format given there); never invent endpoints
 - "stop_test" - Stop test execution (use when test is completed successfully)
 
 NATIVE ALERTS: alert(), confirm() and prompt() windows are NOT in the HTML and block the page. When BROWSER STATE says one is open, or the previous step triggers one, handle it (assert_alert_text, accept_alert, dismiss_alert) before any other action. For an alert that appears after a delay do not add a wait: these actions wait for it themselves.
@@ -568,7 +568,7 @@ Return a JSON object with:
 
     def html_analyzer(self, test_case_id: int, html_code: str, test_name: str, test_description: str, step_order: int,
                       next_prompt: str, prev_step_description: str, screenshot_path: str = None, generation_job_id: str = None, vlm_enabled: bool = False, model_name: str = None,
-                      browser_state: str = None) -> tuple[str, str, str, str, str, str, str]:
+                      browser_state: str = None, api_context: str = None) -> tuple[str, str, str, str, str, str, str]:
         self.logger.info("Sending request to AI provider for HTML analysis.")
         
         # ReAct Pattern: Start conversation for this step
@@ -623,6 +623,9 @@ PREVIOUS STEP: {prev_step_description}
         # Open native alert and tabs: the HTML does not show them
         if browser_state:
             prompt += f"\nBROWSER STATE (not visible in the HTML above):\n{browser_state}\n"
+        # Calls of the project's API library the test may use to prepare data
+        if api_context:
+            prompt += f"\n{api_context}\n"
         self.logger.info(f"The screenshot path {screenshot_path}")
         image = False
         if screenshot_path and vlm_enabled:

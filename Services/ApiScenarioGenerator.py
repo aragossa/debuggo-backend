@@ -64,6 +64,59 @@ def select_operations(operations: List[Dict], text: str) -> List[Dict]:
     return selected[:MAX_CALLS_IN_PROMPT]
 
 
+MAX_CALLS_IN_UI_PROMPT = 25
+
+
+def ui_api_context(project_id: str, client_id: str, text: str) -> Optional[Dict[str, Any]]:
+    """
+    What a UI test generation needs to use the API for test data: the calls of the resources the
+    test description mentions, as a prompt block, and the library to build the steps from.
+    None when the project has no library or the description points to none of its resources:
+    the block goes into the prompt of every step, so it is kept short.
+    """
+    library = list_operations(project_id, client_id)
+    if not library:
+        return None
+    newest_schema = max(op['schema_id'] for op in library)
+    library = [op for op in library if op['schema_id'] == newest_schema]
+    login = _find_login(library)
+    wanted = _words(text)
+    resources = {op['resource'] for op in library if wanted & (_words(op['resource']) | _words(op['path']))}
+    # Reading calls prepare nothing: only the calls that change data are offered
+    selected = [op for op in library if op['resource'] in resources and op['method'] != 'GET'
+                and not (login and op['id'] == login['id'])][:MAX_CALLS_IN_UI_PROMPT]
+    if not selected:
+        return None
+
+    lines = []
+    for op in selected:
+        # The body as it will be sent when the step changes nothing: the model reuses these values on the page
+        body = (op.get('request') or {}).get('body')
+        if isinstance(body, dict) and body:
+            body = _unique_body(body, 'upd' if op['method'] in ('PUT', 'PATCH') else '')
+        fields = f" | body: {json.dumps(body, separators=(',', ':'))[:340]}" if isinstance(body, dict) and body else ''
+        lines.append(f"- {op['name']}: {op['method']} {op['path']} — {(op.get('summary') or '')[:70]}{fields}")
+    prompt = (
+        "API CALLS OF THIS APPLICATION (action \"api_request\"):\n" + "\n".join(lines) + "\n"
+        "Use an API call ONLY to prepare data the test needs before the page is used (a user to log in with, "
+        "an item to look at) or to clean up after it. NEVER use the API for the behaviour the test itself "
+        "verifies: that must be done through the page.\n"
+        "When the test description needs data that does not exist yet (a new or just registered user, a new item, "
+        "a precondition), create it with an API call FIRST, before the page steps that use it, and then use the "
+        "created data on the page: type the same values you sent in the API body (for example %random_email% and "
+        "the password you chose) instead of the environment's %login% and %password%.\n"
+        "To use one, return action \"api_request\", element_locator \"N/A\" and \"value\" as JSON: "
+        "{\"call\": \"name from the list\", \"body\": {}, \"path_params\": {}, "
+        "\"extract_variables\": {\"variable\": \"$.field\"}}. The body shown for a call is valid and is sent as "
+        "it is: leave \"body\" empty unless the test needs another value in some field, and then give only that "
+        "field. Authorization is added automatically. A placeholder (%random_email%, %unique_name%) is the same "
+        "value in every step of this test, so after the call a page step types exactly the values of that body "
+        "(the same %random_email%, the same password text). A value from the response is available as %variable% "
+        "after extract_variables. Do not repeat an API call that is already among the previous steps."
+    )
+    return {'prompt': prompt, 'library': library, 'login': login}
+
+
 def describe_operation(op: Dict, is_login: bool = False) -> str:
     """One line about a call for the prompt."""
     request = op.get('request') or {}

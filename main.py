@@ -1167,7 +1167,8 @@ async def generate_steps(
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
+        use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
         
@@ -1295,7 +1296,8 @@ async def confirm_generate_steps(
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
+        use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
         

@@ -453,7 +453,8 @@ You MUST ONLY use these valid actions. NO OTHER ACTIONS ARE ALLOWED:
 - API request: api_request (an HTTP request sent by the test itself, not through the browser; element_locator is "N/A",
   "value" is a JSON string: {"method": "POST", "endpoint": "full URL", "headers": {}, "body": {}, "expected_status": 201,
   "extract_variables": {"item_id": "$.id"}}; an extracted variable is used in later steps as %item_id%;
-  use it ONLY when the test description asks for an API request and gives its URL)
+  use it ONLY when the test description asks for an API request and gives its URL, or with a call from the
+  API CALLS list of the prompt, in the format given there)
 
 ❌ DO NOT use these invalid actions:
 - assert_element_is_visible (WRONG - use wait_for_element_to_be_visible instead)
