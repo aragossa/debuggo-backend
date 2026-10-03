@@ -123,6 +123,19 @@ class BrowserAutomation:
             self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
 
+    def clear_http_cache(self):
+        """
+        Empty the browser's HTTP cache. Cookies and storage do not cover it: a response sent with
+        Cache-Control: max-age is reused without a request, so a page opened again shows old data.
+        """
+        try:
+            self.driver.execute("executeCdpCommand", {"cmd": "Network.clearBrowserCache", "params": {}})
+            self.logger.info(f"[PID:{self.pid}] HTTP cache cleared")
+            return True
+        except Exception as e:
+            self.logger.warning(f"[PID:{self.pid}] Could not clear the HTTP cache: {str(e)}")
+            return False
+
     def wait_for_page_load(self, timeout=None):
         """
         Wait for the page to fully load by checking document.readyState.
@@ -228,16 +241,8 @@ class BrowserAutomation:
                             return element
                         except TimeoutException:
                             self.logger.warning(f"[PID:{self.pid}] Element not clickable, trying JavaScript fallback...")
-                    else:
-                        # For type, wait, etc. - just need element to be present and visible
-                        try:
-                            self.logger.info(f"[PID:{self.pid}] Trying with visibility_of_element_located for {action or 'unknown'} action...")
-                            element = WebDriverWait(self.driver, self.timeout).until(
-                                EC.visibility_of_element_located((by_strategy, selector))
-                            )
-                            return element
-                        except TimeoutException:
-                            self.logger.warning(f"[PID:{self.pid}] Element not visible, trying JavaScript fallback...")
+                    # Other actions: the element is not in the DOM, so waiting for it to become
+                    # visible would only repeat the wait that has just timed out
                     
                     # Last resort: try with JavaScript
                     self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
@@ -967,6 +972,14 @@ class BrowserAutomation:
             selector (str, optional): Specific element selector to debug
             by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
+        # Nothing here waits for an element: with the implicit wait every empty lookup costs 5 seconds
+        self.driver.implicitly_wait(0)
+        try:
+            self._debug_page_structure(selector, by)
+        finally:
+            self.driver.implicitly_wait(5)
+
+    def _debug_page_structure(self, selector=None, by='xpath'):
         self.logger.info(f"[PID:{self.pid}] === DEBUG PAGE STRUCTURE ===")
         self.logger.info(f"[PID:{self.pid}] Current URL: {self.driver.current_url}")
         self.logger.info(f"[PID:{self.pid}] Page Title: {self.driver.title}")

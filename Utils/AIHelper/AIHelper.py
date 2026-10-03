@@ -725,6 +725,9 @@ HTML Code:
                     f"- Error: {attempt['error']}\n\n"
                 )
         
+        from auroqa.Utils.BrowserAutomation.StepActions import STEP_ACTIONS
+        supported_actions = ", ".join(a["name"] for a in STEP_ACTIONS if "ui" in a["test_types"])
+
         return f"""Act as an experienced QA automation expert. You are debugging a failed test step in test case: "{test_name}".
 
 TEST DESCRIPTION: {test_description}
@@ -758,11 +761,14 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "element_locator": "Corrected XPath selector that should work (PRIMARY locator)",
     "css_selector": "Corrected CSS selector for the same element (FALLBACK locator)",
     "by_strategy": "xpath",
-    "action": "Same or corrected action (click, type, etc.)",
+    "action": "Same or corrected action, one of the SUPPORTED ACTIONS below",
     "element_purpose": "Description of what this step does",
     "value": "Same or corrected value if applicable",
     "next_step": "Description of what to do next"
 }}
+
+SUPPORTED ACTIONS: {supported_actions}
+Any other action (refresh, reload, back, execute_script, ...) is not implemented: it fails and the recovery attempt is lost.
 
 CRITICAL - DUAL LOCATOR REQUIREMENT:
 - You MUST provide BOTH element_locator (XPath) AND css_selector (CSS) for the SAME element
@@ -779,6 +785,7 @@ IMPORTANT:
 4c. If the element is not found because it is in another browser tab, use "switch_tab" (element_locator "N/A") with "value" "new", "main", a tab number or a part of the tab title/URL
 4d. If "drag_and_drop" fails with "had no effect", the drop target is wrong: put the XPath of the real drop zone (or of the list item to drop onto) into "value". Mouse drag and HTML5 emulation are both tried automatically; the optional "html5:" value prefix only changes their order
 4e. If a click on a file input or an "upload" button fails or does nothing, use "upload_file" on the <input type="file"> itself with "value" set to a sample file name ("sample.txt", "sample.png", "sample.pdf", "sample.csv")
+4f. There is no refresh action. To load the page again use "navigate" with element_locator "N/A" and "value" set to the URL ("%base_url%" is the start page). Do it when the page was opened before the data it must show was created (for example by an api_request step)
 5. If timing is the issue, suggest adding a wait step
 6. ⚠️ FOR TRANSIENT NOTIFICATIONS/TOASTS (appear briefly then disappear):
    - AVOID waiting for notification elements as they disappear quickly
