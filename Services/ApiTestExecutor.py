@@ -279,7 +279,7 @@ class ApiTestExecutor:
                     'success': False,
                     'step_order': step['step_order'],
                     'error': f"Expected status {expected_status}, got {response.status_code}"
-                             f" ({self._status_mismatch_hint(expected_status, response.status_code)})",
+                             f" ({self._status_mismatch_hint(expected_status, response.status_code, method)})",
                     'response_status': response.status_code,
                     'response_body': response.text[:500]
                 }
@@ -337,7 +337,7 @@ class ApiTestExecutor:
             }
     
     @staticmethod
-    def _status_mismatch_hint(expected: int, actual: int) -> str:
+    def _status_mismatch_hint(expected: int, actual: int, method: str = '') -> str:
         """What an unexpected status most likely means: who has to change, the test or the API description."""
         try:
             expected, actual = int(expected), int(actual)
@@ -351,6 +351,8 @@ class ApiTestExecutor:
             return "the API rejected the request data: fix the body or parameters of the step, see the response"
         if actual == 404:
             return "not found: check the endpoint and the ids passed from earlier steps"
+        if actual == 409 and str(method).upper() == 'DELETE':
+            return "conflict: the item is still used by something else, which must be deleted first or cannot be deleted at all"
         if actual == 409:
             return "conflict: the item probably exists already, for example left by an earlier failed run"
         if actual >= 500:

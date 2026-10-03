@@ -356,8 +356,12 @@ class ApiScenarioGenerator:
             # keeps the real one. Asking the model to change one number would cost a whole repair attempt
             actual = result.get('response_status')
             if error is None and actual and actual != request.get('expected_status', 200):
+                expected = request.get('expected_status', 200)
                 self.logger.info(f"Test case {test_case_id}: step {index + 1} answers {actual}, "
-                                 f"not {request.get('expected_status', 200)}: the step expects {actual} now")
+                                 f"not {expected}: the step expects {actual} now")
+                step.setdefault('review', []).append(
+                    f"Expected status changed from {expected} to {actual}: the API answers {actual}, "
+                    f"the schema says {expected}.")
                 request['expected_status'] = actual
             if error is None:
                 missing = [f"{name} ({path})" for name, path in (request.get('extract_variables') or {}).items()
@@ -380,19 +384,68 @@ class ApiScenarioGenerator:
         except Exception:
             pass
 
-    def _save(self, test_case_id: int, steps: List[Dict]):
-        """Replace the steps of the test case with the generated ones."""
+    @staticmethod
+    def _route(request: Dict) -> Tuple[str, str]:
+        return str(request.get('method')), str(request.get('endpoint'))
+
+    def _review_notes(self, steps: List[Dict], failed: Dict[Tuple[str, str], Dict]) -> Tuple[List[Optional[str]], List[str]]:
+        """
+        What the saved test expects differently from the step that failed during generation, for a
+        person to confirm: (a note per step or None, notes about removed steps).
+
+        A repair that fixes the data a step sends is not noted. A repair that changes what the step
+        expects, or drops the step, makes the test pass by agreeing with the API, which is right for
+        a wrong guess of the model and wrong for a bug of the API. The saved steps are compared with
+        the first failing version, so a change the model took back later leaves no note.
+        """
+        step_notes: List[Optional[str]] = []
+        seen = set()
+        for step in steps:
+            request = step['request']
+            route = self._route(request)
+            notes = list(step.get('review') or [])
+            old = failed.get(route)
+            if old and route not in seen:
+                seen.add(route)
+                changes = []
+                # 200 -> 201 is already noted by the run that accepted the other success status
+                both_success = all(200 <= int(status) < 300 for status in
+                                   (request.get('expected_status', 200), old['expected_status']))
+                if request.get('expected_status', 200) != old['expected_status'] and not both_success:
+                    changes.append(f"expected status {old['expected_status']} -> {request.get('expected_status', 200)}")
+                was, now = old['expect'], request.get('expect') or {}
+                for path in list(was) + [path for path in now if path not in was]:
+                    if was.get(path) != now.get(path):
+                        changes.append(f"{path}: {json.dumps(was[path]) if path in was else 'not checked'} -> "
+                                       f"{json.dumps(now[path]) if path in now else 'no longer checked'}")
+                if changes:
+                    notes.append(f"Changed to agree with the API after the step failed ({old['error']}): "
+                                 + "; ".join(changes) + ".")
+            step_notes.append("\n".join(notes) or None)
+        present = {self._route(step['request']) for step in steps}
+        removed = [f"Step \"{old['description']}\" ({route[0]} {route[1]}) was removed after it failed: {old['error']}."
+                   for route, old in failed.items() if route not in present]
+        return step_notes, removed
+
+    def _save(self, test_case_id: int, steps: List[Dict], failed: Optional[Dict] = None):
+        """
+        Replace the steps of the test case with the generated ones. What was changed to agree with
+        the API goes to review_notes of the step (or of the test case, for a removed step).
+        """
+        step_notes, removed = self._review_notes(steps, failed or {})
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("DELETE FROM test_steps WHERE test_case_id = %s", (test_case_id,))
-                for order, step in enumerate(steps, 1):
+                for order, (step, notes) in enumerate(zip(steps, step_notes), 1):
                     request = step['request']
                     cursor.execute("""
                         INSERT INTO test_steps (test_case_id, step_order, description, action, element_path, value,
-                                                path_type, expected_result, created_at, updated_at)
-                        VALUES (%s, %s, %s, 'api_request', NULL, %s, 'xpath', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                                path_type, expected_result, review_notes, created_at, updated_at)
+                        VALUES (%s, %s, %s, 'api_request', NULL, %s, 'xpath', %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     """, (test_case_id, order, step['description'], json.dumps(request),
-                          f"Status {request.get('expected_status', 200)}"))
+                          f"Status {request.get('expected_status', 200)}", notes))
+                cursor.execute("UPDATE test_cases SET review_notes = %s WHERE id = %s",
+                               ("\n".join(removed) or None, test_case_id))
                 conn.commit()
 
     # ---- entry point ----------------------------------------------------------------------------------
@@ -439,13 +492,20 @@ class ApiScenarioGenerator:
         plan = self._ask(prompt, client_id, job_id, model_name, 'api_scenario_plan')
         steps: List[Dict] = []
         previous_failure = None
+        # The first failing version of every step that failed, by method and endpoint (see _review_notes)
+        failed_steps: Dict[Tuple[str, str], Dict] = {}
         for attempt in range(MAX_REPAIRS + 1):
             if not plan:
                 break
             steps, plan_error = self._to_requests(plan, library, login)
             failure = None if plan_error else self._run(steps, test_case_id, environment_vars)
+            if failure is not None:
+                request = steps[failure['index']]['request']
+                failed_steps.setdefault(self._route(request), {
+                    'description': steps[failure['index']]['description'], 'error': failure['error'],
+                    'expected_status': request.get('expected_status', 200), 'expect': dict(request.get('expect') or {})})
             if not plan_error and failure is None:
-                self._save(test_case_id, steps)
+                self._save(test_case_id, steps, failed_steps)
                 self.logger.info(f"Test case {test_case_id}: {len(steps)} steps, passed, {attempt + 1} model request(s)")
                 return True
             self.logger.info(f"Test case {test_case_id}: attempt {attempt + 1} failed: "
@@ -482,6 +542,8 @@ class ApiScenarioGenerator:
                 "If the API rejects values because they do not exist or do not match each other, do not guess "
                 "other values: find the call in the list that returns valid ones, call it in an earlier step and "
                 "pass its values on with variables. "
+                "If a cleanup step at the end cannot work because the API refuses to delete an item that something "
+                "else uses, and no call in the list deletes what uses it, leave that cleanup step out. "
                 "If the API answers with another success status than the list says (201 instead of 200), set "
                 "\"expected_status\" to what the API really returns. Data created by the failed run may still exist: "
                 "keep unique values unique.",
@@ -489,7 +551,7 @@ class ApiScenarioGenerator:
 
         if steps:
             # Keep the last plan: the user sees which step fails and can fix it
-            self._save(test_case_id, steps)
+            self._save(test_case_id, steps, failed_steps)
             self.logger.warning(f"Test case {test_case_id}: saved {len(steps)} steps, but the test does not pass yet")
             reason = plan_error or f"step {failure['index'] + 1} fails: {failure['error']}"
             self.last_error = (f"The test was generated, but it does not pass yet ({reason}). "
