@@ -304,10 +304,17 @@ class ApiTestExecutor:
             
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error: {str(e)}")
+            # The usual cause on a local stand: the request leaves from the Debuggo server, not from the
+            # user's machine or the test browser, so "localhost" is the server itself
+            hint = ''
+            if 'url' in locals() and re.match(r'https?://(localhost|127\.0\.0\.1)[:/]', url):
+                hint = (" API requests are sent by the Debuggo server, where localhost is the server itself."
+                        " Set the environment's API URL to an address the server can reach"
+                        " (for an API on this machine: http://host.docker.internal:<port>).")
             return {
                 'success': False,
                 'step_order': step['step_order'],
-                'error': f"Network error: {str(e)}",
+                'error': f"Network error: cannot reach {url if 'url' in locals() else 'the API'}.{hint} Details: {str(e)}",
                 'actual_url': url if 'url' in locals() else None,
                 'method': method if 'method' in locals() else None
             }
