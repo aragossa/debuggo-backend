@@ -392,7 +392,9 @@ class BrowserAutomation:
             element = self.find_element(selector, by, action='type')
             element.clear()
             element.send_keys(text)
-            self.logger.info(f"[PID:{self.pid}] Typed text: {text} into element: {selector}")
+            # What goes into a password field stays out of the log
+            shown = '***' if (element.get_attribute('type') or '').lower() == 'password' else text
+            self.logger.info(f"[PID:{self.pid}] Typed text: {shown} into element: {selector}")
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to type text into element {selector}: {str(e)}")
             raise

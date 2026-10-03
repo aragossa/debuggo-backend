@@ -20,6 +20,7 @@ from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
 from auroqa.Utils.GenerationStatus import set_generation_error
+from auroqa.Utils.LogMasking import mask_secrets
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
@@ -825,7 +826,7 @@ class TestRunner:
         try:
             if action == "api_request":
                 # Variables are substituted inside, after the JSON is parsed
-                self.logger.info(f"[PID:{self.pid}] Executing api_request: {value}")
+                self.logger.info(f"[PID:{self.pid}] Executing api_request: {mask_secrets(value)}")
                 self._execute_api_request(value, env_helper)
                 return
 
@@ -889,7 +890,7 @@ class TestRunner:
                 else:
                     self.browser.navigate(element_path)
             elif action == "type":
-                self.logger.info(f"[PID:{self.pid}] with value {value}")
+                # The value itself is logged by type_text, which knows whether the field is a password
                 self.browser.type_text(element_path, value, by_strategy)
             elif action == "wait":
                 self.browser.wait_for_element(element_path, by_strategy)

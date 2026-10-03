@@ -8,6 +8,7 @@ from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Services.VariableManager import VariableManager
 from auroqa.Utils.Environments import api_base_url, reachable_url
+from auroqa.Utils.LogMasking import mask_secrets
 
 
 class ApiTestExecutor:
@@ -194,9 +195,8 @@ class ApiTestExecutor:
             extract_variables = step_data.get('extract_variables', {})
             
             # Log available variables before substitution
+            # Names only: the values include the access token
             self.logger.info(f"🔍 Available session variables: {list(self.session_variables.keys())}")
-            if self.session_variables:
-                self.logger.info(f"📦 Session variable values: {self.session_variables}")
             
             # Substitute variables in endpoint
             self.logger.info(f"🔧 Original endpoint: {endpoint}")
@@ -234,11 +234,11 @@ class ApiTestExecutor:
             self.logger.info("=" * 80)
             self.logger.info(f"📍 URL: {url}")
             self.logger.info(f"🔧 Method: {method}")
-            self.logger.info(f"📋 Headers: {headers}")
+            self.logger.info(f"📋 Headers: {mask_secrets(headers)}")
             if params:
-                self.logger.info(f"🔗 Query Params: {params}")
+                self.logger.info(f"🔗 Query Params: {mask_secrets(params)}")
             if body:
-                self.logger.info(f"📦 Request Body: {body}")
+                self.logger.info(f"📦 Request Body: {mask_secrets(body)}")
             self.logger.info("=" * 80)
             
             # Make the request. "localhost" in the address is the user's machine, not this container
@@ -260,12 +260,12 @@ class ApiTestExecutor:
             self.logger.info(f"📥 API RESPONSE - Step {step['step_order']}")
             self.logger.info("=" * 80)
             self.logger.info(f"✅ Status Code: {response.status_code}")
-            self.logger.info(f"📄 Response Headers: {dict(response.headers)}")
+            self.logger.info(f"📄 Response Headers: {mask_secrets(dict(response.headers))}")
             try:
                 response_json = response.json()
-                self.logger.info(f"📦 Response Body (JSON): {response_json}")
+                self.logger.info(f"📦 Response Body (JSON): {mask_secrets(response_json)}")
             except:
-                self.logger.info(f"📦 Response Body (Text): {response.text[:500]}")
+                self.logger.info(f"📦 Response Body (Text): {mask_secrets(response.text[:500])}")
             self.logger.info("=" * 80)
             
             # Check expected status. During generation the step may accept any success status: the
@@ -508,7 +508,7 @@ class ApiTestExecutor:
                 value = self._get_nested_value(response_data, path)
                 if value is not None:
                     self.session_variables[var_name] = value
-                    self.logger.info(f"✅ Extracted {var_name} = {str(value)[:50]}...")
+                    self.logger.info(f"✅ Extracted {var_name} = {mask_secrets({var_name: str(value)[:50]})[var_name]}")
                     
                     # Create token aliases for common authentication token names
                     # This ensures {{access_token}}, {{token}}, and {{auth_token}} all work
