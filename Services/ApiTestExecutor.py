@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, List
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Services.VariableManager import VariableManager
-from auroqa.Utils.Environments import api_base_url
+from auroqa.Utils.Environments import api_base_url, reachable_url
 
 
 class ApiTestExecutor:
@@ -241,10 +241,13 @@ class ApiTestExecutor:
                 self.logger.info(f"📦 Request Body: {body}")
             self.logger.info("=" * 80)
             
-            # Make the request
+            # Make the request. "localhost" in the address is the user's machine, not this container
+            target_url = reachable_url(url)
+            if target_url != url:
+                self.logger.info(f"📍 Sent to {target_url} (LOCALHOST_ALIAS)")
             response = requests.request(
                 method=method,
-                url=url,
+                url=target_url,
                 headers=headers,
                 params=params if params else None,
                 json=body if isinstance(body, dict) else None,
@@ -307,10 +310,10 @@ class ApiTestExecutor:
             # The usual cause on a local stand: the request leaves from the Debuggo server, not from the
             # user's machine or the test browser, so "localhost" is the server itself
             hint = ''
-            if 'url' in locals() and re.match(r'https?://(localhost|127\.0\.0\.1)[:/]', url):
+            if 'url' in locals() and reachable_url(url) == url and re.match(r'https?://(localhost|127\.0\.0\.1)[:/]', url):
                 hint = (" API requests are sent by the Debuggo server, where localhost is the server itself."
-                        " Set the environment's API URL to an address the server can reach"
-                        " (for an API on this machine: http://host.docker.internal:<port>).")
+                        " Set the environment's API URL to an address the server can reach, or set LOCALHOST_ALIAS"
+                        " for the backend to the host that stands for this machine (host.docker.internal in Docker).")
             return {
                 'success': False,
                 'step_order': step['step_order'],
