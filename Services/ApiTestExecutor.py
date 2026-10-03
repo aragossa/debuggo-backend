@@ -268,8 +268,13 @@ class ApiTestExecutor:
                 self.logger.info(f"📦 Response Body (Text): {response.text[:500]}")
             self.logger.info("=" * 80)
             
-            # Check expected status
-            if response.status_code != expected_status:
+            # Check expected status. During generation the step may accept any success status: the
+            # schema often says 200 where the API answers 201, and the real one is then saved in the step
+            try:
+                both_success = 200 <= int(expected_status) < 300 and 200 <= response.status_code < 300
+            except (TypeError, ValueError):
+                both_success = False
+            if response.status_code != expected_status and not (step_data.get('any_success_status') and both_success):
                 return {
                     'success': False,
                     'step_order': step['step_order'],

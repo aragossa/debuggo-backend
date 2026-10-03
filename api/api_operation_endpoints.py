@@ -5,19 +5,24 @@ GET  /api/projects/{project_id}/api-operations      - the API calls of a project
 POST /api/api-schemas/{schema_id}/operations/sync   - rebuild the calls of one schema
 
 POST /api/api-schemas/{schema_id}/baseline-tests    - create the baseline API tests of one schema, without AI
+POST /api/api-schemas/{schema_id}/scenario-ideas    - ask the model for more complex test scenarios of a schema
+POST /api/api-schemas/{schema_id}/scenario-tests    - create the chosen scenarios as API tests and generate their steps
 
 The library is built by code in Services/ApiOperationLibrary.py when a schema is uploaded.
 Each call comes with "step_request": the JSON an api_request step stores.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
 
 from auroqa.models.user import User
 from auroqa.Services.ApiOperationLibrary import list_operations, sync_operations
 from auroqa.Services.ApiBaselineTests import generate_baseline_tests
+from auroqa.Services.ApiScenarioIdeas import create_scenario_tests, queue_generation, suggest_scenarios
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 
 logger = logging.getLogger(__name__)
@@ -111,3 +116,93 @@ async def create_baseline_tests(
         logger.error(f"Error creating baseline API tests: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create baseline API tests: {str(e)}")
 
+
+
+def _model_name(ai_model_id: Optional[int], user_id) -> Optional[str]:
+    """The model picked in the request, else the user's preferred one, else None (the default)."""
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT m.model_id FROM ai_models m
+                WHERE m.is_active = TRUE AND m.id = COALESCE(
+                    %s, (SELECT ai_model_id FROM user_ai_models WHERE user_id = %s LIMIT 1))
+            """, (ai_model_id, user_id))
+            row = cursor.fetchone()
+    return row[0] if row else None
+
+
+class Scenario(BaseModel):
+    name: str
+    description: str
+
+
+class ScenarioIdeasRequest(BaseModel):
+    count: Optional[int] = 10
+    ai_model_id: Optional[int] = None
+    # Ideas already shown: "suggest more" asks for others
+    exclude: List[Scenario] = []
+
+
+class ScenarioTestsRequest(BaseModel):
+    scenarios: List[Scenario]
+    environment_id: Optional[int] = None
+    ai_model_id: Optional[int] = None
+
+
+@router.post("/api-schemas/{schema_id}/scenario-ideas")
+async def get_scenario_ideas(
+    schema_id: int,
+    request: ScenarioIdeasRequest = None,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """
+    Ask the model, in one request, for API test scenarios beyond the baseline tests. Nothing is saved:
+    the user picks the ideas to keep and sends them to /scenario-tests.
+    """
+    request = request or ScenarioIdeasRequest()
+    client_id = str(current_user.client_id)
+    found = _schema_ids(client_id, schema_id=schema_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="API schema not found or access denied")
+    try:
+        if found[0][1] == 0:
+            sync_operations(schema_id)
+        model_name = _model_name(request.ai_model_id, current_user.id)
+        result = await run_in_threadpool(suggest_scenarios, schema_id, client_id, model_name, request.count,
+                                         [idea.dict() for idea in request.exclude])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error suggesting API test scenarios: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to suggest API test scenarios: {str(e)}")
+    if not result['scenarios']:
+        raise HTTPException(status_code=502, detail="The model suggested no usable scenarios. Try again.")
+    return {"success": True, **result}
+
+
+@router.post("/api-schemas/{schema_id}/scenario-tests")
+async def create_scenario_api_tests(
+    schema_id: int,
+    request: ScenarioTestsRequest,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """
+    Create the chosen scenarios as API tests in "<schema>/Scenarios" and queue the generation of
+    their steps, one test after another. Tests that already exist there are left as they are.
+    """
+    client_id = str(current_user.client_id)
+    if not _schema_ids(client_id, schema_id=schema_id):
+        raise HTTPException(status_code=404, detail="API schema not found or access denied")
+    if not request.scenarios:
+        raise HTTPException(status_code=400, detail="No scenarios chosen")
+    try:
+        result = create_scenario_tests(schema_id, client_id, [s.dict() for s in request.scenarios])
+        model_name = _model_name(request.ai_model_id, current_user.id)
+        for test in result['created']:
+            queue_generation(test['id'], client_id, result['project_id'], request.environment_id, model_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating API scenario tests: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create API scenario tests: {str(e)}")
+    return {"success": True, **result}
