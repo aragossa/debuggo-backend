@@ -187,6 +187,7 @@ class TextAnalyzer(AIHelper):
                     
                     if existing:
                         # Update existing schema
+                        schema_id = existing[0]
                         cursor.execute("""
                             UPDATE api_schemas 
                             SET content = %s, schema_type = %s, updated_at = CURRENT_TIMESTAMP
@@ -213,6 +214,10 @@ class TextAnalyzer(AIHelper):
                         self.logger.info(f"Saved API schema to database with ID: {schema_id}")
                     
                     conn.commit()
+            
+            # Keep the library of API calls in step with the stored schema
+            from auroqa.Services.ApiOperationLibrary import sync_operations
+            sync_operations(schema_id)
                     
         except Exception as e:
             self.logger.error(f"Error saving API schema: {str(e)}")

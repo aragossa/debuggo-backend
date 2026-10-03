@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Services.VariableManager import VariableManager
+from auroqa.Utils.Environments import api_base_url
 
 
 class ApiTestExecutor:
@@ -147,11 +148,18 @@ class ApiTestExecutor:
             
             self.logger.info(f"Executing step {step_order}: {action}")
             
-            # Parse step data from description field (JSON format)
-            try:
-                step_data = json.loads(step['description']) if step['description'] else {}
-            except json.JSONDecodeError:
-                # If description is not JSON, treat it as a simple description
+            # The request is JSON in the description (how generated API steps store it) or,
+            # when the description is plain text, in the value (the format of api_request steps in UI tests)
+            step_data = None
+            for field in ('description', 'value'):
+                try:
+                    parsed = json.loads(step.get(field) or '')
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(parsed, dict):
+                    step_data = parsed
+                    break
+            if step_data is None:
                 step_data = {'description': step['description']}
             
             # Handle different action types
@@ -194,8 +202,8 @@ class ApiTestExecutor:
             endpoint = self._substitute_variables(endpoint)
             self.logger.info(f"🔧 After substitution: {endpoint}")
             
-            # Build full URL
-            base_url = self.environment_vars.get('base_url', '').rstrip('/')
+            # Build full URL: a relative endpoint goes to the environment's API address
+            base_url = api_base_url(self.environment_vars)
             if not endpoint.startswith('http'):
                 url = f"{base_url}{endpoint}"
             else:
@@ -401,7 +409,7 @@ class ApiTestExecutor:
         
         # Substitute environment variables (support both {{}} and %% syntax)
         for key, value in self.environment_vars.items():
-            if key != 'custom_variables':  # Skip the custom_variables dict
+            if key != 'custom_variables' and value is not None:  # Skip the custom_variables dict and unset values
                 result = result.replace(f'{{{{{key}}}}}', str(value))
                 result = result.replace(f'%{key}%', str(value))
         
@@ -626,6 +634,9 @@ def run_api_test_case(test_case_id: int, environment_vars: Optional[Dict[str, An
         # Without a base URL every relative endpoint would fail with an unreadable network error
         result = {'success': False, 'test_run_id': None, 'error': 'API tests require an environment'}
     else:
+        # In an API test %base_url% means the API: an environment that has a separate API address
+        # (base_url is then the UI) must not send the requests to the UI
+        environment_vars = {**environment_vars, 'base_url': api_base_url(environment_vars)}
         executor = ApiTestExecutor(test_case_id=test_case_id, environment_vars=environment_vars,
                                    environment_id=environment_id)
         result = executor.execute_test_case(execution_id=execution_id)

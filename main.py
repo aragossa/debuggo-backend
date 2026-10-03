@@ -60,6 +60,7 @@ from auroqa.test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
+from auroqa.Utils.Environments import load_environment_vars
 from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
 from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
@@ -408,6 +409,12 @@ from auroqa.api.step_action_endpoints import router as step_action_router
 from auroqa.api.step_action_endpoints import set_get_current_user as set_step_action_user
 set_step_action_user(get_current_user)
 app.include_router(step_action_router)
+
+# Library of API calls built from uploaded API schemas
+from auroqa.api.api_operation_endpoints import router as api_operation_router
+from auroqa.api.api_operation_endpoints import set_get_current_user as set_api_operation_user
+set_api_operation_user(get_current_user)
+app.include_router(api_operation_router)
 
 # Include Jira routes
 from auroqa.routes.jira_routes import router as jira_router
@@ -847,26 +854,7 @@ async def run_test_case(
         # If environment_id is provided, fetch environment variables
         if request_data and "environment_id" in request_data:
             environment_id_param = request_data.get("environment_id")
-            with get_db_connection_context() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password, e.custom_variables
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (environment_id_param, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2],
-                            "custom_variables": env_data[3] or {}
-                        }
+            environment_vars = load_environment_vars(environment_id_param, str(current_user.client_id)) or {}
         
         # Route to appropriate executor based on test type
         if test_type == 'api' or test_type == 'api_test':
@@ -1120,29 +1108,7 @@ async def generate_steps(
         # Set up environment variables if environment_id is provided
         environment_vars = {}
         if request_data and request_data.environment_id:
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (request_data.environment_id, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2]
-                        }
-            finally:
-                if conn:
-                    return_db_connection(conn)
+            environment_vars = load_environment_vars(request_data.environment_id, str(current_user.client_id)) or {}
         
         # Get the AI model ID and VLM setting to use
         ai_model_id = None
@@ -1270,29 +1236,7 @@ async def confirm_generate_steps(
         # Set up environment variables if environment_id is provided
         environment_vars = {}
         if request_data and request_data.environment_id:
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (request_data.environment_id, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2]
-                        }
-            finally:
-                if conn:
-                    return_db_connection(conn)
+            environment_vars = load_environment_vars(request_data.environment_id, str(current_user.client_id)) or {}
         
         # Get the AI model ID and VLM setting to use
         ai_model_id = None
@@ -1772,34 +1716,56 @@ async def upload_api_schema(
         from auroqa.Services.ApiSchemaService import detect_schema_type
         schema_type = detect_schema_type(schema_json) or schema_type
         
-        # Save to database
+        # Save to database. A schema uploaded again under the same name replaces the old content,
+        # so the project keeps one schema per name and the calls keep their ids.
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO api_schemas (
-                        project_id, client_id, name, description, 
-                        schema_type, content, created_by
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    project_id,
-                    str(current_user.client_id),
-                    name,
-                    description,
-                    schema_type,
-                    content_str,
-                    current_user.id
-                ))
+                    SELECT id FROM api_schemas
+                    WHERE project_id = %s AND client_id = %s AND name = %s
+                    ORDER BY id DESC LIMIT 1
+                """, (project_id, str(current_user.client_id), name))
+                existing = cursor.fetchone()
                 
-                schema_id = cursor.fetchone()[0]
+                if existing:
+                    schema_id = existing[0]
+                    cursor.execute("""
+                        UPDATE api_schemas
+                        SET content = %s, schema_type = %s, description = COALESCE(NULLIF(%s, ''), description)
+                        WHERE id = %s
+                    """, (content_str, schema_type, description, schema_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO api_schemas (
+                            project_id, client_id, name, description, 
+                            schema_type, content, created_by
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        project_id,
+                        str(current_user.client_id),
+                        name,
+                        description,
+                        schema_type,
+                        content_str,
+                        current_user.id
+                    ))
+                    schema_id = cursor.fetchone()[0]
                 conn.commit()
         
-        logger.info(f"Uploaded API schema {schema_id} for project {project_id}")
+        # Build the library of API calls from the schema (by code, no AI)
+        from auroqa.Services.ApiOperationLibrary import sync_operations
+        operations_count = sync_operations(schema_id)
+        
+        logger.info(f"Uploaded API schema {schema_id} for project {project_id}: {operations_count} calls")
         
         return JSONResponse(content={
             "success": True,
             "schema_id": schema_id,
-            "message": f"API schema '{name}' uploaded successfully"
+            "schema_type": schema_type,
+            "updated": bool(existing),
+            "operations_count": operations_count,
+            "message": f"API schema '{name}' {'updated' if existing else 'uploaded'} successfully"
         })
         
     except HTTPException:
@@ -1821,10 +1787,11 @@ async def list_api_schemas(
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT id, name, description, schema_type, created_at
-                    FROM api_schemas
-                    WHERE project_id = %s AND client_id = %s
-                    ORDER BY created_at DESC
+                    SELECT s.id, s.name, s.description, s.schema_type, s.created_at,
+                           (SELECT COUNT(*) FROM api_operations o WHERE o.schema_id = s.id)
+                    FROM api_schemas s
+                    WHERE s.project_id = %s AND s.client_id = %s
+                    ORDER BY s.created_at DESC
                 """, (project_id, str(current_user.client_id)))
                 
                 rows = cursor.fetchall()
@@ -1835,7 +1802,8 @@ async def list_api_schemas(
                         "name": row[1],
                         "description": row[2],
                         "schema_type": row[3],
-                        "created_at": row[4].isoformat() if row[4] else None
+                        "created_at": row[4].isoformat() if row[4] else None,
+                        "operations_count": row[5]
                     })
                 
                 return JSONResponse(content={"schemas": schemas})
@@ -2774,7 +2742,7 @@ async def get_project_environments(
             # Get all environments for this project
             cursor.execute(
                 """
-                SELECT id, name, base_url, login, password, created_at, updated_at, custom_variables
+                SELECT id, name, base_url, login, password, created_at, updated_at, custom_variables, api_url
                 FROM environments
                 WHERE project_id = %s
                 ORDER BY name
@@ -2792,7 +2760,8 @@ async def get_project_environments(
                     "password": environment[4],
                     "created_at": environment[5].isoformat() if environment[5] else None,
                     "updated_at": environment[6].isoformat() if environment[6] else None,
-                    "custom_variables": environment[7] if environment[7] else []
+                    "custom_variables": environment[7] if environment[7] else [],
+                    "api_url": environment[8]
                 }
                 for environment in environments
             ]
@@ -2839,9 +2808,9 @@ async def create_environment(
             # Create the environment
             cursor.execute(
                 """
-                INSERT INTO environments (name, base_url, login, password, project_id, custom_variables)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id, name, base_url, login, password, created_at, updated_at, custom_variables
+                INSERT INTO environments (name, base_url, login, password, project_id, custom_variables, api_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, base_url, login, password, created_at, updated_at, custom_variables, api_url
                 """,
                 (
                     environment_data.get("name"),
@@ -2849,7 +2818,8 @@ async def create_environment(
                     environment_data.get("login"),
                     environment_data.get("password"),
                     project_id,
-                    json.dumps(custom_variables)
+                    json.dumps(custom_variables),
+                    (environment_data.get("api_url") or "").strip() or None
                 )
             )
             environment = cursor.fetchone()
@@ -2863,7 +2833,8 @@ async def create_environment(
                 "password": environment[4],
                 "created_at": environment[5].isoformat() if environment[5] else None,
                 "updated_at": environment[6].isoformat() if environment[6] else None,
-                "custom_variables": environment[7]
+                "custom_variables": environment[7],
+                "api_url": environment[8]
             }
     except Exception as e:
         if conn:
@@ -2912,9 +2883,10 @@ async def update_environment(
             cursor.execute(
                 """
                 UPDATE environments
-                SET name = %s, base_url = %s, login = %s, password = %s, custom_variables = %s, updated_at = CURRENT_TIMESTAMP
+                SET name = %s, base_url = %s, login = %s, password = %s, custom_variables = %s,
+                    api_url = CASE WHEN %s THEN %s ELSE api_url END, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at, custom_variables
+                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at, custom_variables, api_url
                 """,
                 (
                     environment_data.get("name"),
@@ -2922,6 +2894,9 @@ async def update_environment(
                     environment_data.get("login"),
                     environment_data.get("password"),
                     json.dumps(custom_variables),
+                    # A client that does not send api_url keeps the stored one
+                    "api_url" in environment_data,
+                    (environment_data.get("api_url") or "").strip() or None,
                     environment_id
                 )
             )
@@ -2937,7 +2912,8 @@ async def update_environment(
                 "project_id": environment[5],
                 "created_at": environment[6].isoformat() if environment[6] else None,
                 "updated_at": environment[7].isoformat() if environment[7] else None,
-                "custom_variables": environment[8]
+                "custom_variables": environment[8],
+                "api_url": environment[9]
             }
     except Exception as e:
         if conn:
