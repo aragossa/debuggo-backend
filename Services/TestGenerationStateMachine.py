@@ -118,6 +118,7 @@ class TestGenerationStateMachine:
             },
             State.EXECUTE: {
                 Event.LEARN: State.LEARN,
+                Event.COMPLETE: State.COMPLETE,  # stop_test ends the test right after execution
                 Event.ERROR: State.ERROR,
             },
             State.LEARN: {

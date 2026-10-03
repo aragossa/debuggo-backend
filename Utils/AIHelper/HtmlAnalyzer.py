@@ -663,8 +663,9 @@ PREVIOUS STEP: {prev_step_description}
 
             # Validate required keys
             required_keys = ['element_locator', 'css_selector', 'by_strategy', 'action', 'element_purpose', 'next_step', 'value']
+            # css_selector is a fallback locator the model often leaves out: not worth a warning
             missing_keys = [k for k in required_keys if k not in response]
-            if missing_keys:
+            if [k for k in missing_keys if k != 'css_selector']:
                 self.logger.warning(f"Missing required keys in response: {missing_keys}")
                 # Set default values for missing keys
                 for key in missing_keys:
@@ -851,7 +852,7 @@ PREVIOUS STEP: {prev_step_description}
             # Validate required keys
             required_keys = ['analysis', 'element_locator', 'css_selector', 'by_strategy', 'action', 'element_purpose', 'value', 'next_step']
             missing_keys = [k for k in required_keys if k not in response]
-            if missing_keys:
+            if [k for k in missing_keys if k != 'css_selector']:
                 self.logger.warning(f"Missing required keys in error analysis response: {missing_keys}")
                 # Set default values for missing keys
                 for key in missing_keys:

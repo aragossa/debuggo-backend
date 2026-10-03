@@ -403,6 +403,12 @@ from auroqa.api.requirements_endpoints import set_get_current_user as set_requir
 set_requirements_user(get_current_user)
 app.include_router(requirements_router, tags=["requirements"])
 
+# Step actions for the UI step form (source of truth: TestRunner.execute_step)
+from auroqa.api.step_action_endpoints import router as step_action_router
+from auroqa.api.step_action_endpoints import set_get_current_user as set_step_action_user
+set_step_action_user(get_current_user)
+app.include_router(step_action_router)
+
 # Include Jira routes
 from auroqa.routes.jira_routes import router as jira_router
 app.include_router(jira_router, prefix="/api", tags=["jira"])

@@ -847,16 +847,16 @@ IMPORTANT:
             os.makedirs(page_sources_dir)
             self.logger.info(f"Created directory: {page_sources_dir}")
         
-        # Find the highest existing file number
-        pattern = os.path.join(page_sources_dir, f"{prefix}_*.png")
+        # Find the highest existing file number, whatever the extension
+        pattern = os.path.join(page_sources_dir, f"{prefix}_*.*")
         existing_files = glob.glob(pattern)
         
         max_number = 0
         for file in existing_files:
             try:
                 # Extract the number from the filename
-                filename = os.path.basename(file)
-                number_part = filename.replace(f"{prefix}_", "").replace(".png", "")
+                filename = os.path.splitext(os.path.basename(file))[0]
+                number_part = filename.replace(f"{prefix}_", "")
                 if number_part.isdigit():
                     number = int(number_part)
                     max_number = max(max_number, number)
@@ -871,8 +871,8 @@ IMPORTANT:
         page_sources_dir = os.path.join(os.getcwd(), 'page_sources')
         os.makedirs(page_sources_dir, exist_ok=True)
         
-        # Get the next available file number
-        file_number = self._get_next_file_number(page_sources_dir)
+        # Get the next available file number: one number for the screenshot, prompt and response of a request
+        file_number = max(self._get_next_file_number(prefix) for prefix in ('screenshot', 'text_input', 'text_output'))
         
         if image:
             # Save screenshot

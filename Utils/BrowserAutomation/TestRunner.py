@@ -53,6 +53,9 @@ class TestRunner:
     # Actions that work on the browser itself, not on a page element: no locator needed
     NO_LOCATOR_ACTIONS = {'switch_tab', 'accept_alert', 'dismiss_alert', 'assert_alert_text'}
 
+    class _PageBehindAlert(Exception):
+        """Raised in the generation loop when the page cannot be read because a native alert is open."""
+
     class _SelfHealingSkipped(Exception):
         """Raised inside the self-healing block to leave it without an AI request."""
 
@@ -396,6 +399,7 @@ class TestRunner:
                 """, (test_case_id, result, exception, duration, stdout, stderr))
                 self.test_run_id = cursor.fetchone()[0]
                 connection.commit()
+                return self.test_run_id
 
     def _log_to_quick_run(self, test_case_id: int, status: str, 
                           started_at=None, completed_at=None,
@@ -818,7 +822,7 @@ class TestRunner:
                 # Check if the page has been reloaded
                 self.logger.info(f"[PID:{self.pid}] Checking if page has been reloaded after {action}")
                 if self.browser.wait_for_page_changes():
-                    self.logger.info(f"[PID:{self.pid}] Page was reloaded, waiting 5 seconds for it to stabilize")
+                    self.logger.info(f"[PID:{self.pid}] Page was reloaded, waiting 1 second for it to stabilize")
                     time.sleep(1)
                 else:
                     self.logger.info(f"[PID:{self.pid}] No page reload detected after {action}")
@@ -1973,7 +1977,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         # Attention Mode: Take screenshot if needed
                         if attention_mode and attention_mode.should_take_screenshot():
                             try:
-                                screenshot_path = self.browser.take_screenshot(f"step_{step_order}_attention")
+                                # None while a native alert is open: keep the previous screenshot
+                                screenshot_path = self.browser.take_screenshot(f"step_{step_order}_attention") or screenshot_path
                                 self.logger.debug(f"[PID:{pid}] [AttentionMode] Screenshot taken: {screenshot_path}")
                             except Exception as e:
                                 self.logger.debug(f"[PID:{pid}] [AttentionMode] Screenshot failed: {e}")
@@ -2505,7 +2510,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                 try:
                                     if self.browser.get_alert_text() is not None:
                                         # The page cannot be read behind a native alert: keep the previous HTML and screenshot
-                                        raise RuntimeError("native alert is open, page not re-read")
+                                        raise self._PageBehindAlert()
                                     page_source = self.browser.get_page_source()
                                     screenshot_path = self.browser.take_screenshot()
                                     self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
@@ -2518,6 +2523,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                         screenshot_path, encoded_string, 
                                         f"Screenshot for step {step_order}"
                                     )
+                                except self._PageBehindAlert:
+                                    self.logger.info(f"[PID:{pid}] Native alert is open: page not re-read, step {step_order} has no screenshot")
                                 except Exception as screenshot_error:
                                     self.logger.error(f"[PID:{pid}] Failed to save screenshot: {str(screenshot_error)}")
                                 
@@ -2766,7 +2773,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     try:
                         state_machine.transition(Event.COMPLETE)
                         summary = state_machine.get_summary()
-                        self.logger.info(f"[PID:{pid}] State Machine: NEXT_STEP → COMPLETE")
+                        self.logger.info(f"[PID:{pid}] State Machine: → COMPLETE")
                         self.logger.info(f"[PID:{pid}] State Machine Summary: {summary}")
                     except Exception as e:
                         self.logger.error(f"[PID:{pid}] Failed to transition to COMPLETE state: {e}")
@@ -3424,14 +3431,6 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             # Cleanup browser session immediately after test execution completes
             self.logger.info(f"[PID:{pid}] Cleaning up Selenium session after test execution")
             self._cleanup_browser()
-            
-            # Clear browser cookies and cache to prevent session carryover
-            try:
-                self.logger.info(f"[PID:{pid}] Clearing browser cookies and cache")
-                self.browser.driver.delete_all_cookies()
-                self.logger.info(f"[PID:{pid}] Browser cookies cleared successfully")
-            except Exception as cleanup_error:
-                self.logger.warning(f"[PID:{pid}] Failed to clear browser cookies: {cleanup_error}")
             
             return {
                 "test_run_id": test_run_id,

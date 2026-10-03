@@ -5,7 +5,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException, NoAlertPresentException
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoAlertPresentException, UnexpectedAlertPresentException
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.remote.file_detector import LocalFileDetector
@@ -725,6 +725,10 @@ class BrowserAutomation:
             
         except TimeoutException:
             self.logger.warning(f"[PID:{self.pid}] No page changes detected within {timeout} seconds")
+            return False
+        except UnexpectedAlertPresentException:
+            # An alert that opens with a delay interrupts the wait: that is the page's reaction, not an error
+            self.logger.info(f"[PID:{self.pid}] Native alert opened while waiting for page changes")
             return False
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Error waiting for page changes: {str(e)}")

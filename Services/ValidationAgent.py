@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.BrowserAutomation.StepActions import action_names, needs_locator
 
 
 @dataclass
@@ -69,12 +70,7 @@ class ValidationAgent:
         return {
             'min_selector_length': 5,
             'max_selector_length': 500,
-            'valid_actions': [
-                'click', 'type', 'select', 'submit', 'wait', 'scroll',
-                'hover', 'double_click', 'right_click', 'clear', 'check',
-                'uncheck', 'upload_file', 'take_screenshot', 'verify_text',
-                'verify_element', 'get_text', 'get_attribute', 'execute_script'
-            ],
+            'valid_actions': sorted(action_names()),
             'valid_by_strategies': ['xpath', 'css', 'id', 'name', 'class', 'tag'],
             'hardcoded_patterns': [
                 r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}',  # IP addresses
@@ -107,7 +103,7 @@ class ValidationAgent:
             
             # API steps don't need element_locator, only UI steps do
             is_api_step = step.get('method') or step.get('endpoint')
-            if not step.get('element_locator') and step.get('action') not in ['wait', 'scroll', 'execute_script', 'submit'] and not is_api_step:
+            if not step.get('element_locator') and needs_locator(step.get('action')) and not is_api_step:
                 errors.append("Missing 'element_locator' field for action that requires it")
                 confidence -= 20
             

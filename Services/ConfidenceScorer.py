@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.BrowserAutomation.StepActions import action_names
 
 
 @dataclass
@@ -135,8 +136,8 @@ class ConfidenceScorer:
         """Score selector quality."""
         score = 50.0  # Base score
         
-        xpath = step.get('element_locator', '')
-        css = step.get('css_selector', '')
+        xpath = (step.get('element_locator') or '')
+        css = (step.get('css_selector') or '')
         
         # Has XPath
         if xpath:
@@ -184,23 +185,11 @@ class ConfidenceScorer:
         """Score action validity."""
         score = 50.0  # Base score
         
-        action = step.get('action', '').lower()
+        action = (step.get('action') or '').lower()
         
-        # Valid actions
-        valid_actions = {
-            'click': 20,
-            'type': 18,
-            'select': 18,
-            'submit': 15,
-            'wait': 10,
-            'scroll': 12,
-            'hover': 15,
-            'verify_text': 15,
-            'verify_element': 15,
-            'get_text': 12,
-            'take_screenshot': 10,
-            'execute_script': 8,
-        }
+        # Known actions: every catalogued action counts, the common ones a bit more
+        valid_actions = {name: 15 for name in action_names()}
+        valid_actions.update({'click': 20, 'type': 18, 'select': 18, 'wait': 10})
         
         if action in valid_actions:
             score += valid_actions[action]
@@ -228,7 +217,7 @@ class ConfidenceScorer:
         """Score data quality."""
         score = 50.0  # Base score
         
-        value = step.get('value', '')
+        value = (step.get('value') or '')
         
         # Check for proper variable usage
         if value:
@@ -268,7 +257,7 @@ class ConfidenceScorer:
         """Score pattern match with known patterns."""
         score = 50.0  # Base score
         
-        action = step.get('action', '').lower()
+        action = (step.get('action') or '').lower()
         
         # Common patterns that work well
         common_patterns = {
@@ -279,7 +268,7 @@ class ConfidenceScorer:
         }
         
         # Check if step matches known patterns
-        element = step.get('element_locator', '').lower()
+        element = (step.get('element_locator') or '').lower()
         
         for pattern_name, keywords in common_patterns.items():
             if any(keyword in element or keyword == action for keyword in keywords):
@@ -297,7 +286,7 @@ class ConfidenceScorer:
     
     def _calculate_complexity(self, step: Dict[str, Any]) -> str:
         """Calculate step complexity."""
-        xpath = step.get('element_locator', '')
+        xpath = (step.get('element_locator') or '')
         
         # Count complexity factors
         factors = 0
