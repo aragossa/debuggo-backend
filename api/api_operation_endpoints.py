@@ -5,6 +5,7 @@ GET  /api/projects/{project_id}/api-operations      - the API calls of a project
 POST /api/api-schemas/{schema_id}/operations/sync   - rebuild the calls of one schema
 
 POST /api/api-schemas/{schema_id}/baseline-tests    - create the baseline API tests of one schema, without AI
+GET  /api/api-schemas/{schema_id}/coverage          - which calls of a schema the tests send, and how well
 POST /api/api-schemas/{schema_id}/scenario-ideas    - ask the model for more complex test scenarios of a schema
 POST /api/api-schemas/{schema_id}/scenario-tests    - create the chosen scenarios as API tests and generate their steps
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 from auroqa.models.user import User
 from auroqa.Services.ApiOperationLibrary import list_operations, sync_operations
 from auroqa.Services.ApiBaselineTests import generate_baseline_tests
+from auroqa.Services.ApiCoverage import schema_coverage
 from auroqa.Services.ApiScenarioIdeas import create_scenario_tests, queue_generation, suggest_scenarios
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 
@@ -206,3 +208,25 @@ async def create_scenario_api_tests(
         logger.error(f"Error creating API scenario tests: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create API scenario tests: {str(e)}")
     return {"success": True, **result}
+
+
+@router.get("/api-schemas/{schema_id}/coverage")
+async def get_schema_coverage(
+    schema_id: int,
+    current_user: User = Depends(get_current_user_from_token)
+):
+    """
+    Coverage of a schema by the tests of its project: per call, the tests that send it, the statuses
+    they expect and whether the last run passed. Built by code, no AI.
+    """
+    client_id = str(current_user.client_id)
+    found = _schema_ids(client_id, schema_id=schema_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="API schema not found or access denied")
+    try:
+        if found[0][1] == 0:
+            sync_operations(schema_id)
+        return await run_in_threadpool(schema_coverage, schema_id, client_id)
+    except Exception as e:
+        logger.error(f"Error building API coverage: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to build API coverage: {str(e)}")

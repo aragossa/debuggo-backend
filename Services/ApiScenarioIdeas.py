@@ -54,7 +54,8 @@ def _existing_tests(schema_name: str, project_id: str, client_id: str) -> List[s
             return [f"- {name}: {description[:160]}" for name, description in cursor.fetchall()]
 
 
-def build_ideas_prompt(schema_name: str, operations: List[Dict], existing: List[str], count: int) -> str:
+def build_ideas_prompt(schema_name: str, operations: List[Dict], existing: List[str], count: int,
+                       uncovered: Optional[List[str]] = None) -> str:
     login = _find_login(operations)
     calls = '\n'.join(describe_operation(op, login is not None and op['id'] == login['id'])
                       for op in operations[:MAX_CALLS_IN_PROMPT])
@@ -62,6 +63,8 @@ def build_ideas_prompt(schema_name: str, operations: List[Dict], existing: List[
                  'environment (a regular user, maybe an admin).' if login else
                  'Calls marked "auth" cannot be authorized here: do not suggest scenarios that need them.')
     existing_text = '\n'.join(existing[:200]) or '(none)'
+    uncovered_text = (f"\nCALLS NO TEST USES YET (prefer scenarios that use them, where a real scenario exists):\n"
+                      f"{', '.join(uncovered[:60])}\n") if uncovered else ''
     return f"""You are a senior API test engineer. Suggest API test scenarios for the API "{schema_name}".
 
 API CALLS (name: METHOD path — what it does | body: example | returns status and response fields):
@@ -70,7 +73,7 @@ API CALLS (name: METHOD path — what it does | body: example | returns status a
 TESTS THAT ALREADY EXIST OR WERE ALREADY SUGGESTED (do not repeat them or suggest variants of them; simple read checks and create-read-update-delete chains of one
 resource are already covered):
 {existing_text}
-
+{uncovered_text}
 Suggest up to {count} scenarios that find real bugs and go beyond those tests:
 - flows across several resources, where data created by one call is used by another
   (an item that refers to another one, a list or a search that must show what was just created);
@@ -121,7 +124,9 @@ def suggest_scenarios(schema_id: int, client_id: str, model_name: Optional[str] 
     existing = _existing_tests(schema['name'], schema['project_id'], client_id)
     existing += [f"- {str(idea.get('name') or '')[:120]}: {str(idea.get('description') or '')[:160]}"
                  for idea in exclude or [] if idea.get('name')]
-    prompt = build_ideas_prompt(schema['name'], operations, existing, count)
+    from auroqa.Services.ApiCoverage import uncovered_operations
+    prompt = build_ideas_prompt(schema['name'], operations, existing, count,
+                                uncovered_operations(schema_id, client_id))
     logger.info(f"Scenario ideas for schema {schema_id}: {len(operations)} calls, {len(existing)} existing tests, "
                 f"prompt {len(prompt)} chars")
 
