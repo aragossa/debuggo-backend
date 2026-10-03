@@ -17,6 +17,25 @@ else:
     from auroqa.Utils.AIHelper.AIHelper import AIHelper
 
 
+def detect_schema_type(schema: Any) -> Optional[str]:
+    """
+    Tell the format of a parsed API schema from its content: 'openapi', 'swagger', 'postman', or None.
+
+    The formats mark themselves: OpenAPI 3.x has an "openapi" version key, Swagger 2.0 a "swagger"
+    one, a Postman collection carries its own schema URL in "info".
+    """
+    if not isinstance(schema, dict):
+        return None
+    if 'openapi' in schema:
+        return 'openapi'
+    if 'swagger' in schema:
+        return 'swagger'
+    info = schema.get('info')
+    if isinstance(info, dict) and ('_postman_id' in info or 'getpostman.com' in str(info.get('schema', ''))):
+        return 'postman'
+    return None
+
+
 class ApiSchemaService:
     """
     Service for analyzing API schemas and generating test cases with steps.
@@ -171,6 +190,7 @@ class ApiSchemaService:
             
             # Extract base path from servers or basePath
             base_path = ""
+            base_path_declared = False
             if 'servers' in schema and len(schema['servers']) > 0:
                 # OpenAPI 3.0 format
                 server_url = schema['servers'][0].get('url', '')
@@ -179,13 +199,15 @@ class ApiSchemaService:
                     from urllib.parse import urlparse
                     parsed = urlparse(server_url)
                     base_path = parsed.path.rstrip('/')
+                    base_path_declared = True
             elif 'basePath' in schema:
                 # Swagger 2.0 format
                 base_path = schema['basePath'].rstrip('/')
+                base_path_declared = True
             
-            # If no base path found, check if paths start with /api
-            # If not, assume /api prefix is needed
-            if not base_path and 'paths' in schema:
+            # If the schema declares no server at all, check if paths start with /api
+            # If not, assume /api prefix is needed. A declared server without a path means no prefix.
+            if not base_path and not base_path_declared and 'paths' in schema:
                 first_path = next(iter(schema['paths'].keys()), '')
                 if first_path and not first_path.startswith('/api'):
                     base_path = '/api'

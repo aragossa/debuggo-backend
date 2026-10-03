@@ -714,15 +714,15 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                 }
                 grouped_items.append(ui_group)
             
-            if api_cases:
-                api_group = {
-                    'id': 'api_group', 
-                    'name': 'API Tests',
-                    'type': 'type_group',
-                    'test_type': 'api',
-                    'children': api_cases
-                }
-                grouped_items.append(api_group)
+            # Always present: its "+" is the only place in the UI where an API test can be created
+            api_group = {
+                'id': 'api_group', 
+                'name': 'API Tests',
+                'type': 'type_group',
+                'test_type': 'api',
+                'children': api_cases
+            }
+            grouped_items.append(api_group)
             
             return grouped_items
 
@@ -871,7 +871,7 @@ async def run_test_case(
         # Route to appropriate executor based on test type
         if test_type == 'api' or test_type == 'api_test':
             # Use API test executor
-            from auroqa.Services.ApiTestExecutor import ApiTestExecutor
+            from auroqa.Services.ApiTestExecutor import run_api_test_case
             
             if not environment_vars:
                 raise HTTPException(
@@ -879,13 +879,13 @@ async def run_test_case(
                     detail="API tests require an environment to be selected"
                 )
             
-            executor = ApiTestExecutor(
-                test_case_id=id,
-                environment_vars=environment_vars
-            )
-            
             # Execute API test synchronously (can be made async later)
-            result = executor.execute_test_case(execution_id=execution_id)
+            result = run_api_test_case(
+                test_case_id=id,
+                environment_vars=environment_vars,
+                execution_id=execution_id,
+                quick_run_id=quick_run_id
+            )
             
             return JSONResponse(content={
                 "success": result['success'],
@@ -1761,12 +1761,16 @@ async def upload_api_schema(
         
         # Validate JSON
         try:
-            json.loads(content_str)
+            schema_json = json.loads(content_str)
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid JSON format"
             )
+        
+        # The file says what it is; the form value is only a fallback for an unknown format
+        from auroqa.Services.ApiSchemaService import detect_schema_type
+        schema_type = detect_schema_type(schema_json) or schema_type
         
         # Save to database
         with get_db_connection_context() as conn:
@@ -2720,15 +2724,15 @@ async def get_project_test_tree(
                 }
                 grouped_items.append(ui_group)
             
-            if api_cases:
-                api_group = {
-                    'id': 'api_group', 
-                    'name': 'API Tests',
-                    'type': 'type_group',
-                    'test_type': 'api',
-                    'children': api_cases
-                }
-                grouped_items.append(api_group)
+            # Always present: its "+" is the only place in the UI where an API test can be created
+            api_group = {
+                'id': 'api_group', 
+                'name': 'API Tests',
+                'type': 'type_group',
+                'test_type': 'api',
+                'children': api_cases
+            }
+            grouped_items.append(api_group)
             
             return grouped_items
     except Exception as e:

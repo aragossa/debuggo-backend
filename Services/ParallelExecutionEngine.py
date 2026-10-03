@@ -420,6 +420,7 @@ class ParallelExecutionEngine:
             
             # Import TestRunner here to avoid circular imports
             from auroqa.Utils.BrowserAutomation.TestRunner import TestRunner
+            from auroqa.Services.ApiTestExecutor import run_api_test_case
             
             for test_case in test_cases:
                 test_case_id = test_case.get('test_case_id')
@@ -432,6 +433,21 @@ class ParallelExecutionEngine:
                 
                 try:
                     self.logger.info(f"Running test case {test_case_id} in suite {suite_id} with environment {environment_id}")
+                    
+                    # API tests have their own executor: the browser runner cannot run their steps
+                    if test_case.get('test_type') in ('api', 'api_test'):
+                        api_result = run_api_test_case(
+                            test_case_id=test_case_id,
+                            environment_vars=self._get_environment_vars(environment_id) if environment_id else None,
+                            environment_id=environment_id,
+                            quick_run_id=run_id,
+                            suite_id=suite_id
+                        )
+                        if api_result.get('success'):
+                            passed_tests += 1
+                        else:
+                            failed_tests += 1
+                        continue
                     
                     # Create TestRunner and execute test
                     runner = TestRunner(user_id="system", test_case_id=test_case_id)

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import requests
 from datetime import datetime
 from typing import Dict, Any, Optional, List
@@ -472,13 +473,18 @@ class ApiTestExecutor:
         if path.startswith('$.'):
             path = path[2:]
         
-        # Simple dot notation support
-        keys = path.split('.')
+        elif path.startswith('$'):
+            path = path[1:]  # "$[0].id": the response is a list
+        
+        # Dot notation with list indexes: "data[0].id" -> data, 0, id
+        keys = [key for key in re.split(r'\.|\[(\d+)\]', path) if key]
         value = data
         
         for key in keys:
             if isinstance(value, dict):
                 value = value.get(key)
+            elif isinstance(value, list) and key.isdigit() and int(key) < len(value):
+                value = value[int(key)]
             else:
                 return None
                 
@@ -604,3 +610,41 @@ class ApiTestExecutor:
             self.logger.error(f"Error saving step result: {str(e)}")
             # Don't fail the test execution if saving result fails
             pass
+
+
+def run_api_test_case(test_case_id: int, environment_vars: Optional[Dict[str, Any]] = None,
+                      environment_id: Optional[int] = None, execution_id: Optional[int] = None,
+                      quick_run_id: Optional[int] = None, suite_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Run an API test case and, when it is part of a quick run or a plan run, log its result there.
+
+    The single entry point for running an API test: the run endpoint and the plan engine both use it,
+    so an API test behaves the same alone and inside a suite.
+    """
+    started_at = datetime.now()
+    if not environment_vars:
+        # Without a base URL every relative endpoint would fail with an unreadable network error
+        result = {'success': False, 'test_run_id': None, 'error': 'API tests require an environment'}
+    else:
+        executor = ApiTestExecutor(test_case_id=test_case_id, environment_vars=environment_vars,
+                                   environment_id=environment_id)
+        result = executor.execute_test_case(execution_id=execution_id)
+
+    if quick_run_id:
+        try:
+            from auroqa.Services.QuickRunService import QuickRunService
+            completed_at = datetime.now()
+            QuickRunService().log_test_run_result(
+                run_id=quick_run_id,
+                test_case_id=test_case_id,
+                status='passed' if result.get('success') else 'failed',
+                suite_id=suite_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_seconds=(completed_at - started_at).total_seconds(),
+                error_message=result.get('error')
+            )
+        except Exception as e:
+            logging.getLogger('ApiTestExecutor').error(f"Failed to log API test {test_case_id} to run {quick_run_id}: {e}")
+
+    return result

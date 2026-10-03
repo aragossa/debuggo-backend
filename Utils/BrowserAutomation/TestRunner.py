@@ -50,8 +50,8 @@ class TestRunner:
         'api_delete', 'api_patch', 'response_validation', 'validation'
     }
 
-    # Actions that work on the browser itself, not on a page element: no locator needed
-    NO_LOCATOR_ACTIONS = {'switch_tab', 'accept_alert', 'dismiss_alert', 'assert_alert_text'}
+    # Actions that work on the browser itself (or, for api_request, without it), not on a page element: no locator needed
+    NO_LOCATOR_ACTIONS = {'switch_tab', 'accept_alert', 'dismiss_alert', 'assert_alert_text', 'api_request'}
 
     class _PageBehindAlert(Exception):
         """Raised in the generation loop when the page cannot be read because a native alert is open."""
@@ -688,6 +688,78 @@ class TestRunner:
             self.logger.error(f"[PID:{self.pid}] ❌ All click strategies failed")
             raise Exception(f"Failed to click element. XPath: {xpath_selector}, CSS: {css_selector}. Error: {str(e)}")
 
+    def _start_variable_session(self, environment_vars):
+        """Drop the variables of the previous run and keep the environment for api_request steps."""
+        self.current_environment_vars = environment_vars or {}
+        self.session_variables = {}
+
+    def _substitute_in_request(self, data, env_helper):
+        """Substitute %variables% in every string of a parsed api_request, the same way as in UI step values."""
+        if isinstance(data, dict):
+            return {key: self._substitute_in_request(item, env_helper) for key, item in data.items()}
+        if isinstance(data, list):
+            return [self._substitute_in_request(item, env_helper) for item in data]
+        if not isinstance(data, str):
+            return data
+        if env_helper:
+            data = env_helper.process_variables(data)
+        if self.variable_manager:
+            data = self.variable_manager.substitute_variables(
+                data,
+                client_id=getattr(self, 'current_client_id', None),
+                project_id=getattr(self, 'current_project_id', None),
+                environment_id=getattr(self, 'current_environment_id', None),
+                session_variables=self.session_variables
+            )
+        return data
+
+    def _execute_api_request(self, value, env_helper=None):
+        """
+        Send the HTTP request of an api_request step in a UI test.
+
+        The request is JSON in the step value, with the fields of an API test step:
+        {"method": "POST", "endpoint": "http://host/users/login", "headers": {...}, "body": {...},
+         "expected_status": 200, "extract_variables": {"access_token": "$.access_token"}}
+        The request goes out from the backend, not from the browser. Extracted variables land in
+        self.session_variables, so later steps of either kind can use them as %name%.
+        """
+        example = '{"method": "GET", "endpoint": "https://api.example.com/items", "expected_status": 200}'
+        try:
+            request = json.loads(value) if isinstance(value, str) else value
+        except json.JSONDecodeError as e:
+            raise ValueError(f"[PID:{self.pid}] api_request value is not valid JSON ({e}); expected e.g. {example}")
+        if not isinstance(request, dict) or not request.get('endpoint'):
+            raise ValueError(f"[PID:{self.pid}] api_request needs JSON with an \"endpoint\" in value, e.g. {example}")
+
+        # Substituted here, per field and after parsing: a value with quotes cannot break the JSON,
+        # and %random_email% is the same one the UI steps of this run get
+        request = self._substitute_in_request(request, env_helper)
+
+        from auroqa.Services.ApiTestExecutor import ApiTestExecutor
+        executor = ApiTestExecutor(
+            test_case_id=self.test_case_id,
+            environment_vars=getattr(self, 'current_environment_vars', None),
+            client_id=getattr(self, 'current_client_id', None),
+            project_id=getattr(self, 'current_project_id', None),
+            environment_id=getattr(self, 'current_environment_id', None)
+        )
+        executor.session_variables = self.session_variables  # one dict for UI and API steps
+        # A variable that was not found in the response must fail the step, not reach later steps as a literal %name%
+        wanted = list((request.get('extract_variables') or {}).keys())
+        for name in wanted:
+            self.session_variables.pop(name, None)
+        result = executor._execute_api_request({'step_order': 0, 'element_path': ''}, request)
+        target = f"{str(request.get('method', 'GET')).upper()} {request.get('endpoint')}"
+        if not result.get('success'):
+            body = result.get('response_body')
+            raise Exception(f"[PID:{self.pid}] api_request {target} failed: {result.get('error')}"
+                            + (f"; response: {body}" if body else ""))
+        missing = [name for name in wanted if name not in self.session_variables]
+        if missing:
+            raise Exception(f"[PID:{self.pid}] api_request {target}: not found in the response: "
+                            + ", ".join(f"{name} ({request['extract_variables'][name]})" for name in missing)
+                            + f"; response: {result.get('response_body')}")
+
     def execute_step(self, action: str, element_path: str = None, value: str = None, by_strategy: str = None, env_helper=None, css_selector: str = None):
         """
         Execute a test step with the given action.
@@ -702,6 +774,12 @@ class TestRunner:
             css_selector (str): The CSS selector for the element (FALLBACK)
         """
         try:
+            if action == "api_request":
+                # Variables are substituted inside, after the JSON is parsed
+                self.logger.info(f"[PID:{self.pid}] Executing api_request: {value}")
+                self._execute_api_request(value, env_helper)
+                return
+
             # Process environment variables if env_helper is provided
             if env_helper:
                 if element_path:
@@ -892,6 +970,7 @@ class TestRunner:
         
         # Initialize environment helper with provided variables
         env = EnvHelper(environment_vars)
+        self._start_variable_session(environment_vars)
         
         # Log environment variables for debugging
         if environment_vars:
@@ -1834,6 +1913,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 
                 # Create environment helper
                 env = EnvHelper(environment_vars or {})
+                self._start_variable_session(environment_vars)
                 
                 # Set up HTML analyzer if not already initialized
                 if not self.html_analyzer:
@@ -2067,6 +2147,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                         # New format (7-tuple) with CSS fallback
                                         next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
+                                    # The model may send the request of an api_request step as an object; steps store text
+                                    if isinstance(value, (dict, list)):
+                                        value = json.dumps(value)
+
                                     self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                     
                                     # Confidence-based Decision Making
@@ -3084,6 +3168,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
         
         # Initialize environment helper with provided variables
         env = EnvHelper(environment_vars)
+        self._start_variable_session(environment_vars)
         
         # Log environment variables for debugging
         if environment_vars:

@@ -57,7 +57,16 @@ STEP_ACTIONS = [
         needs_locator=False, needs_value="required", value_hint="Exact alert text"),
 ]
 
-_API_ACTIONS = ["api_request", "api_auth", "api_get", "api_post", "api_put", "api_delete", "api_patch",
+# In a UI test the request of an api_request step is JSON in the value; in an API test it is in the description
+STEP_ACTIONS.append(dict(
+    name="api_request", label="API request", group="API",
+    description="Send an HTTP request from the test; variables extracted from the response work in later steps as %name%",
+    needs_locator=False, needs_value="optional",
+    value_hint='{"method": "GET", "endpoint": "full URL", "headers": {}, "body": {}, "expected_status": 200, '
+               '"extract_variables": {"item_id": "$.id"}}',
+    test_types=["ui", "api"]))
+
+_API_ACTIONS = ["api_auth", "api_get", "api_post", "api_put", "api_delete", "api_patch",
                 "response_validation", "validation"]
 STEP_ACTIONS += [
     dict(name=name, label=name.replace("_", " "), group="API", description="Step of an API test",

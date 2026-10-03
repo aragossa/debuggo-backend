@@ -450,7 +450,10 @@ You MUST ONLY use these valid actions. NO OTHER ACTIONS ARE ALLOWED:
   e.g. "//div[@id='droppable']"; works for sortable lists and native HTML5 draggables; fails if nothing moved)
 - File upload: upload_file (element_locator is the <input type="file"> itself, "value" is a sample file name:
   "sample.txt", "sample.png", "sample.pdf" or "sample.csv"; NEVER click a file input)
-- API Actions: api_request, api_auth, api_get, api_post, api_put, api_delete, api_patch, response_validation, validation
+- API request: api_request (an HTTP request sent by the test itself, not through the browser; element_locator is "N/A",
+  "value" is a JSON string: {"method": "POST", "endpoint": "full URL", "headers": {}, "body": {}, "expected_status": 201,
+  "extract_variables": {"item_id": "$.id"}}; an extracted variable is used in later steps as %item_id%;
+  use it ONLY when the test description asks for an API request and gives its URL)
 
 ❌ DO NOT use these invalid actions:
 - assert_element_is_visible (WRONG - use wait_for_element_to_be_visible instead)
@@ -464,7 +467,7 @@ Your response MUST be a valid JSON object with ALL of the following required fie
     "element_locator": "XPath selector to locate the element (PRIMARY locator)",
     "css_selector": "CSS selector to locate the same element (FALLBACK locator)",
     "by_strategy": "xpath",
-    "action": "click, type, select, hover, wait, assert, assert_text_contains, assert_attribute, switch_tab, accept_alert, dismiss_alert, assert_alert_text, drag_and_drop, upload_file, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
+    "action": "click, type, select, hover, wait, assert, assert_text_contains, assert_attribute, switch_tab, accept_alert, dismiss_alert, assert_alert_text, drag_and_drop, upload_file, api_request, scroll, clear, navigate, press_key, use_component, wait_for_element_to_be_visible, wait_for_element_visible, wait_for_modal, wait_for_clickable",
     "element_purpose": "Brief description of what this step does (e.g., 'verify error message is displayed')",
     "value": "For type actions: MUST use placeholders like %login%, %random_email%, %unique_name:Prefix% (ALWAYS with % on BOTH sides)",
     "next_step": "Description of what to verify next, or 'Stop' if test is complete"

@@ -115,7 +115,8 @@ class ValidationAgent:
             
             # Validate selector
             selector = step.get('element_locator', '')
-            if selector:
+            # A step without an element carries "N/A" there: nothing to check
+            if selector and needs_locator(action):
                 selector_validation = self._validate_selector(selector, step.get('css_selector'))
                 errors.extend(selector_validation['errors'])
                 warnings.extend(selector_validation['warnings'])
