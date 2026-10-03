@@ -13,6 +13,14 @@ from typing import Any, Dict, Optional
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 
 
+def with_scheme(url: Optional[str]) -> Optional[str]:
+    """An address typed without a scheme ("host:8091") as a URL: http:// is assumed. Empty stays None."""
+    url = (url or '').strip()
+    if not url:
+        return None
+    return url if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', url) else f"http://{url}"
+
+
 def load_environment_vars(environment_id: Optional[int], client_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Variables of an environment, or None when it does not exist.
@@ -40,14 +48,14 @@ def load_environment_vars(environment_id: Optional[int], client_id: Optional[str
         "login": row[1],
         "password": row[2],
         "custom_variables": row[3] or {},
-        "api_url": row[4] or None,
+        "api_url": with_scheme(row[4]),
     }
 
 
 def api_base_url(environment_vars: Optional[Dict[str, Any]]) -> str:
     """Where relative API endpoints go: the environment's API address, or its base_url when it has none."""
     environment_vars = environment_vars or {}
-    return (environment_vars.get("api_url") or environment_vars.get("base_url") or "").rstrip("/")
+    return (with_scheme(environment_vars.get("api_url") or environment_vars.get("base_url")) or "").rstrip("/")
 
 
 def reachable_url(url: str) -> str:

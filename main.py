@@ -60,7 +60,7 @@ from auroqa.test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
-from auroqa.Utils.Environments import load_environment_vars
+from auroqa.Utils.Environments import load_environment_vars, with_scheme
 from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
 from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
@@ -2838,7 +2838,7 @@ async def create_environment(
                     environment_data.get("password"),
                     project_id,
                     json.dumps(custom_variables),
-                    (environment_data.get("api_url") or "").strip() or None
+                    with_scheme(environment_data.get("api_url"))
                 )
             )
             environment = cursor.fetchone()
@@ -2915,7 +2915,7 @@ async def update_environment(
                     json.dumps(custom_variables),
                     # A client that does not send api_url keeps the stored one
                     "api_url" in environment_data,
-                    (environment_data.get("api_url") or "").strip() or None,
+                    with_scheme(environment_data.get("api_url")),
                     environment_id
                 )
             )
