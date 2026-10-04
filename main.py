@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, UUID4
 from datetime import datetime
 import psycopg2
@@ -60,6 +60,8 @@ from auroqa.test_case_builder import get_tests_tree, build_tree
 from jose import JWTError, jwt
 import asyncio
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection, init_db_pool, get_db_connection_context, get_pool_status, close_db_pool
+from auroqa.Utils.Environments import load_environment_vars, with_scheme
+from auroqa.Utils.GenerationStatus import clear_generation_error, get_generation_error
 from auroqa.Services.AgentMonitoring import AgentMonitoring
 from auroqa.Services.TestExecutionService import TestExecutionService
 from auroqa.Services.PerformanceOptimizer import PerformanceOptimizer
@@ -174,6 +176,9 @@ class CreateTestGroupRequest(BaseModel):
     name: str
     parent_id: Optional[int] = None
     project_id: Optional[UUID4] = None
+    # 'ui' or 'api': the section of the tree an empty group is shown in.
+    # Not given: the type of the parent group, 'ui' for a top-level group.
+    test_type: Optional[Literal['ui', 'api']] = None
 
 class UpdateTestGroupRequest(BaseModel):
     name: str
@@ -408,6 +413,18 @@ from auroqa.api.step_action_endpoints import router as step_action_router
 from auroqa.api.step_action_endpoints import set_get_current_user as set_step_action_user
 set_step_action_user(get_current_user)
 app.include_router(step_action_router)
+
+# Library of API calls built from uploaded API schemas
+from auroqa.api.api_operation_endpoints import router as api_operation_router
+from auroqa.api.api_operation_endpoints import set_get_current_user as set_api_operation_user
+set_api_operation_user(get_current_user)
+app.include_router(api_operation_router)
+
+# Why the last generation of a test case stopped
+from auroqa.api.generation_status_endpoints import router as generation_status_router
+from auroqa.api.generation_status_endpoints import set_get_current_user as set_generation_status_user
+set_generation_status_user(get_current_user)
+app.include_router(generation_status_router)
 
 # Include Jira routes
 from auroqa.routes.jira_routes import router as jira_router
@@ -690,8 +707,10 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                                     'children': api_children
                                 }
                                 api_items.append(api_group_copy)
+                        elif item.get('test_type') == 'api':
+                            # Empty group - placed by its own type
+                            api_items.append(item)
                         else:
-                            # Empty group - default to UI
                             ui_items.append(item)
                     else:
                         # Other types (root, etc.) - default to UI
@@ -847,26 +866,7 @@ async def run_test_case(
         # If environment_id is provided, fetch environment variables
         if request_data and "environment_id" in request_data:
             environment_id_param = request_data.get("environment_id")
-            with get_db_connection_context() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password, e.custom_variables
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (environment_id_param, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2],
-                            "custom_variables": env_data[3] or {}
-                        }
+            environment_vars = load_environment_vars(environment_id_param, str(current_user.client_id)) or {}
         
         # Route to appropriate executor based on test type
         if test_type == 'api' or test_type == 'api_test':
@@ -1120,29 +1120,7 @@ async def generate_steps(
         # Set up environment variables if environment_id is provided
         environment_vars = {}
         if request_data and request_data.environment_id:
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (request_data.environment_id, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2]
-                        }
-            finally:
-                if conn:
-                    return_db_connection(conn)
+            environment_vars = load_environment_vars(request_data.environment_id, str(current_user.client_id)) or {}
         
         # Get the AI model ID and VLM setting to use
         ai_model_id = None
@@ -1201,7 +1179,9 @@ async def generate_steps(
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
+        use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        clear_generation_error(id)
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
         
@@ -1270,29 +1250,7 @@ async def confirm_generate_steps(
         # Set up environment variables if environment_id is provided
         environment_vars = {}
         if request_data and request_data.environment_id:
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT e.base_url, e.login, e.password
-                        FROM environments e
-                        JOIN projects p ON e.project_id = p.id
-                        WHERE e.id = %s AND p.client_id = %s
-                        """,
-                        (request_data.environment_id, str(current_user.client_id))
-                    )
-                    env_data = cursor.fetchone()
-                    
-                    if env_data:
-                        environment_vars = {
-                            "base_url": env_data[0],
-                            "login": env_data[1],
-                            "password": env_data[2]
-                        }
-            finally:
-                if conn:
-                    return_db_connection(conn)
+            environment_vars = load_environment_vars(request_data.environment_id, str(current_user.client_id)) or {}
         
         # Get the AI model ID and VLM setting to use
         ai_model_id = None
@@ -1351,7 +1309,9 @@ async def confirm_generate_steps(
                 if conn:
                     return_db_connection(conn)
         # Start the test step generation in a separate thread
-        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled))
+        use_api = True if not request_data or request_data.use_api is None else bool(request_data.use_api)
+        clear_generation_error(id)
+        thread = Thread(target=runner.generate_test_steps, args=(id, environment_vars, ai_model_id, vlm_enabled, use_api))
         thread.daemon = True
         thread.start()
         
@@ -1451,15 +1411,33 @@ If no specific endpoint is mentioned, use standard REST patterns.
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
         
+        # The model for the generation: the one picked in the request, else the user's preferred one,
+        # else the default (same order as for UI tests)
+        model_name = None
+        requested_model = request_data.get('ai_model_id') if request_data else None
+        requested_model = int(requested_model) if str(requested_model or '').isdigit() else None
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT m.model_id FROM ai_models m
+                    WHERE m.is_active = TRUE AND m.id = COALESCE(
+                        %s, (SELECT ai_model_id FROM user_ai_models WHERE user_id = %s LIMIT 1))
+                """, (requested_model, current_user.id))
+                model_row = cursor.fetchone()
+                if model_row:
+                    model_name = model_row[0]
+        
         message = {
             'request_type': 'generate_api_test_steps',
             'test_case_id': test_case_id,
             'schema_content': schema_content,
             'client_id': str(current_user.client_id),
             'project_id': str(project_id),
-            'environment_id': environment_id
+            'environment_id': environment_id,
+            'model_name': model_name
         }
         
+        clear_generation_error(test_case_id)
         producer.send('user_requests', value=message)
         producer.flush()
         producer.close()
@@ -1772,34 +1750,56 @@ async def upload_api_schema(
         from auroqa.Services.ApiSchemaService import detect_schema_type
         schema_type = detect_schema_type(schema_json) or schema_type
         
-        # Save to database
+        # Save to database. A schema uploaded again under the same name replaces the old content,
+        # so the project keeps one schema per name and the calls keep their ids.
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    INSERT INTO api_schemas (
-                        project_id, client_id, name, description, 
-                        schema_type, content, created_by
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    project_id,
-                    str(current_user.client_id),
-                    name,
-                    description,
-                    schema_type,
-                    content_str,
-                    current_user.id
-                ))
+                    SELECT id FROM api_schemas
+                    WHERE project_id = %s AND client_id = %s AND name = %s
+                    ORDER BY id DESC LIMIT 1
+                """, (project_id, str(current_user.client_id), name))
+                existing = cursor.fetchone()
                 
-                schema_id = cursor.fetchone()[0]
+                if existing:
+                    schema_id = existing[0]
+                    cursor.execute("""
+                        UPDATE api_schemas
+                        SET content = %s, schema_type = %s, description = COALESCE(NULLIF(%s, ''), description)
+                        WHERE id = %s
+                    """, (content_str, schema_type, description, schema_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO api_schemas (
+                            project_id, client_id, name, description, 
+                            schema_type, content, created_by
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        project_id,
+                        str(current_user.client_id),
+                        name,
+                        description,
+                        schema_type,
+                        content_str,
+                        current_user.id
+                    ))
+                    schema_id = cursor.fetchone()[0]
                 conn.commit()
         
-        logger.info(f"Uploaded API schema {schema_id} for project {project_id}")
+        # Build the library of API calls from the schema (by code, no AI)
+        from auroqa.Services.ApiOperationLibrary import sync_operations
+        operations_count = sync_operations(schema_id)
+        
+        logger.info(f"Uploaded API schema {schema_id} for project {project_id}: {operations_count} calls")
         
         return JSONResponse(content={
             "success": True,
             "schema_id": schema_id,
-            "message": f"API schema '{name}' uploaded successfully"
+            "schema_type": schema_type,
+            "updated": bool(existing),
+            "operations_count": operations_count,
+            "message": f"API schema '{name}' {'updated' if existing else 'uploaded'} successfully"
         })
         
     except HTTPException:
@@ -1821,10 +1821,11 @@ async def list_api_schemas(
         with get_db_connection_context() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT id, name, description, schema_type, created_at
-                    FROM api_schemas
-                    WHERE project_id = %s AND client_id = %s
-                    ORDER BY created_at DESC
+                    SELECT s.id, s.name, s.description, s.schema_type, s.created_at,
+                           (SELECT COUNT(*) FROM api_operations o WHERE o.schema_id = s.id)
+                    FROM api_schemas s
+                    WHERE s.project_id = %s AND s.client_id = %s
+                    ORDER BY s.created_at DESC
                 """, (project_id, str(current_user.client_id)))
                 
                 rows = cursor.fetchall()
@@ -1835,7 +1836,8 @@ async def list_api_schemas(
                         "name": row[1],
                         "description": row[2],
                         "schema_type": row[3],
-                        "created_at": row[4].isoformat() if row[4] else None
+                        "created_at": row[4].isoformat() if row[4] else None,
+                        "operations_count": row[5]
                     })
                 
                 return JSONResponse(content={"schemas": schemas})
@@ -2519,13 +2521,42 @@ async def update_project(
         if conn:
             return_db_connection(conn)
 
-@app.delete("/api/projects/{project_id}")
-async def delete_project(
+@app.get("/api/projects/{project_id}/contents")
+async def get_project_contents(
     project_id: str,
     current_user: User = Depends(get_current_user)
 ):
+    """How much a project holds, for the dialog that asks what to delete with it."""
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM projects WHERE id = %s AND client_id = %s",
+                           (project_id, str(current_user.client_id)))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Project not found")
+            cursor.execute("""
+                SELECT (SELECT COUNT(*) FROM test_cases WHERE project_id = %(p)s AND type = 'test'),
+                       (SELECT COUNT(*) FROM test_cases WHERE project_id = %(p)s AND type = 'group'),
+                       (SELECT COUNT(*) FROM test_runs r JOIN test_cases tc ON tc.id = r.test_case_id
+                        WHERE tc.project_id = %(p)s),
+                       (SELECT COUNT(*) FROM environments WHERE project_id = %(p)s),
+                       (SELECT COUNT(*) FROM api_schemas WHERE project_id = %(p)s),
+                       (SELECT COUNT(*) FROM test_suites WHERE project_id = %(p)s)
+            """, {'p': project_id})
+            tests, groups, runs, environments, schemas, suites = cursor.fetchone()
+    return {"tests": tests, "groups": groups, "runs": runs, "environments": environments,
+            "api_schemas": schemas, "suites": suites}
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    delete_tests: bool = False,
+    current_user: User = Depends(get_current_user)
+):
     """
-    Delete a specific project by ID.
+    Delete a specific project by ID. Its environments, API schemas, suites and plans go with it.
+    Its test cases are unassigned and kept, unless delete_tests is set: then they are deleted too,
+    with their folders, steps and run history.
     """
     conn = None
     try:
@@ -2544,6 +2575,19 @@ async def delete_project(
                     status_code=404,
                     detail="Project not found"
                 )
+
+            deleted_tests = 0
+            if delete_tests:
+                # Steps, runs, results and the tests inside a folder follow by ON DELETE CASCADE
+                cursor.execute(
+                    "SELECT COUNT(*) FROM test_cases WHERE project_id = %s AND client_id = %s AND type = 'test'",
+                    (project_id, str(current_user.client_id))
+                )
+                deleted_tests = cursor.fetchone()[0]
+                cursor.execute(
+                    "DELETE FROM test_cases WHERE project_id = %s AND client_id = %s",
+                    (project_id, str(current_user.client_id))
+                )
             
             # Delete project
             cursor.execute(
@@ -2555,7 +2599,9 @@ async def delete_project(
             )
             conn.commit()
             
-            return {"message": "Project deleted successfully"}
+            return {"message": "Project deleted successfully", "deleted_tests": deleted_tests}
+    except HTTPException:
+        raise
     except Exception as e:
         if conn:
             conn.rollback()
@@ -2700,8 +2746,10 @@ async def get_project_test_tree(
                                     'children': api_children
                                 }
                                 api_items.append(api_group_copy)
+                        elif item.get('test_type') == 'api':
+                            # Empty group - placed by its own type
+                            api_items.append(item)
                         else:
-                            # Empty group - default to UI
                             ui_items.append(item)
                     else:
                         # Other types (root, etc.) - default to UI
@@ -2774,7 +2822,7 @@ async def get_project_environments(
             # Get all environments for this project
             cursor.execute(
                 """
-                SELECT id, name, base_url, login, password, created_at, updated_at, custom_variables
+                SELECT id, name, base_url, login, password, created_at, updated_at, custom_variables, api_url
                 FROM environments
                 WHERE project_id = %s
                 ORDER BY name
@@ -2792,7 +2840,8 @@ async def get_project_environments(
                     "password": environment[4],
                     "created_at": environment[5].isoformat() if environment[5] else None,
                     "updated_at": environment[6].isoformat() if environment[6] else None,
-                    "custom_variables": environment[7] if environment[7] else []
+                    "custom_variables": environment[7] if environment[7] else [],
+                    "api_url": environment[8]
                 }
                 for environment in environments
             ]
@@ -2839,9 +2888,9 @@ async def create_environment(
             # Create the environment
             cursor.execute(
                 """
-                INSERT INTO environments (name, base_url, login, password, project_id, custom_variables)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id, name, base_url, login, password, created_at, updated_at, custom_variables
+                INSERT INTO environments (name, base_url, login, password, project_id, custom_variables, api_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, name, base_url, login, password, created_at, updated_at, custom_variables, api_url
                 """,
                 (
                     environment_data.get("name"),
@@ -2849,7 +2898,8 @@ async def create_environment(
                     environment_data.get("login"),
                     environment_data.get("password"),
                     project_id,
-                    json.dumps(custom_variables)
+                    json.dumps(custom_variables),
+                    with_scheme(environment_data.get("api_url"))
                 )
             )
             environment = cursor.fetchone()
@@ -2863,7 +2913,8 @@ async def create_environment(
                 "password": environment[4],
                 "created_at": environment[5].isoformat() if environment[5] else None,
                 "updated_at": environment[6].isoformat() if environment[6] else None,
-                "custom_variables": environment[7]
+                "custom_variables": environment[7],
+                "api_url": environment[8]
             }
     except Exception as e:
         if conn:
@@ -2912,9 +2963,10 @@ async def update_environment(
             cursor.execute(
                 """
                 UPDATE environments
-                SET name = %s, base_url = %s, login = %s, password = %s, custom_variables = %s, updated_at = CURRENT_TIMESTAMP
+                SET name = %s, base_url = %s, login = %s, password = %s, custom_variables = %s,
+                    api_url = CASE WHEN %s THEN %s ELSE api_url END, updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at, custom_variables
+                RETURNING id, name, base_url, login, password, project_id, created_at, updated_at, custom_variables, api_url
                 """,
                 (
                     environment_data.get("name"),
@@ -2922,6 +2974,9 @@ async def update_environment(
                     environment_data.get("login"),
                     environment_data.get("password"),
                     json.dumps(custom_variables),
+                    # A client that does not send api_url keeps the stored one
+                    "api_url" in environment_data,
+                    with_scheme(environment_data.get("api_url")),
                     environment_id
                 )
             )
@@ -2937,7 +2992,8 @@ async def update_environment(
                 "project_id": environment[5],
                 "created_at": environment[6].isoformat() if environment[6] else None,
                 "updated_at": environment[7].isoformat() if environment[7] else None,
-                "custom_variables": environment[8]
+                "custom_variables": environment[8],
+                "api_url": environment[9]
             }
     except Exception as e:
         if conn:
@@ -3329,7 +3385,7 @@ async def get_test_groups(current_user: User = Depends(get_current_user)):
             # Get all test groups for the user's client
             cur.execute(
                 """
-                SELECT id, name, description, parent_id, "order", created_at, updated_at
+                SELECT id, name, description, parent_id, "order", created_at, updated_at, project_id
                 FROM test_cases
                 WHERE client_id = %s AND type = 'group'
                 ORDER BY "order"
@@ -3349,6 +3405,7 @@ async def get_test_groups(current_user: User = Depends(get_current_user)):
                     "order": group[4],
                     "created_at": group[5].isoformat() if group[5] else None,
                     "updated_at": group[6].isoformat() if group[6] else None,
+                    "project_id": str(group[7]) if group[7] else None,
                     "children": []
                 }
                 formatted_groups.append(formatted_group)
@@ -3379,9 +3436,10 @@ async def create_test_group(
     try:
         with conn.cursor() as cur:
             # Check if the parent exists and is a valid group or root
+            parent_test_type = None
             if request_data.parent_id:
                 cur.execute(
-                    "SELECT type FROM test_cases WHERE id = %s",
+                    "SELECT type, test_type FROM test_cases WHERE id = %s",
                     (request_data.parent_id,)
                 )
                 parent = cur.fetchone()
@@ -3395,6 +3453,9 @@ async def create_test_group(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Parent must be a group or root"
                     )
+                parent_test_type = parent[1]
+
+            test_type = request_data.test_type or parent_test_type or 'ui'
             
             # Convert UUID to string for database storage
             project_id_str = str(request_data.project_id) if request_data.project_id else None
@@ -3408,15 +3469,16 @@ async def create_test_group(
             # Insert the new group
             cur.execute(
                 """
-                INSERT INTO test_cases (name, parent_id, type, "order", client_id, project_id)
-                VALUES (%s, %s, 'group', 1, %s, %s)
-                RETURNING id, name, parent_id, type, "order", created_at, updated_at, project_id
+                INSERT INTO test_cases (name, parent_id, type, "order", client_id, project_id, test_type)
+                VALUES (%s, %s, 'group', 1, %s, %s, %s)
+                RETURNING id, name, parent_id, type, "order", created_at, updated_at, project_id, test_type
                 """,
                 (
                     request_data.name,
                     request_data.parent_id,
                     client_id_str,
-                    project_id_str
+                    project_id_str,
+                    test_type
                 )
             )
             group = cur.fetchone()
@@ -3435,7 +3497,8 @@ async def create_test_group(
                 "order": group[4],
                 "created_at": group[5].isoformat() if group[5] else None,
                 "updated_at": group[6].isoformat() if group[6] else None,
-                "project_id": group[7]
+                "project_id": group[7],
+                "test_type": group[8]
             }
     except Exception as e:
         conn.rollback()
@@ -4440,7 +4503,9 @@ async def test_case_generation_status(
                 "is_generating": is_generating,
                 "test_steps": steps,
                 "current_step": current_step,
-                "next_step": next_step
+                "next_step": next_step,
+                # Why the last generation stopped, if it failed; None after a successful or a new one
+                "error": None if is_generating else get_generation_error(id)
             }
     except Exception as e:
         logger.error(f"Error checking test case generation status: {e}")

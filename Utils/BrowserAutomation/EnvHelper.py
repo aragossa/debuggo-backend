@@ -9,6 +9,7 @@ class EnvHelper:
         self._base_url: Optional[str] = None
         self._login: Optional[str] = None
         self._password: Optional[str] = None
+        self._api_url: Optional[str] = None
         self._generated_names: Dict[str, str] = {}  # Cache for generated names
         
         # If environment variables are provided, use them directly
@@ -19,6 +20,8 @@ class EnvHelper:
                 self._login = environment_vars['login']
             if 'password' in environment_vars and environment_vars['password']:
                 self._password = environment_vars['password']
+            if environment_vars.get('api_url'):
+                self._api_url = environment_vars['api_url']
 
     def get_base_url(self) -> Optional[str]:
         """
@@ -116,6 +119,7 @@ class EnvHelper:
         
         Supported variables:
         - %base_url%, %login%, %password% - Standard environment variables
+        - %api_url% - API address of the environment (base_url when it has none)
         - %unique_name% - Unique identifier (e.g., "a7b3c9d2")
         - %unique_name:prefix% - With prefix (e.g., "Client_a7b3c9d2")
         - %timestamp_name% - Timestamp-based (e.g., "20250129_143052")
@@ -174,6 +178,10 @@ class EnvHelper:
                 if var_name == 'base_url':
                     # Remove trailing slash from base_url to prevent double slashes
                     value = self.base_url.rstrip('/') if self.base_url else self.base_url
+                elif var_name == 'api_url':
+                    # The API address of the environment; one without it serves the API from base_url
+                    api_url = self._api_url or self.base_url
+                    value = api_url.rstrip('/') if api_url else api_url
                 elif var_name == 'login':
                     value = self.login
                 elif var_name == 'password':

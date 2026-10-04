@@ -19,6 +19,9 @@ from auroqa.Utils.AIHelper.AIHelper import AIHelper
 from auroqa.Utils.BrowserAutomation.BrowserAutomation import BrowserAutomation
 from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
 from auroqa.Utils.System import System
+from auroqa.Utils.GenerationStatus import set_generation_error
+from auroqa.Utils.LogMasking import mask_secrets
+from auroqa.Services.RunTrace import RunTrace
 import io
 from auroqa.Utils.Connectors.db_utils import get_db_connection, return_db_connection
 from auroqa.Services.ExecutionFeedbackCollector import ExecutionFeedbackCollector
@@ -258,9 +261,35 @@ class TestRunner:
                 raise
         return self.browser
 
+    # ---- run trace: the requests and pages of a run, for coverage (Services/RunTrace.py) ----
+
+    def _start_trace(self, test_run_id: int, test_case_id: int):
+        self._trace = [RunTrace(), test_run_id, test_case_id, 0]  # the last element: the last step collected
+
+    def _collect_trace(self, step_order: int):
+        """After a step: what the browser requested during it and the page it is on."""
+        trace = getattr(self, '_trace', None)
+        if trace and self.browser:
+            trace[0].collect(self.browser, step_order)
+            trace[3] = step_order
+
+    def _finish_trace(self):
+        """Before the browser closes, on every way out of a run: the last step, then save."""
+        trace = getattr(self, '_trace', None)
+        self._trace = None
+        if not trace:
+            return
+        try:
+            if self.browser:
+                trace[0].collect(self.browser, trace[3] + 1)
+            trace[0].save(trace[1], trace[2])
+        except Exception as e:
+            self.logger.error(f"Run trace not saved: {e}")
+
     def _cleanup_browser(self):
         """Cleanup method to close the browser"""
         pid = os.getpid()
+        self._finish_trace()
         if hasattr(self, 'browser') and self.browser:
             self.logger.info(f"[PID:{pid}] Cleaning up browser for user:{self.user_id}, test:{self.test_case_id}")
             try:
@@ -688,10 +717,17 @@ class TestRunner:
             self.logger.error(f"[PID:{self.pid}] ❌ All click strategies failed")
             raise Exception(f"Failed to click element. XPath: {xpath_selector}, CSS: {css_selector}. Error: {str(e)}")
 
+    def _step_screenshot(self, action: str, name: str):
+        """Screenshot of the page after a step. An API step does not touch the page: it gets none."""
+        if action == 'api_request':
+            return None
+        return self.browser.take_screenshot(name)
+
     def _start_variable_session(self, environment_vars):
         """Drop the variables of the previous run and keep the environment for api_request steps."""
         self.current_environment_vars = environment_vars or {}
         self.session_variables = {}
+        self._api_context = None  # set by a generation that may use the project's API library
 
     def _substitute_in_request(self, data, env_helper):
         """Substitute %variables% in every string of a parsed api_request, the same way as in UI step values."""
@@ -712,6 +748,47 @@ class TestRunner:
                 session_variables=self.session_variables
             )
         return data
+
+    def _api_prompt(self):
+        """The API block for the generation prompt, with the variables API steps have set so far."""
+        context = getattr(self, '_api_context', None)
+        if not context:
+            return None
+        names = [name for name in self.session_variables if name not in ('token', 'auth_token', 'accessToken', 'authToken')]
+        known = f"\nVariables set by earlier API steps: {', '.join('%' + name + '%' for name in names)}" if names else ''
+        return context['prompt'] + known
+
+    def _planned_api_call(self, value):
+        """(planned step, library call) when the value of an api_request step names a call of the library."""
+        context = getattr(self, '_api_context', None)
+        try:
+            planned = json.loads(value) if isinstance(value, str) else value
+        except (json.JSONDecodeError, TypeError):
+            return None, None
+        if not context or not isinstance(planned, dict) or 'call' not in planned or planned.get('endpoint'):
+            return None, None
+        call = str(planned['call'])
+        for op in context['library']:
+            if call in (op['name'], f"{op['method']} {op['path']}"):
+                return planned, op
+        raise ValueError(f"api_request names the call \"{call}\", which is not in the project's API library")
+
+    def _api_login_request(self, value):
+        """The login request to run before a library call that needs a token, when none was obtained yet."""
+        planned, op = self._planned_api_call(value)
+        context = getattr(self, '_api_context', None)
+        if not op or not op.get('requires_auth') or not context['login'] or 'access_token' in self.session_variables:
+            return None
+        from auroqa.Services.ApiBaselineTests import _login_step
+        return json.dumps(_login_step(context['login'])['request'])
+
+    def _resolve_api_call(self, value):
+        """A step value that names a library call ({"call": ...}) as the full request, copied from the library."""
+        planned, op = self._planned_api_call(value)
+        if not op:
+            return value
+        from auroqa.Services.ApiScenarioGenerator import assemble_request
+        return json.dumps(assemble_request(planned, op, getattr(self, '_api_context')['login']))
 
     def _execute_api_request(self, value, env_helper=None):
         """
@@ -776,7 +853,7 @@ class TestRunner:
         try:
             if action == "api_request":
                 # Variables are substituted inside, after the JSON is parsed
-                self.logger.info(f"[PID:{self.pid}] Executing api_request: {value}")
+                self.logger.info(f"[PID:{self.pid}] Executing api_request: {mask_secrets(value)}")
                 self._execute_api_request(value, env_helper)
                 return
 
@@ -840,7 +917,7 @@ class TestRunner:
                 else:
                     self.browser.navigate(element_path)
             elif action == "type":
-                self.logger.info(f"[PID:{self.pid}] with value {value}")
+                # The value itself is logged by type_text, which knows whether the field is a password
                 self.browser.type_text(element_path, value, by_strategy)
             elif action == "wait":
                 self.browser.wait_for_element(element_path, by_strategy)
@@ -1018,13 +1095,18 @@ class TestRunner:
                 test_run_id = self._create_test_run(test_case_id, "running")
                 self.logger.info(f"[PID:{pid}] Created test run record with ID: {test_run_id}")
                 
-                self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
-                self.browser.navigate(url=env.base_url)
+                # Same order as in _run_test_case_internal: an empty HTTP cache, then the api_request
+                # steps the test starts with (its preconditions), then the page
+                self.browser.clear_http_cache()
+                page_opened = False
                 
                 self.logger.info(f"[PID:{pid}] Starting test step execution")
                 step_order = 1
+                self._start_trace(test_run_id, test_case_id)
                 
                 for step in steps:
+                    if step_order > 1:
+                        self._collect_trace(step_order - 1)
                     # Check if we should stop execution
                     if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
                         self.logger.info(f"[PID:{pid}] Stopping test case execution as requested for test case {test_case_id}")
@@ -1051,6 +1133,12 @@ class TestRunner:
                         }
                     
                     step_id, action, element_path, description, expected_result, value, path_type = step
+
+                    if not page_opened and action != 'api_request':
+                        self.logger.info(f"[PID:{pid}] Navigating to base URL: {env.base_url}")
+                        self.browser.navigate(url=env.base_url)
+                        page_opened = True
+
                     self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
                     
                     # Process environment variables to get resolved values for logging
@@ -1076,7 +1164,7 @@ class TestRunner:
                         screenshot_path = None
                         screenshot_base64 = None
                         try:
-                            screenshot_path = self.browser.take_screenshot(f"step_{step_order}_success")
+                            screenshot_path = self._step_screenshot(action, f"step_{step_order}_success")
                             # Convert screenshot to base64 for database storage
                             if screenshot_path and os.path.exists(screenshot_path):
                                 with open(screenshot_path, "rb") as img_file:
@@ -1220,7 +1308,7 @@ class TestRunner:
                         screenshot_path = None
                         screenshot_base64 = None
                         try:
-                            screenshot_path = self.browser.take_screenshot(f"step_{step_order}_error")
+                            screenshot_path = self._step_screenshot(action, f"step_{step_order}_error")
                             if screenshot_path and os.path.exists(screenshot_path):
                                 with open(screenshot_path, "rb") as img_file:
                                     screenshot_base64 = base64.b64encode(img_file.read()).decode('utf-8')
@@ -1545,7 +1633,7 @@ class TestRunner:
                 self.logger.info(f"[PID:{pid}] Cleaning up after test case execution")
                 self._cleanup_browser()
 
-    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None, vlm_enabled=False):
+    def generate_test_steps(self, test_case_id: int, environment_vars=None, ai_model_id=None, vlm_enabled=False, use_api=False):
         """
         Generate test steps using AI analysis of page HTML.
         Uses single connection per session to optimize database usage.
@@ -1555,6 +1643,7 @@ class TestRunner:
             environment_vars: Optional dictionary with environment variables (base_url, login, password)
             ai_model_id: Optional ID of the AI model to use
             vlm_enabled: Boolean flag to enable/disable Visual Language Model (screenshots)
+            use_api: let the model prepare data through the project's API library (api_request steps)
         """
         pid = os.getpid()
         # Generate unique job ID for tracking all AI requests in this test generation
@@ -1635,12 +1724,13 @@ class TestRunner:
                 except Exception as e:
                     session_conn.rollback()
                     self.logger.error(f"[PID:{pid}] Failed to initialize test generation: {e}")
+                    set_generation_error(test_case_id, f"The generation could not start: {e}")
                     return
                 
                 # Continue with test generation using the same connection
                 return self._generate_test_steps_with_session_connection(
                     test_case_id, session_conn, session_cursor, test_name, test_description, 
-                    environment_vars, model_id, generation_job_id, vlm_enabled
+                    environment_vars, model_id, generation_job_id, vlm_enabled, use_api
                 )
                 
         except Exception as e:
@@ -1834,7 +1924,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
         return 5
             
     def _generate_test_steps_with_session_connection(self, test_case_id, session_conn, session_cursor, 
-                                                   test_name, test_description, environment_vars, model_id, generation_job_id, vlm_enabled=False):
+                                                   test_name, test_description, environment_vars, model_id, generation_job_id, vlm_enabled=False, use_api=False):
         """
         Generate test steps using a single database connection session.
         """
@@ -1914,6 +2004,19 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 # Create environment helper
                 env = EnvHelper(environment_vars or {})
                 self._start_variable_session(environment_vars)
+
+                # API calls the test may use to prepare its data (the "use API" flag of the generation)
+                if use_api:
+                    try:
+                        from auroqa.Services.ApiScenarioGenerator import ui_api_context
+                        session_cursor.execute("SELECT project_id, client_id FROM test_cases WHERE id = %s", (test_case_id,))
+                        owner = session_cursor.fetchone()
+                        if owner and owner[0] and owner[1]:
+                            self._api_context = ui_api_context(str(owner[0]), str(owner[1]), f"{test_name} {test_description}")
+                        if self._api_context:
+                            self.logger.info(f"[PID:{pid}] API library offered to the model: {len(self._api_context['prompt'])} chars")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Could not load the API library, generating without it: {e}")
                 
                 # Set up HTML analyzer if not already initialized
                 if not self.html_analyzer:
@@ -1974,6 +2077,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     raise ValueError("Base URL is required for test step generation")
                 
                 self.logger.info(f"[PID:{pid}] Navigating to {base_url}")
+                self.browser.clear_http_cache()
                 self.browser.navigate(base_url)
                 
                 # Wait for page to load
@@ -2101,8 +2205,12 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                             if state_machine and retry_count == 0:
                                 try:
                                     state_machine.update_context(step_number=step_order)
+                                    # The previous step left the loop without LEARN (skipped, recovered or failed)
+                                    if state_machine.get_state() in (State.GENERATE, State.VALIDATE, State.EXECUTE):
+                                        state_machine.transition(Event.NEXT)
+                                    previous_state = state_machine.get_state().value
                                     state_machine.transition(Event.GENERATE)
-                                    self.logger.info(f"[PID:{pid}] State Machine: PLAN → GENERATE (step {step_order})")
+                                    self.logger.info(f"[PID:{pid}] State Machine: {previous_state} → GENERATE (step {step_order})")
                                 except Exception as e:
                                     self.logger.error(f"[PID:{pid}] Failed to transition to GENERATE state: {e}")
                             
@@ -2121,7 +2229,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     generation_job_id=generation_job_id,
                                     vlm_enabled=vlm_enabled,
                                     model_name=model_id,
-                                    browser_state=browser_state
+                                    browser_state=browser_state,
+                                    api_context=self._api_prompt()
                                 )
                                 
                                 # Check for stop flag after AI response
@@ -2150,6 +2259,25 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     # The model may send the request of an api_request step as an object; steps store text
                                     if isinstance(value, (dict, list)):
                                         value = json.dumps(value)
+
+                                    if action == 'api_request':
+                                        # A call that needs a token: log in first and keep the login as its own step
+                                        login_request = self._api_login_request(value)
+                                        if login_request:
+                                            self.execute_step('api_request', 'N/A', login_request, 'xpath', env)
+                                            login_step_id = self._save_step(
+                                                test_case_id=test_case_id,
+                                                step_order=step_order,
+                                                element_purpose="Log in to the API with the environment's login and password",
+                                                action='api_request',
+                                                element_locator='N/A',
+                                                value=login_request,
+                                                by_strategy='xpath'
+                                            )
+                                            self.logger.info(f"[PID:{pid}] Saved API login step {login_step_id} as step {step_order}")
+                                            step_order += 1
+                                        # {"call": name, ...} becomes the request copied from the library
+                                        value = self._resolve_api_call(value)
 
                                     self.logger.info(f"[PID:{pid}] Unpacked values: next_step={next_step}, purpose={element_purpose}, action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                     
@@ -2403,7 +2531,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                                 self.browser.debug_page_structure("//a[contains(@class, 'new')]", "xpath")
                                             else:
                                                 # Debug the specific failed selector
-                                                self.browser.debug_page_structure(failed_step['element_locator'], failed_step['by_strategy'])
+                                                self.browser.debug_page_structure(env.process_variables(failed_step['element_locator'] or ''), failed_step['by_strategy'])
                                         
                                         # Use AI to analyze the error and suggest a fix
                                         analyzer_response = html_analyzer.analyze_error(
@@ -2435,6 +2563,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             # New format (7-tuple) with CSS fallback
                                             next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
+                                        if isinstance(value, (dict, list)):
+                                            value = json.dumps(value)
+                                        if action == 'api_request':
+                                            value = self._resolve_api_call(value)
                                         self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution
@@ -2590,6 +2722,17 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     next_prompt = next_step
                                     continue
                                 
+                                saved_steps = self._get_step_history(test_case_id)
+                                if action == 'api_request' and saved_steps and all(
+                                        step['action'] == 'api_request' for step in saved_steps):
+                                    # No step has used the page yet, so this request is a precondition.
+                                    # Run executes those before it opens the page. Here the page is already
+                                    # open: load it again, so the model sees the data the request created
+                                    self.logger.info(f"[PID:{pid}] Precondition done, opening {base_url} again")
+                                    self.browser.clear_http_cache()
+                                    self.browser.navigate(base_url)
+                                    self.browser.wait_for_page_load()
+                                
                                 # Take screenshot after successful step
                                 try:
                                     if self.browser.get_alert_text() is not None:
@@ -2600,13 +2743,15 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                     self.logger.info(f"[PID:{pid}] Screenshot taken: {screenshot_path}")
                                     
                                     # Save screenshot using session connection
-                                    with open(screenshot_path, "rb") as image_file:
-                                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-                                    self._update_step_with_screenshot_session(
-                                        session_cursor, session_conn, step_id, 
-                                        screenshot_path, encoded_string, 
-                                        f"Screenshot for step {step_order}"
-                                    )
+                                    # (not for an API step: the page is not what it worked on)
+                                    if action != 'api_request':
+                                        with open(screenshot_path, "rb") as image_file:
+                                            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                                        self._update_step_with_screenshot_session(
+                                            session_cursor, session_conn, step_id, 
+                                            screenshot_path, encoded_string, 
+                                            f"Screenshot for step {step_order}"
+                                        )
                                 except self._PageBehindAlert:
                                     self.logger.info(f"[PID:{pid}] Native alert is open: page not re-read, step {step_order} has no screenshot")
                                 except Exception as screenshot_error:
@@ -2713,7 +2858,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                                 self.browser.debug_page_structure("//a[contains(@class, 'new')]", "xpath")
                                             else:
                                                 # Debug the specific failed selector
-                                                self.browser.debug_page_structure(failed_step['element_locator'], failed_step['by_strategy'])
+                                                self.browser.debug_page_structure(env.process_variables(failed_step['element_locator'] or ''), failed_step['by_strategy'])
                                         
                                         # Use AI to analyze the error and suggest a fix
                                         analyzer_response = html_analyzer.analyze_error(
@@ -2745,6 +2890,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                                             # New format (7-tuple) with CSS fallback
                                             next_step, element_purpose, action, element_locator, css_selector, by_strategy, value = analyzer_response
                                             
+                                        if isinstance(value, (dict, list)):
+                                            value = json.dumps(value)
+                                        if action == 'api_request':
+                                            value = self._resolve_api_call(value)
                                         self.logger.info(f"[PID:{pid}] AI suggested fix: action={action}, xpath={element_locator}, css={css_selector}, strategy={by_strategy}, value={value}")
                                         
                                         # Process environment variables for execution
@@ -2855,6 +3004,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 # State Machine: Transition to COMPLETE state
                 if state_machine:
                     try:
+                        if state_machine.get_state() in (State.GENERATE, State.VALIDATE):
+                            state_machine.transition(Event.NEXT)
                         state_machine.transition(Event.COMPLETE)
                         summary = state_machine.get_summary()
                         self.logger.info(f"[PID:{pid}] State Machine: → COMPLETE")
@@ -2927,6 +3078,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 except Exception as db_error:
                     self.logger.error(f"[PID:{pid}] Failed to mark test_run as completed: {db_error}")
                 
+                self._check_generated_test(test_case_id, environment_vars)
+                
                 # Clear the generation flag from Redis
                 try:
                     if self._redis:
@@ -2939,6 +3092,8 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
 
         except Exception as e:
             self.logger.error(f"[PID:{pid}] Error generating test steps: {str(e)}")
+            # The UI shows this on the test case: the user must know why the generation stopped
+            set_generation_error(test_case_id, str(e) or type(e).__name__)
             # Update end time even on error using fallback method
             self._update_generation_end_time(test_case_id)
             
@@ -2968,6 +3123,46 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 self.logger.error(f"[PID:{pid}] Failed to clear Redis flags on error: {redis_error}")
             
             raise
+
+    def _check_generated_test(self, test_case_id: int, environment_vars=None):
+        """
+        Run the steps that were just generated, once, the way Run does.
+
+        A step that passed during generation proves little: the model takes seconds to minutes
+        between steps, and that hides missing waits and data that only shows up later. The run is
+        kept as a normal test run; when it fails, the reason is shown on the test case.
+        """
+        pid = os.getpid()
+        try:
+            if self._redis and self._redis.exists(f"test_case_stop_generating:{test_case_id}"):
+                return
+            if not self._get_test_steps(test_case_id):
+                return
+            self.logger.info(f"[PID:{pid}] Check run of the generated test case {test_case_id}")
+            if self._redis:
+                self._redis.set(f"test_case_current_step:{test_case_id}", "Check run of the generated steps", ex=3600)
+                self._redis.set(f"test_case_next_step:{test_case_id}", "Finalizing test generation", ex=3600)
+            start_time = datetime.now()
+            test_run_id = self._create_test_run(test_case_id, status="running")
+            result = self._run_test_case_internal(test_run_id, test_case_id, environment_vars)
+            status = result.get("status", "completed")
+            self._update_test_run(
+                test_run_id, status, result.get("exception"),
+                (datetime.now() - start_time).total_seconds(),
+                result.get("stdout"), result.get("stderr")
+            )
+            if status == "passed":
+                self.logger.info(f"[PID:{pid}] Check run {test_run_id} passed")
+            else:
+                reason = result.get("stderr") or result.get("exception") or status
+                self.logger.warning(f"[PID:{pid}] Check run {test_run_id} did not pass: {reason}")
+                set_generation_error(
+                    test_case_id,
+                    f"The steps were generated, but the check run of the test did not pass: {reason}. "
+                    f"See the last run for the failed step."
+                )
+        except Exception as e:
+            self.logger.error(f"[PID:{pid}] Check run of the generated test failed to start: {e}")
 
     def _describe_browser_state_for_ai(self, switched_to_new_tab: bool = False) -> str:
         """
@@ -3211,27 +3406,17 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                         console.warn('Could not clear storage: ' + e.message);
                     }
                 """)
+                # The session may be the one the generation used: its cached responses hide new data
+                self.browser.clear_http_cache()
                 self.logger.info(f"[PID:{pid}] Browser cache cleared successfully")
             except Exception as cleanup_error:
                 self.logger.warning(f"[PID:{pid}] Failed to clear browser cache: {cleanup_error}")
             
-            # Navigate to base_url from environment variables before executing steps
+            # The page is opened at base_url before the first step that uses it. The api_request steps
+            # a test starts with are its preconditions: they run first, so the page loads with their data
             base_url = env.base_url
-            if base_url:
-                self.logger.info(f"[PID:{pid}] Navigating to base_url from environment: {base_url}")
-                try:
-                    self.browser.navigate(base_url)
-                    self.logger.info(f"[PID:{pid}] Successfully navigated to base_url: {base_url}")
-                except Exception as e:
-                    self.logger.error(f"[PID:{pid}] Failed to navigate to base_url {base_url}: {str(e)}")
-                    return {
-                        "test_run_id": test_run_id,
-                        "status": "failed",
-                        "exception": f"Failed to navigate to base_url: {str(e)}",
-                        "stdout": None,
-                        "stderr": f"Failed to navigate to base_url {base_url}: {str(e)}"
-                    }
-            else:
+            page_opened = False
+            if not base_url:
                 self.logger.warning(f"[PID:{pid}] No base_url found in environment variables")
             
             self.logger.info(f"[PID:{pid}] Executing {len(steps)} test steps for test case: {test_case_name}")
@@ -3240,7 +3425,10 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
             step_order = 0
             failed_steps = 0
             total_steps = len(steps)
+            self._start_trace(test_run_id, test_case_id)
             for step in steps:
+                if step_order:
+                    self._collect_trace(step_order)
                 # Check for stop execution flag
                 if self._redis and self._redis.exists(f"test_case_stop_execution:{test_case_id}"):
                     self.logger.info(f"[PID:{pid}] Stop execution flag found, stopping test case {test_case_id}")
@@ -3256,6 +3444,25 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                 step_order += 1
                 
                 step_id, action, element_path, description, expected_result, value, path_type = step
+
+                if base_url and not page_opened and action != 'api_request':
+                    self.logger.info(f"[PID:{pid}] Navigating to base_url from environment: {base_url}")
+                    try:
+                        self.browser.navigate(base_url)
+                        page_opened = True
+                        self.logger.info(f"[PID:{pid}] Successfully navigated to base_url: {base_url}")
+                    except Exception as e:
+                        self.logger.error(f"[PID:{pid}] Failed to navigate to base_url {base_url}: {str(e)}")
+                        self._cleanup_running_steps(test_run_id)
+                        self._cleanup_browser()
+                        return {
+                            "test_run_id": test_run_id,
+                            "status": "failed",
+                            "exception": f"Failed to navigate to base_url: {str(e)}",
+                            "stdout": None,
+                            "stderr": f"Failed to navigate to base_url {base_url}: {str(e)}"
+                        }
+
                 self.logger.info(f"[PID:{pid}] Executing step {step_order}: {action} (step_id: {step_id})")
                 
                 # Process environment variables to get resolved values for logging
@@ -3294,7 +3501,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     screenshot_path = None
                     screenshot_base64 = None
                     try:
-                        screenshot_path = self.browser.take_screenshot(f"step_{step_order}_{action}")
+                        screenshot_path = self._step_screenshot(action, f"step_{step_order}_{action}")
                         self.logger.info(f"[PID:{pid}] Screenshot captured: {screenshot_path}")
                         
                         # Convert screenshot to base64 for database storage
@@ -3340,7 +3547,7 @@ Respond with ONLY a single number between 3 and 30, nothing else."""
                     screenshot_path = None
                     screenshot_base64 = None
                     try:
-                        screenshot_path = self.browser.take_screenshot(f"step_{step_order}_{action}_error")
+                        screenshot_path = self._step_screenshot(action, f"step_{step_order}_{action}_error")
                         self.logger.info(f"[PID:{pid}] Error screenshot captured: {screenshot_path}")
                         
                         # Convert screenshot to base64 for database storage

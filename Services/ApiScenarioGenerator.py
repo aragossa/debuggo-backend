@@ -1,0 +1,562 @@
+"""
+API test scenario from one model request.
+
+The model gets the test description and the calls of the project's API library that fit it
+(names, example bodies, response fields - not the whole schema) and answers with the whole test:
+which calls, in what order, with what data, and how values pass from one step to the next.
+The requests themselves are assembled by code from the library, so a path is never invented.
+
+The plan is then run without AI. The model is asked again only when a step fails, with the
+request that was sent and what the API answered. When the plan has run to its end, the test
+is complete: that is decided here, not by the model.
+"""
+
+import json
+import logging
+import re
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
+
+from auroqa.Services.ApiBaselineTests import (_UNIQUE_FIELDS, _find_login, _login_step, _related_steps, _singular,
+                                              _unique_body)
+from auroqa.Services.ApiOperationLibrary import list_operations, step_request
+from auroqa.Utils.Connectors.db_utils import get_db_connection_context
+from auroqa.Utils.Environments import api_base_url, load_environment_vars
+
+# Model requests after the first one, each only after a failed step. A scenario across several resources
+# meets one rule of the API after another (ids that must exist, an address that must match, an item that
+# cannot be deleted); the repairs stop early when a repair changes nothing
+MAX_REPAIRS = 4
+MAX_CALLS_IN_PROMPT = 60
+MAX_CALLS_IN_REPAIR = 120  # a repair sees the whole library: the call that helps may be outside the first choice
+_FILTER_FROM = 40        # a smaller library goes to the model whole
+_STOP_WORDS = {'the', 'and', 'for', 'with', 'that', 'this', 'from', 'then', 'check', 'test', 'verify', 'api',
+               'new', 'all', 'get', 'via', 'into', 'use', 'using', 'should', 'must', 'can', 'not', 'are', 'was',
+               'name', 'value', 'create', 'read', 'update', 'delete', 'rename', 'list', 'search', 'item', 'gone'}
+
+
+def has_library(project_id: str, client_id: str) -> bool:
+    """Whether the project has API calls to build a scenario from."""
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM api_operations WHERE project_id = %s AND client_id = %s LIMIT 1",
+                           (project_id, client_id))
+            return cursor.fetchone() is not None
+
+
+def _words(text: str) -> set:
+    """Lowercase words of a text, camelCase and paths split, plurals folded."""
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text or '')
+    return {_singular(word) for word in re.findall(r'[a-z]{3,}', text.lower())} - _STOP_WORDS
+
+
+def select_operations(operations: List[Dict], text: str) -> List[Dict]:
+    """
+    The calls worth showing to the model for this test: those of the resources the description
+    mentions, plus the login call. A small library, or a description that matches nothing, gives all calls.
+    """
+    login = _find_login(operations)
+    if len(operations) <= _FILTER_FROM:
+        return operations
+    wanted = _words(text)
+    resources = {op['resource'] for op in operations
+                 if wanted & (_words(op['resource']) | _words(op['path']))}
+    selected = [op for op in operations if op['resource'] in resources]
+    if not selected:
+        selected = list(operations)
+    if login and login not in selected:
+        selected.insert(0, login)
+    return selected[:MAX_CALLS_IN_PROMPT]
+
+
+MAX_CALLS_IN_UI_PROMPT = 25
+
+
+def ui_api_context(project_id: str, client_id: str, text: str) -> Optional[Dict[str, Any]]:
+    """
+    What a UI test generation needs to use the API for test data: the calls of the resources the
+    test description mentions, as a prompt block, and the library to build the steps from.
+    None when the project has no library or the description points to none of its resources:
+    the block goes into the prompt of every step, so it is kept short.
+    """
+    library = list_operations(project_id, client_id)
+    if not library:
+        return None
+    newest_schema = max(op['schema_id'] for op in library)
+    library = [op for op in library if op['schema_id'] == newest_schema]
+    login = _find_login(library)
+    wanted = _words(text)
+    resources = {op['resource'] for op in library if wanted & (_words(op['resource']) | _words(op['path']))}
+    # Reading calls prepare nothing: only the calls that change data are offered
+    selected = [op for op in library if op['resource'] in resources and op['method'] != 'GET'
+                and not (login and op['id'] == login['id'])][:MAX_CALLS_IN_UI_PROMPT]
+    if not selected:
+        return None
+
+    lines = []
+    for op in selected:
+        # The body as it will be sent when the step changes nothing: the model reuses these values on the page
+        body = (op.get('request') or {}).get('body')
+        if isinstance(body, dict) and body:
+            body = _unique_body(body, 'upd' if op['method'] in ('PUT', 'PATCH') else '')
+        fields = f" | body: {json.dumps(body, separators=(',', ':'))[:340]}" if isinstance(body, dict) and body else ''
+        lines.append(f"- {op['name']}: {op['method']} {op['path']} — {(op.get('summary') or '')[:70]}{fields}")
+    prompt = (
+        "API CALLS OF THIS APPLICATION (action \"api_request\"):\n" + "\n".join(lines) + "\n"
+        "Use an API call ONLY to prepare data the test needs before the page is used (a user to log in with, "
+        "an item to look at) or to clean up after it. NEVER use the API for the behaviour the test itself "
+        "verifies: that must be done through the page.\n"
+        "When the test description needs data that does not exist yet (a new or just registered user, a new item, "
+        "a precondition), create it with an API call FIRST, before the page steps that use it, and then use the "
+        "created data on the page: type the same values you sent in the API body (for example %random_email% and "
+        "the password you chose) instead of the environment's %login% and %password%.\n"
+        "The API calls a test starts with are its PRECONDITIONS: when the test runs they are sent before the "
+        "page is opened, so the page already shows their data and needs no reload or extra click. An API call "
+        "made after a page step does not change the page that is already open: follow it with \"navigate\" "
+        "(value \"%base_url%\" or the URL of the page) before a step that looks for its result on the page.\n"
+        "To use one, return action \"api_request\", element_locator \"N/A\" and \"value\" as JSON: "
+        "{\"call\": \"name from the list\", \"body\": {}, \"path_params\": {}, "
+        "\"extract_variables\": {\"variable\": \"$.field\"}}. The body shown for a call is valid and is sent as "
+        "it is: leave \"body\" empty unless the test needs another value in some field, and then give only that "
+        "field. Authorization is added automatically. A placeholder (%random_email%, %unique_name%) is the same "
+        "value in every step of this test, so after the call a page step types exactly the values of that body "
+        "(the same %random_email%, the same password text). A value from the response is available as %variable% "
+        "after extract_variables. Do not repeat an API call that is already among the previous steps."
+    )
+    return {'prompt': prompt, 'library': library, 'login': login}
+
+
+def describe_operation(op: Dict, is_login: bool = False) -> str:
+    """One line about a call for the prompt."""
+    request = op.get('request') or {}
+    if is_login:
+        # The step logs in with the environment's credentials, not with the example ones of the schema
+        request = {**request, 'body': _login_step(op)['request']['body']}
+    response = op.get('response') or {}
+    parts = [f"- {op['name']}: {op['method']} {op['path']}"]
+    if op.get('summary'):
+        parts.append(f"— {op['summary'][:80]}")
+    if op.get('requires_auth'):
+        parts.append("| auth")
+    query = [f"{param['name']}{'*' if param.get('required') else ''}" for param in request.get('query_params') or []]
+    if query:
+        parts.append(f"| query: {', '.join(query)}")
+    if request.get('body') is not None:
+        parts.append(f"| body: {json.dumps(request['body'], separators=(',', ':'))[:300]}")
+    returns = f"| returns {op['expected_status']}"
+    if response.get('kind') and response['kind'] != 'none':
+        fields = ', '.join(list((response.get('fields') or {}).keys())[:12])
+        shape = {'list': '[{%s}]', 'paginated': '{data: [{%s}]}', 'object': '{%s}'}[response['kind']]
+        returns += ' ' + shape % fields
+    parts.append(returns)
+    return ' '.join(parts)
+
+
+def build_prompt(name: str, description: str, operations: List[Dict], login: Optional[Dict]) -> str:
+    has_login = login is not None
+    calls = '\n'.join(describe_operation(op, has_login and op['id'] == login['id']) for op in operations)
+    login_rule = ('Calls marked "auth" are authorized automatically: a login step with the environment\'s '
+                  'credentials is put before the first of them and the Authorization header is added. Do NOT add '
+                  'a login step yourself, unless the test itself is about logging in. To check that a call refuses a '
+                  'request without a token, set "no_auth": true on that step and "expected_status": 401.'
+                  if has_login else 'Calls marked "auth" cannot be authorized here: avoid them.')
+    return f"""You are an API test engineer. Write ONE API test as a sequence of calls from the list below.
+
+TEST NAME: {name}
+WHAT TO TEST: {description or name}
+
+API CALLS YOU MAY USE (name: METHOD path — what it does | body: example | returns status and response fields):
+{calls}
+
+RULES
+1. Use only calls from the list, referring to each by its name in "call". Never invent a path or a call.
+2. This is the only request: return the whole test, every step, in order.
+3. Pass data between steps with variables. "extract_variables": {{"brand_id": "$.id"}} takes a value from the
+   response (paths: $.field, $.data[0].id, $[0].id); later steps use it as %brand_id%.
+4. Fill the {{parameters}} of a path in "path_params", e.g. {{"brandId": "%brand_id%"}}.
+   An id of another item in an example body (brand_id, category_id, product_image_id, ...) is only an example:
+   that item does not exist. Take a real id in an earlier step - of the item the test created, or of the first
+   item a list call returns - and put it into the body as a variable.
+5. "body" overrides fields of the call's example body: give only the fields this test changes, null to leave a
+   field out. Name-like fields of the example body (name, slug, title, email) are made unique automatically, with
+   different values for a create and an update call: leave them alone unless the test needs a specific value.
+   For your own unique values use %unique_name% and %random_email%. A placeholder is ONE value for the whole
+   test: every %unique_name% is the same text. For a second, different value add a label: %unique_name:second%.
+   To check a value later, extract it from the response of the call that set or returned it.
+6. {login_rule}
+7. "expected_status" only when the step must return something else than the call's normal status
+   (a negative check: 404 after a delete, 422 for invalid data, 401 without a token).
+8. "expect": expected values in the response, by path, e.g. {{"$.name": "%brand_name%"}}. Use it to verify what
+   the test is about; do not compare generated ids or dates.
+9. Keep the test to what the description asks. Clean up what the test created when a delete call exists.
+
+Return ONLY this JSON:
+{{"steps": [{{"call": "name from the list", "description": "what this step does", "path_params": {{}}, "params": {{}},
+  "body": {{}}, "expected_status": 200, "extract_variables": {{}}, "expect": {{}}, "no_auth": false}}]}}
+Leave out the keys a step does not need."""
+
+
+def assemble_request(step: Dict, op: Dict, login: Optional[Dict]) -> Dict[str, Any]:
+    """The request of one planned step: the library call with the model's data put in."""
+    is_login = login is not None and op['id'] == login['id']
+    request = dict(_login_step(op)['request']) if is_login else step_request(op)
+
+    for name, value in (step.get('path_params') or {}).items():
+        request['endpoint'] = request['endpoint'].replace(f'%{name}%', str(value))
+    if isinstance(step.get('params'), dict) and step['params']:
+        request['params'] = {**(request.get('params') or {}), **step['params']}
+
+    body = request.get('body')
+    if isinstance(body, dict):
+        overrides = step.get('body') if isinstance(step.get('body'), dict) else {}
+        if not is_login:
+            body = _unique_body(body, 'upd' if op['method'] in ('PUT', 'PATCH') else '')
+            # An optional id field with a made-up value stays out unless the test sets it
+            for key in (op.get('request') or {}).get('made_up_fields') or []:
+                if key.lower().endswith('_id') and key not in overrides:
+                    body.pop(key, None)
+        # A step that expects an error keeps its data as written; elsewhere a fixed name or slug from
+        # the model would make the test fail on its second run, so it gets the unique suffix too
+        try:
+            negative = int(step.get('expected_status') or 0) >= 400
+        except (TypeError, ValueError):
+            negative = False
+        placeholder = '%unique_name:upd%' if op['method'] in ('PUT', 'PATCH') else '%unique_name%'
+        for key, value in overrides.items():
+            if value is None:
+                body.pop(key, None)
+            elif (not is_login and not negative and key.lower() in _UNIQUE_FIELDS
+                  and isinstance(value, str) and value and '%' not in value):
+                body[key] = f"{value}{'-' if key.lower() == 'slug' else ' '}{placeholder}"
+            else:
+                body[key] = value
+        request['body'] = body
+    elif step.get('body') is not None:
+        request['body'] = step['body']
+
+    if step.get('expected_status') is not None:
+        try:
+            request['expected_status'] = int(step['expected_status'])
+        except (TypeError, ValueError):
+            pass
+    extract = dict(request.get('extract_variables') or {})
+    if isinstance(step.get('extract_variables'), dict):
+        extract.update(step['extract_variables'])
+    if extract:
+        request['extract_variables'] = extract
+    if isinstance(step.get('expect'), dict) and step['expect']:
+        request['expect'] = step['expect']
+    if step.get('no_auth') is True:
+        # A negative check of authorization: the call is sent without a token
+        headers = {k: v for k, v in (request.get('headers') or {}).items() if k.lower() != 'authorization'}
+        if headers:
+            request['headers'] = headers
+        else:
+            request.pop('headers', None)
+    elif not request.get('headers', {}).get('Authorization') and op.get('requires_auth'):
+        request.setdefault('headers', {})['Authorization'] = 'Bearer %access_token%'
+    return request
+
+
+class ApiScenarioGenerator:
+    def __init__(self):
+        self.logger = logging.getLogger('ApiScenarioGenerator')
+        self._ai_helper = None
+        self.last_error: Optional[str] = None  # why generate() returned False, for the UI
+
+    @property
+    def ai_helper(self):
+        if self._ai_helper is None:
+            from auroqa.Utils.AIHelper.AIHelper import AIHelper
+            self._ai_helper = AIHelper()
+        return self._ai_helper
+
+    # ---- model -----------------------------------------------------------------------------
+
+    def _ask(self, prompt: str, client_id: str, job_id: str, model_name: Optional[str], context: str) -> Optional[List[Dict]]:
+        response = self.ai_helper.send_request_to_gemini(
+            prompt=prompt, request_type='api_test', request_context=context,
+            client_id=client_id, generation_job_id=job_id, model_name=model_name)
+        if isinstance(response, str):
+            text = response.strip()
+            if text.startswith('```'):
+                text = '\n'.join(text.split('\n')[1:-1])
+            try:
+                response = json.loads(text)
+            except json.JSONDecodeError:
+                self.logger.error(f"The model did not return JSON: {text[:300]}")
+                return None
+        steps = response.get('steps') if isinstance(response, dict) else response
+        if not isinstance(steps, list) or not steps:
+            self.logger.error(f"The model returned no steps: {str(response)[:300]}")
+            return None
+        return [step for step in steps if isinstance(step, dict)]
+
+    # ---- plan -> requests -> run -----------------------------------------------------------------
+
+    def _to_requests(self, plan: List[Dict], operations: List[Dict], login: Optional[Dict]) -> Tuple[List[Dict], Optional[str]]:
+        """Planned steps as executable steps [{description, request}], or what is wrong with the plan."""
+        by_name = {op['name']: op for op in operations}
+        by_route = {f"{op['method']} {op['path']}": op for op in operations}
+        steps = []
+        logged_in, needs_login = False, False
+        looked_up: set = set()  # id fields already given a real value by a lookup step
+        for index, step in enumerate(plan, 1):
+            call = str(step.get('call') or '')
+            op = by_name.get(call) or by_route.get(call)
+            if not op:
+                return [], f"step {index} uses the call \"{call}\", which is not in the list"
+            if login is not None and op['id'] == login['id']:
+                logged_in = True
+            elif op.get('requires_auth') and not logged_in and step.get('no_auth') is not True:
+                needs_login = True
+            request = assemble_request(step, op, login)
+            steps.extend(self._lookup_steps(step, op, request, operations, looked_up))
+            steps.append({'description': str(step.get('description') or op.get('summary') or call)[:500],
+                          'request': request})
+        # Authorization is mechanical: a call that needs a token gets the login step, whatever the model planned
+        if needs_login and login is not None:
+            steps.insert(0, _login_step(login))
+        return steps, None
+
+    @staticmethod
+    def _lookup_steps(step: Dict, op: Dict, request: Dict, operations: List[Dict], looked_up: set) -> List[Dict]:
+        """
+        Steps that read a real id for the id fields of a body the model left as in the schema example
+        (brand_id, category_id): the example item does not exist, and the API answers 500 or 422.
+        The body is changed in place to use the ids read. Fields the model set are left alone.
+        """
+        body = request.get('body')
+        if op['method'] not in ('POST', 'PUT', 'PATCH') or not isinstance(body, dict):
+            return []
+        own = step.get('body') if isinstance(step.get('body'), dict) else {}
+        example = {key: value for key, value in body.items()
+                   if key.lower().endswith('_id') and key not in own and isinstance(value, str) and '%' not in value}
+        for key in [key for key in example if key in looked_up]:
+            body[key] = f'%{key}%'
+            del example[key]
+        found = _related_steps(example, operations, op['path'], [])
+        for key, value in example.items():
+            if value == f'%{key}%':
+                body[key] = value
+                looked_up.add(key)
+        return found
+
+    def _run(self, steps: List[Dict], test_case_id: int, environment_vars: Dict) -> Optional[Dict[str, Any]]:
+        """Run the steps in order. None when all passed, else the failure: index, request, status, response."""
+        from auroqa.Services.ApiTestExecutor import ApiTestExecutor
+        executor = ApiTestExecutor(test_case_id=test_case_id, environment_vars=environment_vars)
+        for index, step in enumerate(steps):
+            self._progress(test_case_id, f"Running step {index + 1} of {len(steps)}: {step['description']}")
+            request = step['request']
+            result = executor._execute_api_request({'step_order': index + 1, 'element_path': ''},
+                                                   {**request, 'any_success_status': True})
+            error = None if result.get('success') else (result.get('error') or 'failed')
+            # The API answered with another success status than the schema says (201, not 200): the step
+            # keeps the real one. Asking the model to change one number would cost a whole repair attempt
+            actual = result.get('response_status')
+            if error is None and actual and actual != request.get('expected_status', 200):
+                expected = request.get('expected_status', 200)
+                self.logger.info(f"Test case {test_case_id}: step {index + 1} answers {actual}, "
+                                 f"not {expected}: the step expects {actual} now")
+                step.setdefault('review', []).append(
+                    f"Expected status changed from {expected} to {actual}: the API answers {actual}, "
+                    f"the schema says {expected}.")
+                request['expected_status'] = actual
+            if error is None:
+                missing = [f"{name} ({path})" for name, path in (request.get('extract_variables') or {}).items()
+                           if name not in executor.session_variables]
+                if missing:
+                    error = "not found in the response: " + ", ".join(missing)
+            if error:
+                return {'index': index, 'error': error, 'status': result.get('response_status'),
+                        'response': result.get('response_body'), 'url': result.get('actual_url')}
+        return None
+
+    def _progress(self, test_case_id: int, text: str):
+        """What the UI shows while the test is being generated."""
+        try:
+            import redis
+            from auroqa.Utils.System import System
+            system = System()
+            redis.Redis(host=system.redis_host, port=system.redis_port, db=0).setex(
+                f"test_case_current_step:{test_case_id}", 300, text[:200])
+        except Exception:
+            pass
+
+    @staticmethod
+    def _route(request: Dict) -> Tuple[str, str]:
+        return str(request.get('method')), str(request.get('endpoint'))
+
+    def _review_notes(self, steps: List[Dict], failed: Dict[Tuple[str, str], Dict]) -> Tuple[List[Optional[str]], List[str]]:
+        """
+        What the saved test expects differently from the step that failed during generation, for a
+        person to confirm: (a note per step or None, notes about removed steps).
+
+        A repair that fixes the data a step sends is not noted. A repair that changes what the step
+        expects, or drops the step, makes the test pass by agreeing with the API, which is right for
+        a wrong guess of the model and wrong for a bug of the API. The saved steps are compared with
+        the first failing version, so a change the model took back later leaves no note.
+        """
+        step_notes: List[Optional[str]] = []
+        seen = set()
+        for step in steps:
+            request = step['request']
+            route = self._route(request)
+            notes = list(step.get('review') or [])
+            old = failed.get(route)
+            if old and route not in seen:
+                seen.add(route)
+                changes = []
+                # 200 -> 201 is already noted by the run that accepted the other success status
+                both_success = all(200 <= int(status) < 300 for status in
+                                   (request.get('expected_status', 200), old['expected_status']))
+                if request.get('expected_status', 200) != old['expected_status'] and not both_success:
+                    changes.append(f"expected status {old['expected_status']} -> {request.get('expected_status', 200)}")
+                was, now = old['expect'], request.get('expect') or {}
+                for path in list(was) + [path for path in now if path not in was]:
+                    if was.get(path) != now.get(path):
+                        changes.append(f"{path}: {json.dumps(was[path]) if path in was else 'not checked'} -> "
+                                       f"{json.dumps(now[path]) if path in now else 'no longer checked'}")
+                if changes:
+                    notes.append(f"Changed to agree with the API after the step failed ({old['error']}): "
+                                 + "; ".join(changes) + ".")
+            step_notes.append("\n".join(notes) or None)
+        present = {self._route(step['request']) for step in steps}
+        removed = [f"Step \"{old['description']}\" ({route[0]} {route[1]}) was removed after it failed: {old['error']}."
+                   for route, old in failed.items() if route not in present]
+        return step_notes, removed
+
+    def _save(self, test_case_id: int, steps: List[Dict], failed: Optional[Dict] = None):
+        """
+        Replace the steps of the test case with the generated ones. What was changed to agree with
+        the API goes to review_notes of the step (or of the test case, for a removed step).
+        """
+        step_notes, removed = self._review_notes(steps, failed or {})
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM test_steps WHERE test_case_id = %s", (test_case_id,))
+                for order, (step, notes) in enumerate(zip(steps, step_notes), 1):
+                    request = step['request']
+                    cursor.execute("""
+                        INSERT INTO test_steps (test_case_id, step_order, description, action, element_path, value,
+                                                path_type, expected_result, review_notes, created_at, updated_at)
+                        VALUES (%s, %s, %s, 'api_request', NULL, %s, 'xpath', %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """, (test_case_id, order, step['description'], json.dumps(request),
+                          f"Status {request.get('expected_status', 200)}", notes))
+                cursor.execute("UPDATE test_cases SET review_notes = %s WHERE id = %s",
+                               ("\n".join(removed) or None, test_case_id))
+                conn.commit()
+
+    # ---- entry point ----------------------------------------------------------------------------------
+
+    def generate(self, test_case_id: int, client_id: str, project_id: str,
+                 environment_id: Optional[int] = None, model_name: Optional[str] = None) -> bool:
+        """
+        Generate the steps of an API test case. Returns True when the saved test ran to its end
+        during generation, False when it was saved with a failing step or could not be planned.
+        """
+        job_id = str(uuid.uuid4())
+        with get_db_connection_context() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT name, description FROM test_cases WHERE id = %s AND client_id = %s",
+                               (test_case_id, client_id))
+                row = cursor.fetchone()
+                if not row:
+                    self.logger.error(f"Test case {test_case_id} not found")
+                    self.last_error = "Test case not found."
+                    return False
+                name, description = row[0], row[1] or ''
+                if not environment_id:
+                    cursor.execute("SELECT id FROM environments WHERE project_id = %s ORDER BY id LIMIT 1", (project_id,))
+                    first = cursor.fetchone()
+                    environment_id = first[0] if first else None
+
+        environment_vars = load_environment_vars(environment_id)
+        if not environment_vars:
+            self.logger.error(f"Test case {test_case_id}: no environment to run the generated steps on")
+            self.last_error = "No environment to run the generated steps on: select an environment and generate again."
+            return False
+        environment_vars = {**environment_vars, 'base_url': api_base_url(environment_vars)}
+
+        library = list_operations(project_id, client_id)
+        newest_schema = max(op['schema_id'] for op in library)
+        library = [op for op in library if op['schema_id'] == newest_schema]
+        login = _find_login(library)
+        operations = select_operations(library, f"{name} {description}")
+        prompt = build_prompt(name, description, operations, login)
+        self.logger.info(f"Test case {test_case_id}: scenario from {len(operations)} of {len(library)} calls, "
+                         f"prompt {len(prompt)} chars (job {job_id})")
+
+        self._progress(test_case_id, "Planning the test")
+        plan = self._ask(prompt, client_id, job_id, model_name, 'api_scenario_plan')
+        steps: List[Dict] = []
+        previous_failure = None
+        # The first failing version of every step that failed, by method and endpoint (see _review_notes)
+        failed_steps: Dict[Tuple[str, str], Dict] = {}
+        for attempt in range(MAX_REPAIRS + 1):
+            if not plan:
+                break
+            steps, plan_error = self._to_requests(plan, library, login)
+            failure = None if plan_error else self._run(steps, test_case_id, environment_vars)
+            if failure is not None:
+                request = steps[failure['index']]['request']
+                failed_steps.setdefault(self._route(request), {
+                    'description': steps[failure['index']]['description'], 'error': failure['error'],
+                    'expected_status': request.get('expected_status', 200), 'expect': dict(request.get('expect') or {})})
+            if not plan_error and failure is None:
+                self._save(test_case_id, steps, failed_steps)
+                self.logger.info(f"Test case {test_case_id}: {len(steps)} steps, passed, {attempt + 1} model request(s)")
+                return True
+            self.logger.info(f"Test case {test_case_id}: attempt {attempt + 1} failed: "
+                             f"{plan_error or 'step %d: %s' % (failure['index'] + 1, failure['error'])}")
+            if attempt == MAX_REPAIRS:
+                break
+            # The same request failing the same way after a repair: the model has nothing new to try
+            this_failure = plan_error or (failure['index'], failure['error'],
+                                          json.dumps(steps[failure['index']]['request'], sort_keys=True))
+            if this_failure == previous_failure:
+                self.logger.info(f"Test case {test_case_id}: the repair changed nothing, stopping")
+                break
+            previous_failure = this_failure
+
+            if plan_error:
+                problem = f"The plan cannot be used: {plan_error}."
+            else:
+                failed = steps[failure['index']]
+                problem = (f"Steps 1-{failure['index']} passed. Step {failure['index'] + 1} "
+                           f"(\"{failed['description']}\") failed.\n"
+                           f"Request sent: {json.dumps(failed['request'])[:1500]}\n"
+                           f"Result: {failure['error']}\n"
+                           f"Response status: {failure['status']}\nResponse body: {str(failure['response'])[:1500]}")
+            self._progress(test_case_id, f"Fixing the test after a failed step (attempt {attempt + 1})")
+            # The first prompt lists only the calls the description mentions. What the failed step needs may
+            # be another resource (an address checked against a postcode lookup): now all calls are offered
+            if len(operations) < len(library):
+                prompt = build_prompt(name, description, library[:MAX_CALLS_IN_REPAIR], login)
+                operations = library
+            plan = self._ask(
+                f"{prompt}\n\nYOUR PREVIOUS ANSWER:\n{json.dumps({'steps': plan})[:6000]}\n\n"
+                f"WHAT HAPPENED WHEN IT WAS RUN AGAINST THE REAL API:\n{problem}\n\n"
+                "Return the corrected whole test in the same JSON format. Fix the data or the order of the calls. "
+                "If the API rejects values because they do not exist or do not match each other, do not guess "
+                "other values: find the call in the list that returns valid ones, call it in an earlier step and "
+                "pass its values on with variables. "
+                "If a cleanup step at the end cannot work because the API refuses to delete an item that something "
+                "else uses, and no call in the list deletes what uses it, leave that cleanup step out. "
+                "If the API answers with another success status than the list says (201 instead of 200), set "
+                "\"expected_status\" to what the API really returns. Data created by the failed run may still exist: "
+                "keep unique values unique.",
+                client_id, job_id, model_name, 'api_scenario_repair')
+
+        if steps:
+            # Keep the last plan: the user sees which step fails and can fix it
+            self._save(test_case_id, steps, failed_steps)
+            self.logger.warning(f"Test case {test_case_id}: saved {len(steps)} steps, but the test does not pass yet")
+            reason = plan_error or f"step {failure['index'] + 1} fails: {failure['error']}"
+            self.last_error = (f"The test was generated, but it does not pass yet ({reason}). "
+                               f"The {len(steps)} steps are saved: fix the failing step or generate again.")
+        else:
+            self.logger.error(f"Test case {test_case_id}: no usable plan from the model")
+            self.last_error = "The model returned no usable test plan. Make the description more specific or try another model."
+        return False

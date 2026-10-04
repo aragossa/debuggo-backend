@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, List
 from auroqa.Utils.Connectors.db_utils import get_db_connection_context
 from auroqa.Utils.System import System
 from auroqa.Services.VariableManager import VariableManager
+from auroqa.Utils.Environments import api_base_url, reachable_url
+from auroqa.Utils.LogMasking import mask_secrets
 
 
 class ApiTestExecutor:
@@ -21,6 +23,7 @@ class ApiTestExecutor:
         self.test_case_id = test_case_id
         self.environment_vars = environment_vars or {}
         self.session_variables = {}  # Store variables extracted during test execution
+        self._env_helper = None
         self.test_run_id = None
         self.logger = self._setup_logger()
         self.system = System()
@@ -147,11 +150,18 @@ class ApiTestExecutor:
             
             self.logger.info(f"Executing step {step_order}: {action}")
             
-            # Parse step data from description field (JSON format)
-            try:
-                step_data = json.loads(step['description']) if step['description'] else {}
-            except json.JSONDecodeError:
-                # If description is not JSON, treat it as a simple description
+            # The request is JSON in the description (how generated API steps store it) or,
+            # when the description is plain text, in the value (the format of api_request steps in UI tests)
+            step_data = None
+            for field in ('description', 'value'):
+                try:
+                    parsed = json.loads(step.get(field) or '')
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(parsed, dict):
+                    step_data = parsed
+                    break
+            if step_data is None:
                 step_data = {'description': step['description']}
             
             # Handle different action types
@@ -185,17 +195,16 @@ class ApiTestExecutor:
             extract_variables = step_data.get('extract_variables', {})
             
             # Log available variables before substitution
+            # Names only: the values include the access token
             self.logger.info(f"🔍 Available session variables: {list(self.session_variables.keys())}")
-            if self.session_variables:
-                self.logger.info(f"📦 Session variable values: {self.session_variables}")
             
             # Substitute variables in endpoint
             self.logger.info(f"🔧 Original endpoint: {endpoint}")
             endpoint = self._substitute_variables(endpoint)
             self.logger.info(f"🔧 After substitution: {endpoint}")
             
-            # Build full URL
-            base_url = self.environment_vars.get('base_url', '').rstrip('/')
+            # Build full URL: a relative endpoint goes to the environment's API address
+            base_url = api_base_url(self.environment_vars)
             if not endpoint.startswith('http'):
                 url = f"{base_url}{endpoint}"
             else:
@@ -225,17 +234,20 @@ class ApiTestExecutor:
             self.logger.info("=" * 80)
             self.logger.info(f"📍 URL: {url}")
             self.logger.info(f"🔧 Method: {method}")
-            self.logger.info(f"📋 Headers: {headers}")
+            self.logger.info(f"📋 Headers: {mask_secrets(headers)}")
             if params:
-                self.logger.info(f"🔗 Query Params: {params}")
+                self.logger.info(f"🔗 Query Params: {mask_secrets(params)}")
             if body:
-                self.logger.info(f"📦 Request Body: {body}")
+                self.logger.info(f"📦 Request Body: {mask_secrets(body)}")
             self.logger.info("=" * 80)
             
-            # Make the request
+            # Make the request. "localhost" in the address is the user's machine, not this container
+            target_url = reachable_url(url)
+            if target_url != url:
+                self.logger.info(f"📍 Sent to {target_url} (LOCALHOST_ALIAS)")
             response = requests.request(
                 method=method,
-                url=url,
+                url=target_url,
                 headers=headers,
                 params=params if params else None,
                 json=body if isinstance(body, dict) else None,
@@ -248,20 +260,37 @@ class ApiTestExecutor:
             self.logger.info(f"📥 API RESPONSE - Step {step['step_order']}")
             self.logger.info("=" * 80)
             self.logger.info(f"✅ Status Code: {response.status_code}")
-            self.logger.info(f"📄 Response Headers: {dict(response.headers)}")
+            self.logger.info(f"📄 Response Headers: {mask_secrets(dict(response.headers))}")
             try:
                 response_json = response.json()
-                self.logger.info(f"📦 Response Body (JSON): {response_json}")
+                self.logger.info(f"📦 Response Body (JSON): {mask_secrets(response_json)}")
             except:
-                self.logger.info(f"📦 Response Body (Text): {response.text[:500]}")
+                self.logger.info(f"📦 Response Body (Text): {mask_secrets(response.text[:500])}")
             self.logger.info("=" * 80)
             
-            # Check expected status
-            if response.status_code != expected_status:
+            # Check expected status. During generation the step may accept any success status: the
+            # schema often says 200 where the API answers 201, and the real one is then saved in the step
+            try:
+                both_success = 200 <= int(expected_status) < 300 and 200 <= response.status_code < 300
+            except (TypeError, ValueError):
+                both_success = False
+            if response.status_code != expected_status and not (step_data.get('any_success_status') and both_success):
                 return {
                     'success': False,
                     'step_order': step['step_order'],
-                    'error': f"Expected status {expected_status}, got {response.status_code}",
+                    'error': f"Expected status {expected_status}, got {response.status_code}"
+                             f" ({self._status_mismatch_hint(expected_status, response.status_code, method)})",
+                    'response_status': response.status_code,
+                    'response_body': response.text[:500]
+                }
+            
+            # Compare the response with the values the step expects: {"$.name": "expected"}
+            mismatches = self._response_mismatches(response, step_data.get('expect'))
+            if mismatches:
+                return {
+                    'success': False,
+                    'step_order': step['step_order'],
+                    'error': "Response does not match: " + "; ".join(mismatches),
                     'response_status': response.status_code,
                     'response_body': response.text[:500]
                 }
@@ -283,10 +312,17 @@ class ApiTestExecutor:
             
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Network error: {str(e)}")
+            # The usual cause on a local stand: the request leaves from the Debuggo server, not from the
+            # user's machine or the test browser, so "localhost" is the server itself
+            hint = ''
+            if 'url' in locals() and reachable_url(url) == url and re.match(r'https?://(localhost|127\.0\.0\.1)[:/]', url):
+                hint = (" API requests are sent by the Debuggo server, where localhost is the server itself."
+                        " Set the environment's API URL to an address the server can reach, or set LOCALHOST_ALIAS"
+                        " for the backend to the host that stands for this machine (host.docker.internal in Docker).")
             return {
                 'success': False,
                 'step_order': step['step_order'],
-                'error': f"Network error: {str(e)}",
+                'error': f"Network error: cannot reach {url if 'url' in locals() else 'the API'}.{hint} Details: {str(e)}",
                 'actual_url': url if 'url' in locals() else None,
                 'method': method if 'method' in locals() else None
             }
@@ -300,6 +336,29 @@ class ApiTestExecutor:
                 'method': method if 'method' in locals() else None
             }
     
+    @staticmethod
+    def _status_mismatch_hint(expected: int, actual: int, method: str = '') -> str:
+        """What an unexpected status most likely means: who has to change, the test or the API description."""
+        try:
+            expected, actual = int(expected), int(actual)
+        except (TypeError, ValueError):
+            return "unexpected status"
+        if 200 <= actual < 300 and 200 <= expected < 300:
+            return "the call succeeded with another success status: the expected status of the step or the API schema is out of date"
+        if actual in (401, 403):
+            return "not authorized: check the login step and the environment's login, password and role"
+        if actual in (400, 422):
+            return "the API rejected the request data: fix the body or parameters of the step, see the response"
+        if actual == 404:
+            return "not found: check the endpoint and the ids passed from earlier steps"
+        if actual == 409 and str(method).upper() == 'DELETE':
+            return "conflict: the item is still used by something else, which must be deleted first or cannot be deleted at all"
+        if actual == 409:
+            return "conflict: the item probably exists already, for example left by an earlier failed run"
+        if actual >= 500:
+            return "server error in the API under test, see the response"
+        return "see the response"
+
     def _execute_wait(self, step: Dict[str, Any], step_data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a wait step."""
         import time
@@ -367,9 +426,11 @@ class ApiTestExecutor:
         
         # First, use EnvHelper to process all %placeholder% variables
         # This handles %random_name%, %random_email%, %unique_name:Type%, etc.
-        from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
-        env_helper = EnvHelper(self.environment_vars)
-        result = env_helper.process_variables(result)
+        # One helper per test run: a generated value (%random_email%, %unique_name%) is the same in every step
+        if self._env_helper is None:
+            from auroqa.Utils.BrowserAutomation.EnvHelper import EnvHelper
+            self._env_helper = EnvHelper(self.environment_vars)
+        result = self._env_helper.process_variables(result)
         
         # Phase 1.5: Use VariableManager for scoped variable substitution
         if self.variable_manager:
@@ -401,7 +462,7 @@ class ApiTestExecutor:
         
         # Substitute environment variables (support both {{}} and %% syntax)
         for key, value in self.environment_vars.items():
-            if key != 'custom_variables':  # Skip the custom_variables dict
+            if key != 'custom_variables' and value is not None:  # Skip the custom_variables dict and unset values
                 result = result.replace(f'{{{{{key}}}}}', str(value))
                 result = result.replace(f'%{key}%', str(value))
         
@@ -449,7 +510,7 @@ class ApiTestExecutor:
                 value = self._get_nested_value(response_data, path)
                 if value is not None:
                     self.session_variables[var_name] = value
-                    self.logger.info(f"✅ Extracted {var_name} = {str(value)[:50]}...")
+                    self.logger.info(f"✅ Extracted {var_name} = {mask_secrets({var_name: str(value)[:50]})[var_name]}")
                     
                     # Create token aliases for common authentication token names
                     # This ensures {{access_token}}, {{token}}, and {{auth_token}} all work
@@ -467,6 +528,23 @@ class ApiTestExecutor:
         except Exception as e:
             self.logger.warning(f"Could not extract variables from response: {str(e)}")
     
+    def _response_mismatches(self, response: requests.Response, expect: Any) -> List[str]:
+        """Differences between the response and the step's "expect" ({"$.path": value}); empty when it matches."""
+        if not isinstance(expect, dict) or not expect:
+            return []
+        try:
+            data = response.json()
+        except ValueError:
+            return ["the response is not JSON"]
+        mismatches = []
+        for path, expected in expect.items():
+            if isinstance(expected, str):
+                expected = self._substitute_variables(expected)
+            actual = self._get_nested_value(data, path)
+            if actual != expected and str(actual) != str(expected):
+                mismatches.append(f"{path} is {json.dumps(actual)}, expected {json.dumps(expected)}")
+        return mismatches
+
     def _get_nested_value(self, data: Any, path: str) -> Any:
         """Get nested value from dict using dot notation or JSONPath."""
         # Remove JSONPath prefix if present
@@ -626,6 +704,9 @@ def run_api_test_case(test_case_id: int, environment_vars: Optional[Dict[str, An
         # Without a base URL every relative endpoint would fail with an unreadable network error
         result = {'success': False, 'test_run_id': None, 'error': 'API tests require an environment'}
     else:
+        # In an API test %base_url% means the API: an environment that has a separate API address
+        # (base_url is then the UI) must not send the requests to the UI
+        environment_vars = {**environment_vars, 'base_url': api_base_url(environment_vars)}
         executor = ApiTestExecutor(test_case_id=test_case_id, environment_vars=environment_vars,
                                    environment_id=environment_id)
         result = executor.execute_test_case(execution_id=execution_id)

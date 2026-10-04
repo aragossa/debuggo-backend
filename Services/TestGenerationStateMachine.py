@@ -107,17 +107,22 @@ class TestGenerationStateMachine:
                 Event.GENERATE: State.GENERATE,
                 Event.ERROR: State.ERROR,
             },
+            # NEXT from the middle of a step: the step ended without LEARN (a duplicate that was
+            # skipped, a step fixed by error recovery, a step that could not be made to pass)
             State.GENERATE: {
                 Event.VALIDATE: State.VALIDATE,
+                Event.NEXT: State.NEXT_STEP,
                 Event.ERROR: State.ERROR,
             },
             State.VALIDATE: {
                 Event.EXECUTE: State.EXECUTE,
                 Event.REGENERATE: State.GENERATE,
+                Event.NEXT: State.NEXT_STEP,
                 Event.ERROR: State.ERROR,
             },
             State.EXECUTE: {
                 Event.LEARN: State.LEARN,
+                Event.NEXT: State.NEXT_STEP,
                 Event.COMPLETE: State.COMPLETE,  # stop_test ends the test right after execution
                 Event.ERROR: State.ERROR,
             },

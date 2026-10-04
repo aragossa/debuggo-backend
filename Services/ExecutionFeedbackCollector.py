@@ -7,6 +7,7 @@ Categorizes errors and generates suggestions for improvement.
 
 import logging
 import json
+import traceback
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -177,7 +178,7 @@ class ExecutionFeedbackCollector:
         error_details = {
             'exception_type': error_type,
             'exception_message': error_message,
-            'traceback': getattr(error, '__traceback__', None)
+            'traceback': ''.join(traceback.format_exception(type(error), error, error.__traceback__))
         }
         
         record = FailureRecord(

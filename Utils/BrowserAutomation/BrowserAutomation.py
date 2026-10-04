@@ -9,6 +9,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException, NoA
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.remote.file_detector import LocalFileDetector
+import json
 import logging
 import sys
 import os
@@ -65,6 +66,8 @@ class BrowserAutomation:
             # Keep a native alert open until a step handles it. The default ("dismiss and notify")
             # closes it on the next command, so accept_alert/assert_alert_text would find nothing
             chrome_options.set_capability('unhandledPromptBehavior', 'ignore')
+            # The requests of the page go to Chrome's performance log, read by drain_network_log()
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
             # Get system configuration for Selenium Grid URL
             system = System()
@@ -122,6 +125,48 @@ class BrowserAutomation:
             
             self.logger.error(f"[PID:{self.pid}] Failed to navigate to {url}: {str(e)}")
             raise
+
+    def clear_http_cache(self):
+        """
+        Empty the browser's HTTP cache. Cookies and storage do not cover it: a response sent with
+        Cache-Control: max-age is reused without a request, so a page opened again shows old data.
+        """
+        try:
+            self.driver.execute("executeCdpCommand", {"cmd": "Network.clearBrowserCache", "params": {}})
+            self.logger.info(f"[PID:{self.pid}] HTTP cache cleared")
+            return True
+        except Exception as e:
+            self.logger.warning(f"[PID:{self.pid}] Could not clear the HTTP cache: {str(e)}")
+            return False
+
+    def drain_network_log(self):
+        """
+        The XHR/fetch requests the page has sent since the last call: [(method, url, status)].
+        status is None for a request whose response has not arrived yet when the log is read
+        and never arrives later. Reading the log empties it, so this is called after every step.
+        """
+        if not hasattr(self, '_net_pending'):
+            self._net_pending = {}  # request id -> (method, url): sent, response not seen yet
+        finished = []
+        for entry in self.driver.get_log('performance'):
+            try:
+                message = json.loads(entry['message'])['message']
+            except (KeyError, ValueError, TypeError):
+                continue
+            params = message.get('params') or {}
+            if message.get('method') == 'Network.requestWillBeSent':
+                request = params.get('request') or {}
+                if params.get('type') in ('XHR', 'Fetch') and request.get('method') != 'OPTIONS':
+                    self._net_pending[params.get('requestId')] = (request.get('method', 'GET'), request.get('url', ''))
+            elif message.get('method') == 'Network.responseReceived':
+                sent = self._net_pending.pop(params.get('requestId'), None)
+                if sent:
+                    finished.append((sent[0], sent[1], (params.get('response') or {}).get('status')))
+            elif message.get('method') == 'Network.loadingFailed':
+                sent = self._net_pending.pop(params.get('requestId'), None)
+                if sent:
+                    finished.append((sent[0], sent[1], None))
+        return finished
 
     def wait_for_page_load(self, timeout=None):
         """
@@ -228,16 +273,8 @@ class BrowserAutomation:
                             return element
                         except TimeoutException:
                             self.logger.warning(f"[PID:{self.pid}] Element not clickable, trying JavaScript fallback...")
-                    else:
-                        # For type, wait, etc. - just need element to be present and visible
-                        try:
-                            self.logger.info(f"[PID:{self.pid}] Trying with visibility_of_element_located for {action or 'unknown'} action...")
-                            element = WebDriverWait(self.driver, self.timeout).until(
-                                EC.visibility_of_element_located((by_strategy, selector))
-                            )
-                            return element
-                        except TimeoutException:
-                            self.logger.warning(f"[PID:{self.pid}] Element not visible, trying JavaScript fallback...")
+                    # Other actions: the element is not in the DOM, so waiting for it to become
+                    # visible would only repeat the wait that has just timed out
                     
                     # Last resort: try with JavaScript
                     self.logger.info(f"[PID:{self.pid}] Trying with JavaScript...")
@@ -387,7 +424,9 @@ class BrowserAutomation:
             element = self.find_element(selector, by, action='type')
             element.clear()
             element.send_keys(text)
-            self.logger.info(f"[PID:{self.pid}] Typed text: {text} into element: {selector}")
+            # What goes into a password field stays out of the log
+            shown = '***' if (element.get_attribute('type') or '').lower() == 'password' else text
+            self.logger.info(f"[PID:{self.pid}] Typed text: {shown} into element: {selector}")
         except Exception as e:
             self.logger.error(f"[PID:{self.pid}] Failed to type text into element {selector}: {str(e)}")
             raise
@@ -967,6 +1006,14 @@ class BrowserAutomation:
             selector (str, optional): Specific element selector to debug
             by (str): Selector type - 'xpath' or 'css' (default: 'xpath')
         """
+        # Nothing here waits for an element: with the implicit wait every empty lookup costs 5 seconds
+        self.driver.implicitly_wait(0)
+        try:
+            self._debug_page_structure(selector, by)
+        finally:
+            self.driver.implicitly_wait(5)
+
+    def _debug_page_structure(self, selector=None, by='xpath'):
         self.logger.info(f"[PID:{self.pid}] === DEBUG PAGE STRUCTURE ===")
         self.logger.info(f"[PID:{self.pid}] Current URL: {self.driver.current_url}")
         self.logger.info(f"[PID:{self.pid}] Page Title: {self.driver.title}")

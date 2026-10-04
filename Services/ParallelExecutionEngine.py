@@ -521,28 +521,8 @@ class ParallelExecutionEngine:
     def _get_environment_vars(self, environment_id: int) -> Optional[Dict]:
         """Get environment variables for an environment"""
         try:
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT base_url, login, password, custom_variables
-                        FROM environments
-                        WHERE id = %s
-                        """,
-                        (environment_id,)
-                    )
-                    result = cursor.fetchone()
-                    if result:
-                        return {
-                            'base_url': result[0],
-                            'login': result[1],
-                            'password': result[2],
-                            'custom_variables': result[3] or {}
-                        }
-                    return None
-            finally:
-                return_db_connection(conn)
+            from auroqa.Utils.Environments import load_environment_vars
+            return load_environment_vars(environment_id)
         except Exception as e:
             self.logger.error(f"Error getting environment vars: {e}")
             return None
