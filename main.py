@@ -2516,13 +2516,42 @@ async def update_project(
         if conn:
             return_db_connection(conn)
 
-@app.delete("/api/projects/{project_id}")
-async def delete_project(
+@app.get("/api/projects/{project_id}/contents")
+async def get_project_contents(
     project_id: str,
     current_user: User = Depends(get_current_user)
 ):
+    """How much a project holds, for the dialog that asks what to delete with it."""
+    with get_db_connection_context() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id FROM projects WHERE id = %s AND client_id = %s",
+                           (project_id, str(current_user.client_id)))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Project not found")
+            cursor.execute("""
+                SELECT (SELECT COUNT(*) FROM test_cases WHERE project_id = %(p)s AND type = 'test'),
+                       (SELECT COUNT(*) FROM test_cases WHERE project_id = %(p)s AND type = 'group'),
+                       (SELECT COUNT(*) FROM test_runs r JOIN test_cases tc ON tc.id = r.test_case_id
+                        WHERE tc.project_id = %(p)s),
+                       (SELECT COUNT(*) FROM environments WHERE project_id = %(p)s),
+                       (SELECT COUNT(*) FROM api_schemas WHERE project_id = %(p)s),
+                       (SELECT COUNT(*) FROM test_suites WHERE project_id = %(p)s)
+            """, {'p': project_id})
+            tests, groups, runs, environments, schemas, suites = cursor.fetchone()
+    return {"tests": tests, "groups": groups, "runs": runs, "environments": environments,
+            "api_schemas": schemas, "suites": suites}
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(
+    project_id: str,
+    delete_tests: bool = False,
+    current_user: User = Depends(get_current_user)
+):
     """
-    Delete a specific project by ID.
+    Delete a specific project by ID. Its environments, API schemas, suites and plans go with it.
+    Its test cases are unassigned and kept, unless delete_tests is set: then they are deleted too,
+    with their folders, steps and run history.
     """
     conn = None
     try:
@@ -2541,6 +2570,19 @@ async def delete_project(
                     status_code=404,
                     detail="Project not found"
                 )
+
+            deleted_tests = 0
+            if delete_tests:
+                # Steps, runs, results and the tests inside a folder follow by ON DELETE CASCADE
+                cursor.execute(
+                    "SELECT COUNT(*) FROM test_cases WHERE project_id = %s AND client_id = %s AND type = 'test'",
+                    (project_id, str(current_user.client_id))
+                )
+                deleted_tests = cursor.fetchone()[0]
+                cursor.execute(
+                    "DELETE FROM test_cases WHERE project_id = %s AND client_id = %s",
+                    (project_id, str(current_user.client_id))
+                )
             
             # Delete project
             cursor.execute(
@@ -2552,7 +2594,9 @@ async def delete_project(
             )
             conn.commit()
             
-            return {"message": "Project deleted successfully"}
+            return {"message": "Project deleted successfully", "deleted_tests": deleted_tests}
+    except HTTPException:
+        raise
     except Exception as e:
         if conn:
             conn.rollback()
