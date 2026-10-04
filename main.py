@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, UUID4
 from datetime import datetime
 import psycopg2
@@ -176,6 +176,9 @@ class CreateTestGroupRequest(BaseModel):
     name: str
     parent_id: Optional[int] = None
     project_id: Optional[UUID4] = None
+    # 'ui' or 'api': the section of the tree an empty group is shown in.
+    # Not given: the type of the parent group, 'ui' for a top-level group.
+    test_type: Optional[Literal['ui', 'api']] = None
 
 class UpdateTestGroupRequest(BaseModel):
     name: str
@@ -704,8 +707,10 @@ async def get_tests_tree(current_user: User = Depends(get_current_user)):
                                     'children': api_children
                                 }
                                 api_items.append(api_group_copy)
+                        elif item.get('test_type') == 'api':
+                            # Empty group - placed by its own type
+                            api_items.append(item)
                         else:
-                            # Empty group - default to UI
                             ui_items.append(item)
                     else:
                         # Other types (root, etc.) - default to UI
@@ -2741,8 +2746,10 @@ async def get_project_test_tree(
                                     'children': api_children
                                 }
                                 api_items.append(api_group_copy)
+                        elif item.get('test_type') == 'api':
+                            # Empty group - placed by its own type
+                            api_items.append(item)
                         else:
-                            # Empty group - default to UI
                             ui_items.append(item)
                     else:
                         # Other types (root, etc.) - default to UI
@@ -3429,9 +3436,10 @@ async def create_test_group(
     try:
         with conn.cursor() as cur:
             # Check if the parent exists and is a valid group or root
+            parent_test_type = None
             if request_data.parent_id:
                 cur.execute(
-                    "SELECT type FROM test_cases WHERE id = %s",
+                    "SELECT type, test_type FROM test_cases WHERE id = %s",
                     (request_data.parent_id,)
                 )
                 parent = cur.fetchone()
@@ -3445,6 +3453,9 @@ async def create_test_group(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Parent must be a group or root"
                     )
+                parent_test_type = parent[1]
+
+            test_type = request_data.test_type or parent_test_type or 'ui'
             
             # Convert UUID to string for database storage
             project_id_str = str(request_data.project_id) if request_data.project_id else None
@@ -3458,15 +3469,16 @@ async def create_test_group(
             # Insert the new group
             cur.execute(
                 """
-                INSERT INTO test_cases (name, parent_id, type, "order", client_id, project_id)
-                VALUES (%s, %s, 'group', 1, %s, %s)
-                RETURNING id, name, parent_id, type, "order", created_at, updated_at, project_id
+                INSERT INTO test_cases (name, parent_id, type, "order", client_id, project_id, test_type)
+                VALUES (%s, %s, 'group', 1, %s, %s, %s)
+                RETURNING id, name, parent_id, type, "order", created_at, updated_at, project_id, test_type
                 """,
                 (
                     request_data.name,
                     request_data.parent_id,
                     client_id_str,
-                    project_id_str
+                    project_id_str,
+                    test_type
                 )
             )
             group = cur.fetchone()
@@ -3485,7 +3497,8 @@ async def create_test_group(
                 "order": group[4],
                 "created_at": group[5].isoformat() if group[5] else None,
                 "updated_at": group[6].isoformat() if group[6] else None,
-                "project_id": group[7]
+                "project_id": group[7],
+                "test_type": group[8]
             }
     except Exception as e:
         conn.rollback()
